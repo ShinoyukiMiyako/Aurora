@@ -47,6 +47,40 @@ describe("焦点归还", () => {
     expect(document.activeElement).toBe(byText("继续导入"));
   });
 
+  // 确认框叠在弹窗上，确认后整个流程关掉：底层弹窗整层带 inert 开始退场，它的归还点先把焦点还给页面上打开它的按钮。
+  // 确认框记下的是底层底栏的按钮，在 inert 层里接不住；不能退到底层弹窗本身（浏览器拒绝聚焦，jsdom 会聚焦上去），
+  // 也不能退到内容区，那会把焦点从页面按钮上抢走
+  it("原焦点元素与它所在的整个弹窗都在退场：不动焦点，留给底层弹窗的归还", () => {
+    const handles: { open?: () => void; closeAll?: () => void } = {};
+    function Host() {
+      const [confirm, setConfirm] = useState(false);
+      const [leaving, setLeaving] = useState(false);
+      handles.open = () => setConfirm(true);
+      handles.closeAll = () => {
+        byText("打开流程").focus();
+        setLeaving(true);
+        setConfirm(false);
+      };
+      return (
+        <div>
+          <button>打开流程</button>
+          <div role="dialog" tabIndex={-1} inert={leaving}>
+            <button>下一步</button>
+          </div>
+          <FocusReturnPoint active={confirm} />
+          {confirm && <button>确认</button>}
+        </div>
+      );
+    }
+    view = render(<Host />);
+    act(() => byText("下一步").focus());
+    act(() => handles.open?.());
+    act(() => byText("确认").focus());
+    act(() => handles.closeAll?.());
+    expect(byText("下一步").closest("[inert]")).not.toBeNull();
+    expect(document.activeElement).toBe(byText("打开流程"));
+  });
+
   it("原焦点元素可用：照常还给它", () => {
     const handles: { open?: () => void; close?: () => void } = {};
     function Host() {

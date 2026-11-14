@@ -1,16 +1,35 @@
 // @vitest-environment jsdom
 import { readFileSync } from "node:fs";
 import { MotionConfig, type MotionValue } from "framer-motion";
-import { afterEach, describe, expect, it } from "vitest";
-import { render, waitForFrames, type Rendered } from "../test/dom";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { drainFrames, render, stepFrames, waitForFrames, type Rendered } from "../test/dom";
 import { fillOffset, MIN_VISIBLE_PROGRESS, nextProgressTarget, ProgressBar, useSmoothProgress } from "./ProgressBar";
 import { ProgressRing, RING_EMPTY_TEXT, RING_PLACEHOLDER, RING_STROKE, ringHasLabel } from "./ProgressRing";
 
 let view: Rendered | undefined;
-afterEach(() => {
+/** 这个用例的帧跟着假时钟走（startFrameClock）：收尾先卸载、再在假时钟上把帧循环排空，才换回真实计时器。 */
+let frameClock = false;
+afterEach(async () => {
   view?.unmount();
   view = undefined;
+  if (frameClock) await drainFrames();
+  frameClock = false;
+  vi.useRealTimers();
 });
+
+/**
+ * 逐帧数填充走过几个中间值的用例让帧跟着假时钟走，用 stepFrames 逐帧推进。按真实时间走的话，机器满载时帧来得稀，
+ * 弹簧落定之前录到的中间帧就少；弹簧起步那一帧与下一帧隔得比整段平滑还长时，一个中间值也录不到。
+ * 换之前先在真实计时器上把帧循环排空（见 test/dom 的 drainFrames）。
+ */
+async function startFrameClock() {
+  await drainFrames();
+  vi.useFakeTimers();
+  frameClock = true;
+}
+
+/** 进度平滑（settle 弹簧）在这么多帧（约 1 秒）之内落定。 */
+const SETTLE_FRAMES = 60;
 
 describe("进度推演", () => {
   it("同一标识内只增不减：小于当前目标的新值被忽略", () => {
@@ -208,6 +227,7 @@ describe("ProgressBar", () => {
   });
 
   it("首批快照就到 100%（一次下完的小文件）：填充从空一帧帧走到满格，不从空直接跳满", async () => {
+    await startFrameClock();
     const at = (value: number, track: string) => (
       <MotionConfig reducedMotion="never">
         <ProgressBar value={value} track={track} label="安装" />
@@ -223,13 +243,17 @@ describe("ProgressBar", () => {
     observer.observe(fill, { attributes: true, attributeFilter: ["style"] });
     view.rerender(at(1, "t#1:512:1"));
     expect(bar().getAttribute("aria-valuenow")).toBe("100");
-    await waitForFrames(() => expect(offset()).toBe(0));
+    await stepFrames(SETTLE_FRAMES);
+    expect(offset()).toBe(0);
     observer.disconnect();
-    expect(offsets.filter((o) => o > -100 && o < -1).length).toBeGreaterThan(2);
+    // 一帧一个中间值，只往满格走、不回退
+    expect(offsets.filter((o) => o > -100 && o < -1).length).toBeGreaterThan(5);
+    for (let i = 1; i < offsets.length; i++) expect(offsets[i]).toBeGreaterThanOrEqual(offsets[i - 1]);
   });
 
   // 最少显示长度要是加在逐帧平滑之后，弹簧离开 0 的第一帧就一下冒出 2% 那一截
   it("起步时填充从空一帧帧长到最少显示的 2%，不一下冒出那一截；读屏仍报原值", async () => {
+    await startFrameClock();
     const at = (value: number) => (
       <MotionConfig reducedMotion="never">
         <ProgressBar value={value} track="t#1" label="安装" />
@@ -244,9 +268,13 @@ describe("ProgressBar", () => {
     observer.observe(fill, { attributes: true, attributeFilter: ["style"] });
     view.rerender(at(0.005));
     expect(bar().getAttribute("aria-valuenow")).toBe("1");
-    await waitForFrames(() => expect(offset()).toBeCloseTo(-98, 3));
+    await stepFrames(SETTLE_FRAMES);
+    expect(offset()).toBeCloseTo(-98, 3);
     observer.disconnect();
-    expect(offsets.filter((o) => o > -100 && o < -98.01).length).toBeGreaterThan(2);
+    // 动起来的第一帧只长出那一截的零头，之后一帧帧长上去
+    expect(offsets[0]).toBeGreaterThan(-100);
+    expect(offsets[0]).toBeLessThan(-99);
+    expect(offsets.filter((o) => o > -100 && o < -98.01).length).toBeGreaterThan(5);
   });
 
   it("不定进度：没有 aria-valuenow，只有一条光带", () => {

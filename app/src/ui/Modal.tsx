@@ -3,6 +3,9 @@
 //
 // - 打开时焦点进入：带 data-autofocus（或 autoFocus）的子元素优先，否则聚焦弹窗本身；Tab 在弹窗内循环；
 //   关闭后焦点还给打开前的元素；它已不在文档中时落到它所在的区域（见 focus-return.tsx）。
+// - 退场一开始（open 变 false，或父级 AnimatePresence 开始退场）整层带 inert，焦点当场归还：退场中的面板画的是关上
+//   那一刻的样子，处理函数也停在那一刻，按钮还接得住回车、空格或点击的话，没有自带判断的动作（复制并打开网页）会再跑一次。
+//   归还没有着落（打开前焦点在 body 上）时由浏览器把焦点从 inert 子树挪回 body，读屏也不再读到它。
 // - closeOnScrim（默认 true）：展示类点遮罩关闭；含输入的流程类传 false，点遮罩不关，Esc 与关闭按钮照常可关。
 //   遮罩点击只在指针按下与抬起都落在遮罩上时成立，在弹窗里拖选文字、松手落在遮罩上不会误关。
 // - dismissible=false 只用于误关会丢失不可恢复进度的流程：Esc 与点遮罩无效、不显示关闭按钮，底栏必须有显式的取消。
@@ -120,18 +123,20 @@ export function Modal(props: ModalProps) {
   // 退场期间每次重渲染都会把「退场中的旧弹窗」与「仍在场的新弹窗」并排渲染成两个同 key 的子元素。
   // 父级退场即视同关闭，只留退场中的那一份。没有父级 AnimatePresence 时 useIsPresent 恒为 true。
   const parentPresent = useIsPresent();
+  // 父级退场与 open 变 false 一样当场算关上：退场要播几帧，期间弹窗已不可操作，Esc 与全局快捷键不该还被它挡着，
+  // 焦点也要当场归还，不等退场播完、整个组件卸载
+  const showing = open && parentPresent;
   // 弹窗框还挂着（开着，或关上后退场还没播完）：只有这时才有东西要随父级退场
   const [framed, setFramed] = useState(open);
   if (open && !framed) setFramed(true);
-  // 父级退场与 open 变 false 一样立即撤层：退场要播几帧，期间弹窗已不可操作，Esc 与全局快捷键不该还被它挡着
-  useEscapeLayer(open && parentPresent, onClose, { kind: "modal", dismissible });
+  useEscapeLayer(showing, onClose, { kind: "modal", dismissible });
   return (
     <>
-      <FocusReturnPoint active={open} />
+      <FocusReturnPoint active={showing} />
       {root &&
         createPortal(
           <AnimatePresence propagate={framed} onExitComplete={() => setFramed(false)}>
-            {open && parentPresent && <ModalFrame key={generation} {...props} />}
+            {showing && <ModalFrame key={generation} {...props} />}
           </AnimatePresence>,
           root,
         )}
@@ -193,14 +198,15 @@ function ModalFrame({
     setStacked(below.length > 0);
   }, []);
 
-  // 换了请求要重做：新的危险确认原地换上来时，焦点还停在旧请求的确认键上，回车就执行了不可逆的操作
+  // 换了请求要重做：新的危险确认原地换上来时，焦点还停在旧请求的确认键上，回车就执行了不可逆的操作。
+  // 退场途中被父级接回（同一个 key 回到 AnimatePresence 里）也重做：开始退场时焦点已经还了出去
   useLayoutEffect(() => {
     const box = boxRef.current;
-    if (!box) return;
+    if (!box || !present) return;
     const marked = box.querySelector<HTMLElement>(`[${AUTOFOCUS_ATTR}]`);
     if (marked) marked.focus();
     else if (!box.contains(document.activeElement)) box.focus();
-  }, [requestKey]);
+  }, [requestKey, present]);
 
   const scrimClosable = closeOnScrim && dismissible;
   const onScrimPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -228,6 +234,7 @@ function ModalFrame({
       className={styles.layer}
       data-sk-modal-layer=""
       data-exiting={present ? undefined : ""}
+      inert={!present}
       data-stacked={stacked || undefined}
     >
       <motion.div

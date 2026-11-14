@@ -379,6 +379,20 @@
   gap: var(--sk-space-14);
 }
 
+/*
+ * 地址提示的量行数副本：放在地址框所在 Field 的控件位里，与播报区同宽，字号、字重、行高照播报区写，排出的行数才一样。
+ * 自身高 0、裁掉内容、不可见，不改变字段的高度；严格包含，改字之后读它的高度只重排这一小块
+ */
+.hintProbe {
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  contain: strict;
+  font-size: var(--sk-fs-caption);
+  font-weight: var(--sk-w-body);
+  line-height: var(--sk-lh-caption);
+}
+
 .stepper {
   display: flex;
   gap: var(--sk-space-16);

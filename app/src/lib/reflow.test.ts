@@ -2260,6 +2260,52 @@ describe("等待队列：到期时的回调抛异常", () => {
     expect(lift.animation.startTime).toBe(timelineTime);
     expect(frameQueue).toHaveLength(0);
   });
+
+  it("让位接续到期换成整段时建动画抛异常：留着位移的那一截当场取消、登记当场清掉；取消事件派发之前再被挤，从元素此刻的实际位置（新排布）静止起步", () => {
+    const { a, b } = column();
+    place(b, { top: 220 });
+    sizes.resize(a, 800);
+    frame();
+    callsOn(b)[0].animation.currentTime = 20 + Math.random() * 200;
+    place(b, { top: 260 });
+    sizes.resize(a, 800);
+    const held = callsOn(b)[1];
+    expect(held.options.fill).toBe("both");
+    const animate = HTMLElement.prototype.animate;
+    const refused = new TypeError("关键帧不合法");
+    Object.defineProperty(HTMLElement.prototype, "animate", {
+      configurable: true,
+      writable: true,
+      value(this: HTMLElement, frames: Keyframe[], options: KeyframeAnimationOptions) {
+        if (this === b) throw refused;
+        return animate.call(this, frames, options);
+      },
+    });
+    timelineTime += 1000 / 60;
+    expect(thrownBy(frame)).toBe(refused);
+    // 留着位移的那一截已取消：b 此刻没有任何位移，就在新排布的 260 上
+    expect(held.animation.cancel).toHaveBeenCalledTimes(1);
+    expect(held.animation.playState).toBe("idle");
+    Object.defineProperty(HTMLElement.prototype, "animate", { configurable: true, writable: true, value: animate });
+    // 取消事件还没派发（held.animation.oncancel 没调）就又被往下挤
+    const push = 10 + Math.round(Math.random() * 90);
+    place(b, { top: 260 + push });
+    sizes.resize(a, 800);
+    expect(callsOn(b)).toHaveLength(3);
+    const next = callsOn(b)[2];
+    // 起点就是这一趟挤出来的位移：不拿已取消那一截记下的位置与速度接着走，也不把它留着的位移累加进来
+    expect(start(next)).toBe(`0px ${-push}px`);
+    expect(next.frames.at(-1)?.translate).toBe("0px 0px");
+    // 静止起步：停在起点等新排布画出来，起步时刻不钉
+    expect(next.animation.playState).toBe("paused");
+    expect(next.animation.startTime).toBeNull();
+    expect(next.options.fill).toBe("auto");
+    // 已取消的那一截不再被当成要顶替的旧轨迹再取消一次
+    expect(held.animation.cancel).toHaveBeenCalledTimes(1);
+    frame();
+    expect(next.animation.play).toHaveBeenCalledTimes(1);
+    expect(frameQueue).toHaveLength(0);
+  });
 });
 
 describe("followReflow", () => {

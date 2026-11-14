@@ -110,8 +110,14 @@ async function mount({ presence = false, reduced = false }: { presence?: boolean
 
 const dialog = () => document.querySelector<HTMLElement>("[role='dialog']");
 const title = () => dialog()?.querySelector("h2")?.textContent;
-/** 换内容后旧内容带着 inert 淡出，jsdom 里退场播不完会一直留着：找按钮、输入框、文字都只认没在退场的。 */
-const live = (el: Element) => el.closest("[inert]") === null;
+/**
+ * 换内容后旧内容带着 inert 淡出，jsdom 里退场播不完会一直留着：找按钮、输入框、文字都只认没在退场的。
+ * 整个弹窗关上后退场时整层也带 inert（弹窗层自己）：断言退场中的面板画成什么样的用例要找的是它里面当前的内容，这一层不算。
+ */
+const live = (el: Element) => {
+  const leaving = el.closest("[inert]");
+  return leaving === null || leaving.hasAttribute("data-sk-modal-layer");
+};
 /** 按钮上显示的文案：会换文案的按钮把几条候选叠在同一格里，只认当前这条。 */
 const labelOf = (b: HTMLButtonElement) => (b.querySelector("[data-align] > [data-current]") ?? b).textContent;
 const buttons = () => [...document.querySelectorAll<HTMLButtonElement>("[role='dialog'] button")].filter(live);
@@ -321,18 +327,20 @@ describe("离线账户弹窗", () => {
       typeInto(inputs()[0], "Steve");
       pressEnter(inputs()[0]);
       await flush();
-      // 添加动作要等启动回来才落定：此刻弹窗已关、账户已在列表里，提交还没有结果
+      // 添加动作在账户加上时就已成功落定，接着的启动转到后台、还没回来：弹窗已关、账户已在列表里，
+      // 退场途中保持提交时的样子
       expect(launcher.state.login).toBeNull();
       expect(launcher.state.accounts.map((a) => a.name)).toEqual(["Steve"]);
       expect(callsOf(ipc, "launch_game")).toHaveLength(1);
       expect(nameLine()).toBe(OFFLINE_NAME_COPY.ok);
       expect(button(OFFLINE_NAME_COPY.submit).getAttribute("aria-busy")).toBe("true");
 
-      // 账户加上之后的启动失败：添加动作以失败告终，但弹窗已在退场，不回到可以再填的样子
+      // 账户加上之后的启动失败：只按启动的标题报，碰不到早已落定的添加；退场中的弹窗不回到可以再填的样子
       await act(async () => {
         launching.reject(new Error("启动器进程意外退出"));
         await settle();
       });
+      expect(launcher.state.toasts.filter((t) => t.tone === "error").map((t) => t.title)).toEqual([ACTION_ERROR.launch("生存")]);
       expect(nameLine()).toBe(OFFLINE_NAME_COPY.ok);
       expect(nameMessage().hasAttribute("data-error")).toBe(false);
       const submit = button(OFFLINE_NAME_COPY.submit);
@@ -505,6 +513,50 @@ describe("微软设备码弹窗", () => {
     await flush();
     expect(writeText).toHaveBeenCalledWith("PF7Q-X2LM");
     expect(opened).toEqual(["https://www.microsoft.com/link"]);
+  });
+
+  /**
+   * 按浏览器的样子在焦点所在处按一次回车或空格（同 ui/Modal.test.tsx 的 press）。jsdom 只派发事件，这两样都不做：
+   * 焦点所在的子树带上 inert 后，浏览器在下一个输入事件到来之前把焦点挪回 body；聚焦着的按钮收到没被取消的回车或空格时触发 click。
+   */
+  const press = (key: "Enter" | " ") => {
+    const focused = document.activeElement;
+    if (focused instanceof HTMLElement && focused.closest("[inert]") !== null) act(() => focused.blur());
+    const target = document.activeElement ?? document.body;
+    const down = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    act(() => void target.dispatchEvent(down));
+    if (key === " ") act(() => void target.dispatchEvent(new KeyboardEvent("keyup", { key, bubbles: true, cancelable: true })));
+    if (target instanceof HTMLButtonElement && !target.disabled && !down.defaultPrevented) act(() => target.click());
+  };
+
+  // 退场中的面板处理函数停在关上那一刻：「复制并打开网页」没有自带判断，退场途中还按得到的话会再复制一次、再开一次网页
+  it("关掉登录后的退场途中：整层带 inert，回车与空格不再复制代码、不再打开网页", async () => {
+    pendingLogin();
+    await mount({ presence: true });
+    act(() => void launcher.actions.startMicrosoftLogin());
+    await flush();
+    act(() => emit(DEVICE_CODE_EVENT, code));
+    await flush();
+    const copyAndOpen = button(MICROSOFT_LOGIN_COPY.copyAndOpen);
+    act(() => copyAndOpen.focus());
+    press("Enter");
+    await flush();
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(opened).toEqual(["https://www.microsoft.com/link"]);
+
+    await act(async () => {
+      await launcher.actions.closeLogin();
+    });
+    await flush();
+    expect(launcher.state.login).toBeNull();
+    const layer = copyAndOpen.closest("[data-sk-modal-layer]");
+    expect(layer?.hasAttribute("data-exiting")).toBe(true);
+    press("Enter");
+    press(" ");
+    await flush();
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(opened).toEqual(["https://www.microsoft.com/link"]);
+    expect(layer?.hasAttribute("inert")).toBe(true);
   });
 
   it("获取代码时按拿到代码后的样子占位：两步说明常驻，骨架过了加载门才出现、至少停留同样久，代码到了原位换上", async () => {
@@ -820,6 +872,56 @@ describe("外置登录弹窗", () => {
     const leaving = dialog()?.querySelector("[inert]");
     expect(leaving?.textContent).toContain(AUTHLIB_COPY.notYggdrasil.title);
     expect(liveText()).not.toContain(AUTHLIB_COPY.notYggdrasil.title);
+  });
+
+  it("地址提示在一行与两行之间换折行时弹窗形变；折行不变的逐字输入不重新量布局，也不多出一份提示文字", async () => {
+    await openAuthlib();
+    // jsdom 不排版：只含文字的元素按每行 40 个字、行高 18 排
+    const original = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const text = this.textContent ?? "";
+      if (this.children.length > 0 || text === "") return original.call(this);
+      const rect = { left: 0, top: 0, width: 480, height: Math.ceil(text.length / 40) * 18 };
+      return { ...rect, x: 0, y: 0, right: rect.width, bottom: rect.height, toJSON: () => rect } as DOMRect;
+    });
+    // 提示是「将使用 https://<主机>」：主机 28 个字时整句恰好 40 个字排一行，多一个字就折成两行
+    const host = (length: number) => {
+      const letters = Array.from({ length: length - 4 }, () => String.fromCharCode(97 + Math.floor(Math.random() * 26))).join("");
+      return `${letters}.com`;
+    };
+    const lines = (input: string) => Math.ceil(AUTHLIB_DIALOG_COPY.willUse(`https://${input}`).length / 40);
+    const url = inputs()[0];
+    const key = () => modalLayoutKeys.at(-1);
+    const atOpen = key();
+
+    // 没有提示时播报区预留一行：换成一行的提示，弹窗不变高
+    const oneLine = host(28);
+    expect(lines(oneLine)).toBe(1);
+    typeInto(url, oneLine);
+    expect(liveText()).toContain(AUTHLIB_DIALOG_COPY.willUse(`https://${oneLine}`));
+    expect(key()).toBe(atOpen);
+
+    const twoLines = host(29);
+    expect(lines(twoLines)).toBe(2);
+    typeInto(url, twoLines);
+    const wrapped = key();
+    expect(wrapped).not.toBe(atOpen);
+    expect(dialog()?.textContent?.split(AUTHLIB_DIALOG_COPY.willUse(`https://${twoLines}`)).length).toBe(2);
+
+    // 仍是两行：逐字输入照常重渲染，布局签名不变
+    const stillTwo = host(29 + Math.floor(Math.random() * 40));
+    expect(lines(stillTwo)).toBe(2);
+    typeInto(url, stillTwo);
+    expect(key()).toBe(wrapped);
+
+    // 写全协议，提示撤掉，回到预留的一行
+    typeInto(url, `https://${stillTwo}`);
+    const cleared = key();
+    expect(cleared).not.toBe(wrapped);
+    typeInto(url, oneLine);
+    expect(key()).toBe(cleared);
+    typeInto(url, twoLines);
+    expect(key()).not.toBe(cleared);
   });
 
   it("不是认证服务器时原位说明；换个地址进入登录这一步", async () => {
@@ -1155,7 +1257,7 @@ describe("外置登录弹窗", () => {
       expect(pick.getAttribute("aria-busy")).toBe("true");
       expect(button(AUTHLIB_DIALOG_COPY.back).disabled).toBe(true);
 
-      // 焦点还在这个按钮上：键盘的回车与空格落到它身上就是一次 click
+      // 退场层带 inert，键盘与指针都到不了它；直接派发的 click 仍进处理函数，它停在提交在途的那一刻，照样不再选
       act(() => pick.click());
       await flush();
       expect(callsOf(ipc, "select_authlib_profile")).toHaveLength(1);

@@ -1,16 +1,34 @@
 // @vitest-environment jsdom
-// 整个文件走真实时间：百分数随平滑逐帧走，framer-motion 的帧循环不受假定时器驱动（见 test/dom 的 waitForFrames）。
+// 百分数随平滑逐帧走。数中间值的用例走假时钟（startFrameClock），用 stepFrames 逐帧推进；其余用例走真实时间，用 waitForFrames 等。
 import { MotionConfig, motionValue } from "framer-motion";
 import { act, type ReactNode } from "react";
-import { afterEach, describe, expect, it } from "vitest";
-import { render, waitForFrames, type Rendered } from "../test/dom";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { drainFrames, render, stepFrames, waitForFrames, type Rendered } from "../test/dom";
 import { PercentOf, SmoothPercent } from "./SmoothPercent";
 
 let view: Rendered | undefined;
-afterEach(() => {
+/** 这个用例的帧跟着假时钟走（startFrameClock）：收尾先卸载、再在假时钟上把帧循环排空，才换回真实计时器。 */
+let frameClock = false;
+afterEach(async () => {
   view?.unmount();
   view = undefined;
+  if (frameClock) await drainFrames();
+  frameClock = false;
+  vi.useRealTimers();
 });
+
+/**
+ * 数中间值的用例让帧跟着假时钟走，用 stepFrames 逐帧推进。按真实时间走的话，机器满载时一帧晚到就可能把平滑整段走完，
+ * 一个中间值也录不到。换之前先在真实计时器上把帧循环排空（见 test/dom 的 drainFrames）。
+ */
+async function startFrameClock() {
+  await drainFrames();
+  vi.useFakeTimers();
+  frameClock = true;
+}
+
+/** 平滑（settle 弹簧）在这么多帧（约 1 秒）之内落定。 */
+const SETTLE_FRAMES = 60;
 
 function text(): string | null {
   if (view === undefined) throw new Error("还没有挂载");
@@ -33,14 +51,19 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 
 describe("进度旁的百分数", () => {
   it("挂载时直接写当前进度；进度变了跟着进度条同一种平滑一帧帧走过去，不当场跳到新值", async () => {
+    await startFrameClock();
     view = render(<SmoothPercent value={0.2} track="a" />);
     expect(text()).toBe("20%");
     const texts = watchTexts();
     view.rerender(<SmoothPercent value={0.6} track="a" />);
     expect(text()).toBe("20%");
-    await waitForFrames(() => expect(text()).toBe("60%"));
+    await stepFrames(SETTLE_FRAMES);
+    expect(text()).toBe("60%");
     texts.stop();
-    expect(texts.seen.filter((t) => t !== "20%" && t !== "60%").length).toBeGreaterThan(0);
+    // 一帧换一个更大的中间值，走了好几帧才到
+    expect(texts.seen.filter((t) => t !== "20%" && t !== "60%").length).toBeGreaterThan(5);
+    const percents = texts.seen.map((t) => Number.parseInt(t, 10));
+    for (let i = 1; i < percents.length; i++) expect(percents[i]).toBeGreaterThan(percents[i - 1]);
   });
 
   it("同一批内只进不退：后端分批上报回落时停在原处", async () => {

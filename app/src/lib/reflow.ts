@@ -480,6 +480,10 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
       hold.starts.push((pinned) => {
         if (flights.get(el) !== flight) return;
         const now = stateOf(flight);
+        // 登记当场清掉，同 land：下面建整段抛异常时元素已落到新位置，取消事件又不是当场派发的，这期间再来一趟会按已取消的
+        // 这一截记下的位置与速度当作在动的接着走。不改成先建后取消：那样建整段抛异常时留着位移的这一截还在，播完停在末帧，
+        // 元素一直偏着这一趟的位移，直到再被挤
+        flights.delete(el);
         flight.animation.cancel();
         const shape = whole({ x0: now.x.x, vx: now.x.v, y0: now.y.x, vy: now.y.v, restX: flight.restX, restY: flight.restY });
         begin(el, shape, additive, "auto", pinned, false).hold = hold;

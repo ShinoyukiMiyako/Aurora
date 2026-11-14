@@ -1,18 +1,37 @@
 // @vitest-environment jsdom
-// Loadable 里要等退场播完的用例（内容退回加载、骨架的退场）。整个文件走真实计时器：退场要等 framer-motion 的帧循环把动画播完，
-// 假定时器下它请求的帧不会到，帧循环停住之后同一文件里后面的用例也推不动它。
+// Loadable 里要等退场播完的用例（内容退回加载、骨架的退场）。只看播没播完的用例走真实计时器，用 waitForFrames 等帧循环把动画播完；
+// 要在退场途中某一刻拉回、断言那一刻取值的用例走假时钟（startFrameClock），用 stepFrames 逐帧推进。
 import { act } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { LoadingView } from "../lib/loading-gate";
-import { render, waitForFrames, type Rendered } from "../test/dom";
+import { drainFrames, render, stepFrames, waitForFrames, type Rendered } from "../test/dom";
 import { Loadable } from "./Loadable";
 
 let view: Rendered | undefined;
+/** 这个用例的帧跟着假时钟走（startFrameClock）：收尾先卸载、再在假时钟上把帧循环排空，才换回真实计时器。 */
+let frameClock = false;
 
-afterEach(() => {
+afterEach(async () => {
   view?.unmount();
   view = undefined;
+  if (frameClock) await drainFrames();
+  frameClock = false;
+  vi.useRealTimers();
 });
+
+/**
+ * 断言退场途中某一刻取值的用例让帧跟着假时钟走。按真实时间走的话，机器满载时两帧之间隔得比淡出（120 ms）还长，
+ * 下一帧就直接把退场播完、骨架已经撤下，轮询等不到半透明的那一刻；拉回之后往 0 走的那一段（200 ms）同理。
+ * 换之前先在真实计时器上把帧循环排空（见 test/dom 的 drainFrames）。
+ */
+async function startFrameClock() {
+  await drainFrames();
+  vi.useFakeTimers();
+  frameClock = true;
+}
+
+/** 骨架的淡入（200 ms）与淡出（120 ms）在这么多帧（约 1 秒）之内都落定。 */
+const SETTLE_FRAMES = 60;
 
 const tree = (state: LoadingView) => (
   <Loadable view={state} skeleton={<span data-skeleton="" />}>
@@ -60,35 +79,42 @@ it("上一段骨架退场播完、这一段一直停在等待期：内容到达�
 });
 
 it("骨架退场途中被拉回等待期、内容又到：骨架留在原处接着淡出，不在半透明时同一次提交里消失", async () => {
+  await startFrameClock();
   view = render(tree("pending"));
   view.rerender(tree("skeleton"));
   const layer = find("[data-skeleton]")?.parentElement;
   if (layer === null || layer === undefined) throw new Error("骨架没有挂上");
-  await waitForFrames(() => expect(layer.style.opacity).toBe("1"));
+  await stepFrames(SETTLE_FRAMES);
+  expect(layer.style.opacity).toBe("1");
   view.rerender(tree("content"));
-  // 退场真的播起来了：等到半透明再拉回
-  let exiting = 1;
-  await waitForFrames(() => {
-    exiting = Number(layer.style.opacity);
-    expect(exiting).toBeGreaterThan(0);
-    expect(exiting).toBeLessThan(1);
-  });
+  // 退场等内容画出第一帧才起步，起步之后再走几帧：停在半透明时拉回
+  await stepFrames(5);
+  const exiting = Number(layer.style.opacity);
+  expect(exiting).toBeGreaterThan(0);
+  expect(exiting).toBeLessThan(1);
   view.rerender(tree("pending"));
   await act(async () => {});
   expect(find("[data-skeleton]")?.parentElement).toBe(layer);
   expect(layer.hasAttribute("data-pending")).toBe(true);
   // 拉回之后接着往 0 走了几帧，还没走到 0
-  let pulled = exiting;
-  await waitForFrames(() => {
-    pulled = Number(layer.style.opacity);
-    expect(pulled).toBeLessThan(exiting);
-    expect(pulled).toBeGreaterThan(0);
-  });
+  await stepFrames(2);
+  const pulled = Number(layer.style.opacity);
+  expect(pulled).toBeLessThan(exiting);
+  expect(pulled).toBeGreaterThan(0);
   view.rerender(tree("content"));
   // 骨架仍半透明：这一刻把它拿掉就是一帧消失
   expect(find("[data-skeleton]")?.parentElement).toBe(layer);
   expect(Number(layer.style.opacity)).toBe(pulled);
-  await waitForFrames(() => expect(find("[data-skeleton]")).toBeNull());
+  // 之后逐帧接着往 0 走，不回升；走到 0 才撤下，途中哪一帧都没有在半透明时消失
+  let last = pulled;
+  for (let i = 0; i < SETTLE_FRAMES && find("[data-skeleton]") !== null; i++) {
+    await stepFrames(1);
+    const now = Number(layer.style.opacity);
+    expect(now).toBeLessThanOrEqual(last);
+    last = now;
+  }
+  expect(find("[data-skeleton]")).toBeNull();
+  expect(layer.style.opacity).toBe("0");
 });
 
 it("骨架退场途中被拉回等待期、已经淡到 0 之后内容才到：同一次提交里直接拿掉，不再播一段看不见的退场", async () => {

@@ -5,8 +5,8 @@ const strip = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "");
 const css = strip(readFileSync(new URL("./login.module.css", import.meta.url), "utf8"));
 
 /** 选择器原样相等的那条规则的声明。 */
-function ruleFor(selector: string): string {
-  for (const m of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+function ruleFor(selector: string, source = css): string {
+  for (const m of source.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
     if (m[1].split(",").some((s) => s.trim() === selector)) return m[2];
   }
   throw new Error(`没有 ${selector} 规则`);
@@ -47,6 +47,16 @@ describe("离线账户", () => {
     expect([declaration(swap, "flex"), declaration(swap, "align-self")]).toEqual(["1", "stretch"]);
     const slot = ruleFor(".stageSlot");
     expect([declaration(slot, "align-items"), declaration(slot, "justify-content")]).toEqual(["flex-end", "center"]);
+  });
+});
+
+describe("外置登录", () => {
+  it("地址提示的量行数副本与 Field 播报区同样的字号、字重、行高，排出的行数才一样；它自己不占高度、不可见", () => {
+    const field = strip(readFileSync(new URL("../../ui/Field.module.css", import.meta.url), "utf8"));
+    const message = ruleFor(".message", field);
+    const probe = ruleFor(".hintProbe");
+    for (const property of ["font-size", "font-weight", "line-height"]) expect(declaration(probe, property)).toBe(declaration(message, property));
+    expect(["height", "overflow", "visibility"].map((property) => declaration(probe, property))).toEqual(["0", "hidden", "hidden"]);
   });
 });
 

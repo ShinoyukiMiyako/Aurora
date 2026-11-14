@@ -79,7 +79,7 @@ export const OfflineDialog = memo(function OfflineDialog({ report }: { report: R
     if (check.level === "error" || submitting) return;
     setSentAgainst(takenNames);
     const result = await run(() => actions.addOfflineAccount(name), ACTION_ERROR.addOffline);
-    // 成功时状态容器已关掉这个弹窗；账户加上之后接着的启动失败时也一样。这两种都保持提交时的样子直到退场播完：
+    // 成功时状态容器已关掉这个弹窗（由启动触发的，接着的启动转到后台，成败另报），保持提交时的样子直到退场播完：
     // 转圈、不再接受提交。弹窗还开着的失败才回到可以改名再试的样子
     if (!result.ok && presentNow.current) setSentAgainst(null);
   };

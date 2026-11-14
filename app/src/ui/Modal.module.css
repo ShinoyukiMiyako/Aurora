@@ -13,10 +13,6 @@
   padding: var(--sk-space-24);
 }
 
-.layer[data-exiting] {
-  pointer-events: none;
-}
-
 /* 遮罩不加模糊：背后主页的花瓣逐帧更新，模糊会逐帧重算 */
 .scrim {
   position: absolute;

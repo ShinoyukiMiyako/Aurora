@@ -46,6 +46,12 @@ function regionChain(el: Element | null): HTMLElement[] {
 function regionDestination(chain: readonly HTMLElement[]): HTMLElement | null {
   for (const area of chain) {
     if (!area.isConnected) continue;
+    // 退场中的块（带 inert）接不住焦点，往外找。整个弹窗都在退场时（叠着的确认框与底层弹窗同一次提交里一起关）不再往外落：
+    // 底层弹窗关闭时自己归还焦点，这里再落到内容区会把焦点从它还到的地方抢走
+    if (area.closest("[inert]") !== null) {
+      if (area.matches(REGION_EDGE)) return null;
+      continue;
+    }
     if (area.matches(REGION_EDGE)) return area;
     const first = tabbableElements(area)[0];
     if (first !== undefined) return first;

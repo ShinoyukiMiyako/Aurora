@@ -112,10 +112,11 @@ describe("冷启动时账户还没读到", () => {
     expect(capsule().dataset.kind).toBe("account");
   });
 
-  it("读到之后同一个胶囊换成当前账户：旧的骨架层退场，账户层从透明淡入", async () => {
+  it("等待期内就读到：同一个胶囊换成当前账户，看不见的骨架层直接拿掉、不播退场，账户层从透明淡入", async () => {
     const accounts = holdAccounts();
     await mount();
     const loading = capsule();
+    expect(capsule().hasAttribute("data-pending")).toBe(true);
     accounts.resolve([STEVE, ALEX]);
     await flush();
     expect(capsule()).toBe(loading);
@@ -123,11 +124,31 @@ describe("冷启动时账户还没读到", () => {
     expect(capsule().disabled).toBe(false);
     expect(capsule().hasAttribute("aria-hidden")).toBe(false);
     expect(capsule().getAttribute("aria-label")).toBe(ACCOUNT_COPY.current("Steve", accountKindLabel("offline", null)));
+    // 帧在假时钟下没往前走，骨架层要是在播退场就还在：胶囊正从透明淡入，骨架照常淡出的话会在账户名底下透出来
+    expect(faces()).toHaveLength(1);
+    expect(faces()[0].textContent).toBe("Steve");
+    expect(faces()[0].style.opacity).toBe("0");
+  });
+
+  it("骨架露出来之后才读到：骨架层叠在下面退场，账户层从透明淡入", async () => {
+    const accounts = holdAccounts();
+    await mount();
+    await act(() => vi.advanceTimersByTimeAsync(LOADING_DELAY_MS));
+    expect(capsule().hasAttribute("data-pending")).toBe(false);
+    const [skeleton] = faces();
+    accounts.resolve([STEVE, ALEX]);
+    await flush();
+    // 骨架至少停留一个延迟，到点那一刻换成账户；帧还没往前走，退场停在开头
+    await act(() => vi.advanceTimersByTimeAsync(LOADING_DELAY_MS));
+    expect(capsule().dataset.kind).toBe("account");
     expect(faces()).toHaveLength(2);
+    expect(faces()[0]).toBe(skeleton);
+    expect(skeleton.textContent).toBe("");
+    expect(faces()[1].textContent).toBe("Steve");
     expect(faces()[1].style.opacity).toBe("0");
   });
 
-  it("读完确实没有账户才是「添加账户」，仍是同一个胶囊", async () => {
+  it("读完确实没有账户才是「添加账户」，仍是同一个胶囊；等待期内读完的同样不播骨架退场", async () => {
     bootOverrides(ipc, { accounts: [] });
     const accounts = holdAccounts();
     await mount();
@@ -138,6 +159,8 @@ describe("冷启动时账户还没读到", () => {
     expect(capsule()).toBe(loading);
     expect(capsule().dataset.kind).toBe("add");
     expect(capsule().getAttribute("aria-label")).toBe(ACCOUNT_COPY.addLabel);
+    expect(faces()).toHaveLength(1);
+    expect(faces()[0].textContent).toBe(ACCOUNT_COPY.add);
   });
 
   it("挂载时账户早已读到：直接是账户胶囊，内容不单独淡入", async () => {

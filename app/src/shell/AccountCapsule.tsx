@@ -98,6 +98,9 @@ export function AccountCapsule() {
   const [loaded, setLoaded] = useState(!accountsLoading || current !== null);
   if (!accountsLoading && !loaded) setLoaded(true);
   const gate = useLoadingGate(accountsLoading && !loaded);
+  // 骨架露出来过（等过了等待期）。读到账户之后不会再回到加载，所以它一旦为真就不再变
+  const [revealed, setRevealed] = useState(false);
+  if (gate.view === "skeleton" && !revealed) setRevealed(true);
   const { tier } = useShell();
   const { route, go } = useNav();
   const switchTo = useSwitchAccount();
@@ -152,8 +155,10 @@ export function AccountCapsule() {
           aria-expanded={account === null ? undefined : open}
           onClick={onClick}
         >
-          {/* 换状态与换账户时新旧两层叠放交叉淡入：旧的一层脱离布局淡出，胶囊立即取新内容的宽度去伸缩 */}
-          <AnimatePresence mode="popLayout">
+          {/* 换状态与换账户时新旧两层叠放交叉淡入：旧的一层脱离布局淡出，胶囊立即取新内容的宽度去伸缩。
+              一直停在等待期的骨架例外：它本来就看不见，读到时胶囊正从透明淡入，骨架照常淡出的话两者相乘，骨架条会在名字底下透出来。
+              退场只能经 AnimatePresence 播，所以这时连同它所在的 AnimatePresence 一起换掉（换 key），骨架在同一次提交里离开 DOM */}
+          <AnimatePresence key={kind === "loading" || revealed ? "from-skeleton" : "from-content"} mode="popLayout">
             <motion.span
               key={account === null ? kind : account.uuid}
               className={styles.face}

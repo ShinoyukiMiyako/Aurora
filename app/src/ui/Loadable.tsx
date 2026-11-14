@@ -56,8 +56,8 @@ export interface LoadableProps {
   contentClassName?: string;
   /**
    * 根元素与骨架、内容两层的元素类型，默认 div。放在只收短语内容的地方（段落里的一行字）时用 span，
-   * 交叉淡化与 div 时同一套、同一帧起步。span 时由 className 把根排成块或网格：行内的层量不出宽高，
-   * 退场的那一层抽不出布局，会和进来的那一层并排挤在一行里。
+   * 交叉淡化与 div 时同一套、同一帧起步。span 时由 className 把根排成网格或 flex 这类让两层块级化的布局：
+   * 根只排成块的话两层仍在行内，popLayout 读到的计算宽高是 auto，退场的那一层抽不出布局，会和进来的那一层并排挤在一行里。
    */
   as?: LoadableTag;
 }

@@ -47,6 +47,23 @@ function prefilledServer(prefill: AuthlibPrefill): { url: string; info: AuthServ
   return { url: prefill.serverUrl, info: { apiRoot: prefill.serverUrl, serverName: prefill.serverName, host: new URL(prefill.serverUrl).host } };
 }
 
+/** 地址框下的提示：输入没写协议时说明会补成哪个地址。 */
+function serverHint(input: string): string | undefined {
+  const normalized = normalizeServerUrl(input);
+  return normalized !== "" && normalized !== input.trim() ? AUTHLIB_DIALOG_COPY.willUse(normalized) : undefined;
+}
+
+/**
+ * 提示放进量行数的副本里排出来有多高。没有提示时播报区预留一行，拿一个不断行的空格量这一行。
+ * 量完清空：副本虽不可见、不进读屏，文字内容里也不该多出一份提示。
+ */
+function hintHeight(probe: HTMLElement, hint: string | undefined): number {
+  probe.textContent = hint ?? "\u00a0";
+  const height = probe.getBoundingClientRect().height;
+  probe.textContent = "";
+  return height;
+}
+
 /** 两份「用过的验证服务器」逐项相同：账户列表换了新数组、内容没变时不让弹窗重渲染。 */
 function sameServers(a: readonly { serverUrl: string; serverName: string }[], b: readonly { serverUrl: string; serverName: string }[]): boolean {
   return a.length === b.length && a.every((s, i) => s.serverUrl === b[i].serverUrl && s.serverName === b[i].serverName);
@@ -67,10 +84,21 @@ export const AuthlibDialog = memo(function AuthlibDialog({ prefill, dropped, rep
   // 原位说明过几次失败。说明块在重试期间留着，同一种失败再来一次时块不重挂、文字也不变：
   // 每次失败换一份文字节点，读屏才会把这一次再念一遍；换了原因时说明块的行数会变，弹窗也按它重新量一次布局
   const [failures, setFailures] = useState(0);
+  // 地址提示换过几次折行。长地址让提示在一行与两行之间来回时弹窗变高变矮，要形变；逐字输入又不能每次都量弹窗，
+  // 所以改字时先在不可见的副本里排一次新旧两条提示，高度不同才记一次，交给 layoutKey
+  const [hintRewraps, setHintRewraps] = useState(0);
+  const hintProbe = useRef<HTMLDivElement>(null);
 
   // 换了地址，上一个地址的失败说明就对不上了：手动改字与点预设胶囊一样收起它。点的就是当前地址时什么都不变
   const editServer = (value: string) => {
     if (value === serverInput) return;
+    const before = serverHint(serverInput);
+    const after = serverHint(value);
+    if (before !== after) {
+      const probe = hintProbe.current;
+      if (probe === null) throw new Error("外置登录的地址提示没有量行数的副本");
+      if (hintHeight(probe, before) !== hintHeight(probe, after)) setHintRewraps((n) => n + 1);
+    }
     setServerInput(value);
     setProbeError(null);
   };
@@ -273,8 +301,8 @@ export const AuthlibDialog = memo(function AuthlibDialog({ prefill, dropped, rep
     case "server":
       stepBody = (
         <div ref={serverStack} className={styles.section}>
-          {/* 提示行常驻：「将使用 https://…」随输入时有时无，出没时下面的胶囊与弹窗都不跳 */}
-          <Field label={AUTHLIB_COPY.serverLabel} reserve hint={normalized !== "" && normalized !== serverInput.trim() ? AUTHLIB_DIALOG_COPY.willUse(normalized) : undefined}>
+          {/* 提示行常驻：「将使用 https://…」随输入时有时无，出没时下面的胶囊与弹窗都不跳；折成两行时弹窗形变（hintRewraps） */}
+          <Field label={AUTHLIB_COPY.serverLabel} reserve hint={serverHint(serverInput)}>
             <TextInput
               type="url"
               value={serverInput}
@@ -289,6 +317,9 @@ export const AuthlibDialog = memo(function AuthlibDialog({ prefill, dropped, rep
                 if (normalized !== "" && !probing) probe(serverInput);
               }}
             />
+            <div className={styles.hintProbe} aria-hidden="true">
+              <div ref={hintProbe} />
+            </div>
           </Field>
           <div className={styles.presets}>
             <button type="button" className={styles.preset} onClick={() => editServer(LITTLESKIN_API)}>
@@ -387,8 +418,9 @@ export const AuthlibDialog = memo(function AuthlibDialog({ prefill, dropped, rep
     size: "md",
     closeOnScrim: false,
     onClose: close,
-    // 逐字输入每次都重渲染：只在换步、说明块与提醒行出没、又说明了一次失败（原因换了，块的行数跟着变）时量布局
-    layoutKey: [step, http ? "http" : "", probeError === null ? "" : "probe", loginError === null ? "" : loginError.kind, failures].join(":"),
+    // 逐字输入每次都重渲染：只在换步、说明块与提醒行出没、又说明了一次失败（原因换了，块的行数跟着变）、
+    // 地址提示换了折行时量布局
+    layoutKey: [step, http ? "http" : "", probeError === null ? "" : "probe", loginError === null ? "" : loginError.kind, failures, hintRewraps].join(":"),
     footer,
     body: (
       <div className={styles.authlib}>
