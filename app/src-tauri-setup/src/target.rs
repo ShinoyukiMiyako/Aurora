@@ -188,10 +188,14 @@ fn evaluate(
     }
     let anchor = nearest_existing(Path::new(&target)).map_err(unwritable)?;
     probe_write(anchor).map_err(unwritable)?;
+    if anchor == Path::new(&target) {
+        probe_file(anchor).map_err(unwritable)?;
+    }
 
     let volume = env.volume(anchor).map_err(unwritable)?;
     let temp = env.volume(&env.temp_dir()).map_err(unwritable)?;
-    // 装好后启动器的数据根就是这个目录：上面的探针保证写得进，启动器的便携判定会选它。
+    // 装好后启动器的数据根就是这个目录：便携判定直接在这一层写文件。目录已在时上面在这一层写过文件，
+    // 还不在时在最近的上级里新建过一层、往里写过文件，与安装新建它之后的情形一样，所以便携判定会选它。
     // 用户选的那一层在追加了子目录之后不再是数据根，不读
     let data = datamark::inspect_target(Path::new(&target), supported);
     let issue = if data.block.is_some() {
@@ -475,6 +479,20 @@ pub(crate) fn probe_write(dir: &Path) -> io::Result<()> {
         .tempdir_in(dir)?;
     fs::write(probe.path().join(WRITE_PROBE), b"")?;
     probe.close()
+}
+
+/// 在已经存在的 `dir` 这一层建一个文件再删掉。NSIS 把 exe 直接写在安装目录这一层，启动器的便携判定也直接
+/// 在这一层写探针文件；[`probe_write`] 只证明得了能在下面建子目录，`C:\` 根这类许建子目录、不许建文件的
+/// 目录上它判写得进，安装却写不进 exe。
+///
+/// 删不掉与 [`probe_write`] 一样报错：这一层的文件删不掉，卸载时就清不干净。删之前先关掉句柄，
+/// 报出来的只会是删除本身的失败。
+fn probe_file(dir: &Path) -> io::Result<()> {
+    tempfile::Builder::new()
+        .prefix(WRITE_PROBE)
+        .tempfile_in(dir)?
+        .into_temp_path()
+        .close()
 }
 
 #[cfg(windows)]
@@ -786,9 +804,11 @@ mod tests {
         assert!(status.success());
     }
 
+    /// 用 SID 而不是组名：组名随系统语言变。
+    const EVERYONE: &str = "*S-1-1-0";
+
     /// 给 `dir` 加一条拒绝写入的权限。测试结束前要撤掉，否则临时目录里的探针残骸删不掉。
     fn set_write_denied(dir: &Path, denied: bool) {
-        const EVERYONE: &str = "*S-1-1-0";
         let mut command = Command::new("icacls");
         command.arg(dir);
         if denied {
@@ -798,6 +818,31 @@ mod tests {
         }
         let status = command.stdout(Stdio::null()).status().unwrap();
         assert!(status.success());
+    }
+
+    /// 给 `dir` 加上 `perms` 这几条拒绝 Everyone 的权限跑完 `run` 再撤掉，断言都放在撤掉之后，免得断言挂了
+    /// 把权限留下、临时目录删不掉。`perms` 照 icacls 的写法：目录上 `WD` 管建文件，`AD` 管建子目录，
+    /// `DC` 管删里面的东西；`(OI)(IO)(NP)` 只落到直接建在这一层的文件上，不往新建的子目录里传。
+    fn with_denied<T>(dir: &Path, perms: &[&str], run: impl FnOnce() -> T) -> T {
+        let denied: Vec<String> = perms
+            .iter()
+            .map(|perm| format!("{EVERYONE}:{perm}"))
+            .collect();
+        let status = Command::new("icacls")
+            .arg(dir)
+            .arg("/deny")
+            .args(&denied)
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "icacls {} /deny {denied:?}",
+            dir.display()
+        );
+        let out = run();
+        set_write_denied(dir, false);
+        out
     }
 
     fn roomy(_: &Path) -> Option<Volume> {
@@ -1321,6 +1366,55 @@ mod tests {
         assert_eq!(existing, Some(DirIssue::Unwritable));
         assert_eq!(below, Some(DirIssue::Unwritable));
         assert_eq!(entries(&locked), Vec::<String>::new());
+    }
+
+    /// `C:\` 根的默认权限就是这样：许建子目录、不许建文件。目录已经在了，NSIS 把 exe 直接写在这一层，
+    /// 启动器的便携判定也直接在这一层写探针文件，建得了子目录不算写得进；目录还不在时安装要在下面新建一层，
+    /// 建得了子目录、子目录里写得进文件就够。
+    #[test]
+    fn a_folder_that_takes_folders_but_not_files_only_takes_a_new_folder_below() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("folders-only");
+        fs::create_dir(&folder).unwrap();
+        let sub = folder.join("sub");
+
+        let (takes_folders, takes_files, existing, below) = with_denied(&folder, &["(WD)"], || {
+            (
+                fs::create_dir(&sub).and_then(|()| fs::remove_dir(&sub)),
+                fs::write(folder.join("file"), b""),
+                issue(text(&folder), &FakeEnv::default()),
+                issue(
+                    &format!(r"{}\new\Petalfall", text(&folder)),
+                    &FakeEnv::default(),
+                ),
+            )
+        });
+
+        takes_folders.unwrap();
+        assert_eq!(takes_files.unwrap_err().raw_os_error(), Some(5));
+        assert_eq!(existing, Some(DirIssue::Unwritable));
+        assert_eq!(below, None);
+        assert_eq!(entries(&folder), Vec::<String>::new());
+        dir.close().unwrap();
+    }
+
+    /// 建得了文件、删不掉：卸载时这一层清不干净，不能当写得进放过去。探针文件留在原地，名字看得出是谁的。
+    #[test]
+    fn an_existing_folder_whose_new_files_cannot_be_deleted_is_unwritable() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("no-delete");
+        fs::create_dir(&folder).unwrap();
+
+        let found = with_denied(&folder, &["(DC)", "(OI)(IO)(NP)(DE)"], || {
+            issue(text(&folder), &FakeEnv::default())
+        });
+
+        assert_eq!(found, Some(DirIssue::Unwritable));
+        let left = entries(&folder);
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert!(left[0].starts_with(WRITE_PROBE), "{left:?}");
+        assert!(folder.join(&left[0]).is_file(), "{left:?}");
+        dir.close().unwrap();
     }
 
     #[test]
