@@ -57,8 +57,19 @@ async function mount(reduceMotion: boolean) {
 const presentPane = () => document.querySelector<HTMLElement>("[data-step-pane]:not([inert])");
 const presentTitle = () => presentPane()?.querySelector("h1")?.textContent;
 
+/** 读屏读得到的文字：主按钮的两条文案各放一层叠着，非当前的那层带 aria-hidden，不算。 */
+function visibleText(el: Element): string {
+  let out = "";
+  for (const child of el.childNodes) {
+    if (child instanceof Element) {
+      if (child.getAttribute("aria-hidden") !== "true") out += visibleText(child);
+    } else if (child instanceof Text) out += child.data;
+  }
+  return out.trim();
+}
+
 function button(name: string): HTMLButtonElement {
-  const found = [...document.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.closest("[inert]") === null && b.textContent?.trim() === name);
+  const found = [...document.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.closest("[inert]") === null && visibleText(b) === name);
   if (found === undefined) throw new Error(`找不到按钮「${name}」`);
   return found;
 }

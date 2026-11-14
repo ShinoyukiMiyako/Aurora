@@ -14,7 +14,7 @@ import type { Appearance } from "../../domain/types";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { resources } from "../../state/resource";
-import { render, stubMatchMedia, stubResizeObserver, stubSpanAnimations, type Rendered } from "../../test/dom";
+import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, stubSpanAnimations, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { accountDto, callsOf, resetRecorder, settle } from "../../test/launcher";
 import OnboardingFlow from "./index";
@@ -63,9 +63,20 @@ function all<E extends Element = HTMLElement>(selector: string): E[] {
   return [...document.querySelectorAll<E>(selector)];
 }
 
+/** 读屏读得到的文字：主按钮的两条文案各放一层叠着，非当前的那层带 aria-hidden，不算。 */
+function visibleText(el: Element): string {
+  let out = "";
+  for (const child of el.childNodes) {
+    if (child instanceof Element) {
+      if (child.getAttribute("aria-hidden") !== "true") out += visibleText(child);
+    } else if (child instanceof Text) out += child.data;
+  }
+  return out.trim();
+}
+
 /** 在场的按钮：换步与增删时退场中的那一份（inert）还留在文档里淡出，假定时器下动画不走，它会一直留着。 */
 function button(name: string): HTMLButtonElement {
-  const found = all<HTMLButtonElement>("button").find((b) => b.closest("[inert]") === null && (b.getAttribute("aria-label") === name || b.textContent?.trim() === name));
+  const found = all<HTMLButtonElement>("button").find((b) => b.closest("[inert]") === null && (b.getAttribute("aria-label") === name || visibleText(b) === name));
   if (found === undefined) throw new Error(`找不到按钮「${name}」`);
   return found;
 }
@@ -113,9 +124,11 @@ beforeEach(() => {
   vi.spyOn(console, "info").mockImplementation(() => undefined);
 });
 
-afterEach(() => {
+afterEach(async () => {
   view?.unmount();
   view = undefined;
+  // 排在这一条假时钟上的帧要在换回真实计时器之前放掉：否则帧循环以为下一帧已经排着，后面用例里推进假时钟也走不动动画
+  await drainFrames();
   document.documentElement.removeAttribute("data-sk-mode");
   document.documentElement.removeAttribute("data-sk-accent");
   document.documentElement.removeAttribute("data-sk-reduced");
@@ -726,40 +739,89 @@ describe("首次启动向导：换步动效", () => {
     await click(button("下一步"));
     // 出没包裹层是按钮外最近的 div：挂上那一刻从透明开始
     for (const name of ["上一步", "直接开始", "跳过"]) expect(button(name).closest("div")?.style.opacity).toBe("0");
+    // 入场等第一帧画出来才起步。还停在起点时撤掉的那一项与退场目标相同、没有动画在走，不播退场、随即移除；
+    // 先推几帧让淡入走起来，再后退，量的才是「已经在淡入的按钮被撤掉」
+    await stepFrames(3);
+    for (const name of ["上一步", "直接开始", "跳过"]) expect(Number(button(name).closest("div")?.style.opacity)).toBeGreaterThan(0);
     await click(button("上一步"));
     const leaving = all<HTMLButtonElement>("footer button").filter((b) => ["上一步", "直接开始", "跳过"].includes(b.textContent?.trim() ?? ""));
     expect(leaving).toHaveLength(3);
     expect(leaving.every((b) => b.closest("[inert]") !== null)).toBe(true);
   });
 
-  it("主按钮与隐形的「开始使用 →」叠在同一格：前三步的「下一步」也按它撑宽，隐形的那颗点不到、读屏读不到", async () => {
-    await mount();
-    const slot = button("下一步").closest<HTMLElement>('[class*="_primarySlot_"]');
-    if (slot === null) throw new Error("主按钮不在定宽的格里");
-    const ghost = slot.querySelector<HTMLElement>('[class*="_primaryGhost_"]');
-    if (ghost === null) throw new Error("格里没有撑宽的隐形按钮");
-    expect(ghost.getAttribute("aria-hidden")).toBe("true");
-    expect(ghost.hasAttribute("inert")).toBe(true);
-    const widest = ghost.querySelector("button");
-    expect(widest?.textContent?.trim()).toBe("开始使用");
-    expect(widest?.getAttribute("data-variant")).toBe("primary");
-    expect(widest?.querySelector("svg")).not.toBeNull();
-    for (let i = 0; i < 3; i++) await click(button("下一步"));
-    expect(button("开始使用").closest('[class*="_primarySlot_"]')).toBe(slot);
-  });
+  describe("主按钮", () => {
+    const primaries = () => all<HTMLButtonElement>('footer button[data-variant="primary"]');
+    // 每层：[文字, 是否当前, aria-hidden]
+    const faces = (primary: HTMLElement) =>
+      [...primary.querySelectorAll<HTMLElement>('[class*="_primaryFace_"]')].map((face) => [face.textContent, face.hasAttribute("data-current"), face.getAttribute("aria-hidden")]);
+    const arrows = (primary: HTMLElement) => [...primary.querySelectorAll('[class*="_primaryArrow_"]')];
+    const ON_NEXT = [
+      ["下一步", true, null],
+      ["开始使用", false, "true"],
+    ];
+    const ON_FINISH = [
+      ["下一步", false, "true"],
+      ["开始使用", true, null],
+    ];
 
-  it("点下「开始使用」后按钮文案不换（换成更长的字会撑宽按钮、推走「跳过」），进行中的说法只给读屏", async () => {
-    await mount();
-    for (let i = 0; i < 3; i++) await click(button("下一步"));
-    const primary = button("开始使用");
-    let release: () => void = () => undefined;
-    vi.spyOn(launcher.actions, "finishFirstRun").mockImplementation(() => new Promise<void>((resolve) => (release = resolve)));
-    await click(primary);
-    expect(primary.getAttribute("aria-busy")).toBe("true");
-    expect(primary.textContent?.trim()).toBe("开始使用");
-    expect(primary.getAttribute("aria-label")).toBe("正在准备…");
-    act(() => release());
-    await flush();
+    it("从头到尾是同一颗按钮，底栏里不垫隐形的按钮：两条文案各一层叠着，到第四步、退回来只换当前层，箭头常驻", async () => {
+      await mount();
+      const primary = button("下一步");
+      expect(primaries()).toEqual([primary]);
+      expect(primary.dataset.face).toBe("next");
+      expect(faces(primary)).toEqual(ON_NEXT);
+      // 后置箭头在「下一步」时也挂着（样式表让它透明）：到第四步时淡入，不随步骤一帧出没
+      const arrow = arrows(primary);
+      expect(arrow).toHaveLength(1);
+
+      for (let i = 0; i < 3; i++) await click(button("下一步"));
+      expect(title()).toBe("挑一个你喜欢的样子");
+      expect(button("开始使用")).toBe(primary);
+      expect(primaries()).toEqual([primary]);
+      expect(primary.dataset.face).toBe("finish");
+      expect(faces(primary)).toEqual(ON_FINISH);
+      expect(arrows(primary)).toEqual(arrow);
+
+      await click(button("上一步"));
+      expect(title()).toBe("用什么账户进游戏");
+      expect(button("下一步")).toBe(primary);
+      expect(primary.dataset.face).toBe("next");
+      expect(faces(primary)).toEqual(ON_NEXT);
+      expect(arrows(primary)).toEqual(arrow);
+    });
+
+    it("第一步提交还没回来时原地转圈：仍是「下一步」那层，不换文案、不亮箭头", async () => {
+      await mount();
+      const pending: (() => void)[] = [];
+      ipc.overrides.set("complete_first_run", () => new Promise<null>((resolve) => pending.push(() => resolve(null))));
+      const primary = button("下一步");
+      await click(primary);
+      expect(primary.getAttribute("aria-busy")).toBe("true");
+      expect(primary.dataset.face).toBe("next");
+      expect(faces(primary)).toEqual(ON_NEXT);
+      expect(visibleText(primary)).toBe("下一步");
+      for (const resolve of pending) act(() => resolve());
+      await flush();
+      expect(title()).toBe("看看这台电脑上的 Java");
+      expect(primary.getAttribute("aria-busy")).toBeNull();
+      expect(button("下一步")).toBe(primary);
+    });
+
+    it("点下「开始使用」后按钮文案不换（换成更长的字会撑宽按钮、推走「跳过」），进行中的说法只给读屏", async () => {
+      await mount();
+      for (let i = 0; i < 3; i++) await click(button("下一步"));
+      const primary = button("开始使用");
+      let release: () => void = () => undefined;
+      vi.spyOn(launcher.actions, "finishFirstRun").mockImplementation(() => new Promise<void>((resolve) => (release = resolve)));
+      await click(primary);
+      expect(primary.getAttribute("aria-busy")).toBe("true");
+      expect(primary.dataset.face).toBe("finish");
+      expect(faces(primary)).toEqual(ON_FINISH);
+      expect(visibleText(primary)).toBe("开始使用");
+      expect(primary.getAttribute("aria-label")).toBe("正在准备…");
+      act(() => release());
+      await flush();
+    });
   });
 
   it("减少动画：换上来的一步只淡入，不带横移（根部只会把横移改成一步到位，旧步会先跳一下）", async () => {

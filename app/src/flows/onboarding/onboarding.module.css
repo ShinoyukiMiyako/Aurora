@@ -270,23 +270,56 @@
   display: flex;
 }
 
-/*
- * 主按钮与隐形的「开始使用 →」叠在同一格：格宽取最宽的那种，真按钮撑满。第三步换到第四步、点下后转圈时宽度都不变，
- * 左边的「跳过」不被推走；按钮组件改了尺寸，两者一起变。
- */
-.primarySlot {
-  display: inline-grid;
+/* 主按钮按「开始使用」加后置箭头定宽，每一步都是这个宽度：第三步换到第四步、点下后转圈时，左边的「跳过」都不被推走 */
+.primaryAction {
   flex: none;
 }
 
-.primaryAction,
-.primaryGhost {
-  grid-area: 1 / 1;
+/* 「开始使用」与后置箭头排成一行，撑出按钮的宽度；间距取按钮 md 档文字与图标的同一个令牌，停在原来用按钮后置图标时的位置 */
+.primaryFinish {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--sk-space-8) - 1px);
 }
 
-.primaryGhost {
+/* 「下一步」铺满按钮（定位基准是按钮自己）并居中，停在原来不带图标的按钮上的位置 */
+.primaryNext {
+  position: absolute;
+  inset: 0;
   display: flex;
-  visibility: hidden;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 两条文案各一层：只有当前那层不透明，换文案时旧的原地淡出、新的原地淡入 */
+.primaryFace {
+  opacity: 0;
+  transition: opacity var(--sk-dur-out) var(--sk-ease-in);
+}
+
+.primaryFace[data-current] {
+  opacity: 1;
+  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
+}
+
+/* 后置箭头常驻：「下一步」时透明并缩小，到第四步淡入并弹到原大，与按钮图标位换图标的 pop 同一口径 */
+.primaryArrow {
+  transition:
+    opacity var(--sk-dur-in) var(--sk-ease-out),
+    scale var(--sk-spring-pop-dur) var(--sk-spring-pop);
+}
+
+.primaryAction[data-face="next"] .primaryArrow {
+  opacity: 0;
+  scale: 0.6;
+  transition:
+    opacity var(--sk-dur-out) var(--sk-ease-in),
+    scale var(--sk-dur-out) var(--sk-ease-in);
+}
+
+/* 减少动画：不缩放，只淡入淡出。与上一条同等特异度、写在它后面才盖得住 */
+:global([data-sk-reduced]) .primaryAction .primaryArrow {
+  scale: none;
 }
 
 /* ---------------------------------------------------------------- 步骤内容 */

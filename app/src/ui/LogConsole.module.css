@@ -114,13 +114,19 @@
   text-align: end;
 }
 
-/* 自成层叠上下文：说明条的 z-index 只在日志区里比高低，焦点环那一层压得住它，它也不越出日志区去盖别的东西 */
+/*
+ * 自成层叠上下文：说明条的 z-index 只在日志区里比高低，焦点环那一层压得住它，它也不越出日志区去盖别的东西。
+ * 下角圆角由所在页面经 --log-corner 给：日志区贴着外面卡片的下沿时取卡片内沿的半径，焦点环与滚动区的底色沿它收住，
+ * 不在角上越出卡片的圆角。不给时是直角
+ */
 .area {
   position: relative;
   display: flex;
   isolation: isolate;
   flex: 1;
   min-height: 0;
+  border-bottom-left-radius: var(--log-corner, 0);
+  border-bottom-right-radius: var(--log-corner, 0);
 }
 
 /*

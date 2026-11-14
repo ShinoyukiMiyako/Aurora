@@ -98,7 +98,7 @@ import { network as appNetwork, type NetworkMonitor } from "./online";
 import { MODPACK_SUMMARY_RESOURCE } from "./queries/discover";
 import { invalidate as invalidateResources, resources } from "./resource";
 import type { Route } from "./route";
-import { gameDirectoryBusy } from "./selectors";
+import { findInstance, gameDirectoryBusy, importingModpack } from "./selectors";
 import {
   appendSessionLogs,
   applyPhase,
@@ -2267,11 +2267,13 @@ export class LauncherStore {
       this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
     }
     // 新建与导入取消后后端删除实例，修复失败或取消后实例带着未完成标记，都要重扫。占位项与重扫结果在同一次
-    // 更新里交接：盘上留了目录就由扫描项接替，没留就移除
+    // 更新里交接：盘上留了目录就由扫描项接替，没留就移除。固定列表一并重读：半成品目录在的时候后端认这个名字，
+    // 配置里留着同名的旧固定时它就在读到的固定列表里；目录删掉之后不重读，下一次固定或排序把整份列表写回去，
+    // 后端按找不到拒掉，那次操作整个落空
     if (INSTANCE_TASK_COMMANDS.has(before.spec.command)) {
       this.background(
         ACTION_ERROR.refreshInstances,
-        this.fetchInstances((raw) => this.withoutLanding(raw, id)).finally(() => this.endLanding(id)),
+        Promise.all([this.fetchInstances((raw) => this.withoutLanding(raw, id)).finally(() => this.endLanding(id)), this.fetchPins()]),
       );
     }
     // 组合任务停下之前做完的那几项已经落盘，Mod 列表与数目不能停在任务开始前
@@ -3057,8 +3059,14 @@ export class LauncherStore {
       },
       togglePin(id) {
         return store.queueSidebarPins(async () => {
+          const state = store.getState();
           // 侧栏显示的固定项含安装中自动固定的新实例，上限按显示的算
-          const shown = store.getState().sidebarPins;
+          const shown = state.sidebarPins;
+          // 导入中的整合包不改固定（原因见 importingModpack）。界面上的入口按同一个判断禁用，这里兜住没禁用的入口
+          const inst = findInstance(state, id);
+          if (inst !== undefined && importingModpack(state, inst)) {
+            throw new Error(`整合包「${id}」还在导入，导入完成后才能${shown.includes(id) ? "取消固定" : "固定"}`);
+          }
           if (!shown.includes(id) && shown.length >= SIDEBAR_PIN_LIMIT) {
             store.pushToast("warning", TOAST_COPY.pinLimit);
             return;

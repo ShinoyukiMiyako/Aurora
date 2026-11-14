@@ -21,7 +21,7 @@ import { useNow } from "../state/launcher";
 import { DOWNLOAD_STAGE, type SessionState } from "../state/session";
 import { progressTrack } from "../state/tasks";
 import { softDisabledProps } from "../ui/Button";
-import { MIN_VISIBLE_PROGRESS, rawFillOffset, useSmoothProgress } from "../ui/ProgressBar";
+import { fillOffset, MIN_VISIBLE_PROGRESS, useSmoothProgress } from "../ui/ProgressBar";
 import { Tooltip } from "../ui/Tooltip";
 import { useBreathPhase } from "./breath";
 import { useInstanceCover } from "./cover";
@@ -41,6 +41,12 @@ export interface LaunchCapsuleProps {
   /** 崩溃诊断页上就绪面写「重新启动」。 */
   relaunch?: boolean;
   className?: string;
+  /**
+   * 胶囊的布局形变起步时调用（framer-motion 的 onLayoutAnimationStart：提交后的微任务里冲刷布局、建好形变的那一刻）。
+   * 所在的动作行挂了 morph 让位时传 useReflow 返回值的 sync：尺寸观察要到下一帧的渲染步骤才报，
+   * 兄弟靠它让位会比胶囊的边缘晚一帧以上起步，宽度变化大时两者先挤到一起再分开。
+   */
+  onMorphStart?: () => void;
 }
 
 export const CAPSULE_HEIGHT: Readonly<Record<LaunchCapsuleSize, number>> = { md: 48, lg: 56 };
@@ -227,7 +233,7 @@ export const faceSwap: Variants = {
   leave: (reduced: boolean) => (reduced ? { opacity: 0, transition: fade.out } : { opacity: 0, y: -6, transition: fade.out }),
 };
 
-export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch = false, className }: LaunchCapsuleProps) {
+export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch = false, className, onMorphStart }: LaunchCapsuleProps) {
   const entry = useLaunch(instanceId);
   const reduced = useReducedMotionConfig() === true;
   // 加载面、安装中面上方块的组装进度，由方块写入；换面时据此决定旧面留多久
@@ -262,6 +268,7 @@ export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch
       layout
       layoutDependency={layoutKey}
       transition={{ layout: springs.morph }}
+      onLayoutAnimationStart={onMorphStart}
       role="group"
       aria-label={LAUNCH_COPY.group(entry.instance.name)}
       tabIndex={-1}
@@ -322,7 +329,7 @@ export function fillOf(face: LaunchView, seat: boolean): { value: number; track:
 function Fill({ value, track, tone, appear }: { value: number; track: string; tone: "loading" | "info"; appear: boolean }) {
   // 最少显示长度落在平滑的终点上，逐帧的位移不再加下限：从 0 起步时填充一帧帧长出来，不在第一帧冒出那一截
   const { smooth } = useSmoothProgress(value, track, MIN_VISIBLE_PROGRESS);
-  const x = useTransform(smooth, rawFillOffset);
+  const x = useTransform(smooth, fillOffset);
   return (
     <motion.span
       className={styles.clip}

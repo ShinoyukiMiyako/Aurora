@@ -1959,6 +1959,10 @@ describe("发现页：本地整合包的三种入口", () => {
     await fire({ type: "drop", content: { kind: "files", paths: [PACK] } });
     await finish();
     expect(liveText(dialog())).toContain(CORRUPT);
+    // 错误条画出第一帧才开始淡入，放行（rAF 加一个任务里的 setState）在 act 里只入队、到 act 结束才提交：先推一段让它提交，
+    // 再推一段把淡入播完。不推的话放行拖到下面等读取面露出的那一段，与撤掉错误条同一次提交，错误条停在起点、与退场目标相同，不建退场就直接移除
+    await advance(100);
+    await advance(1000);
 
     gate = deferred<void>();
     code = "modpack_unsupported_extension";

@@ -18,7 +18,7 @@ import { ShellProvider, useNav, type NavApi } from "../../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../../state/appearance";
 import { LauncherProvider } from "../../../state/launcher";
 import { invalidate } from "../../../state/resource";
-import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
+import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
 import type { IpcRecorder } from "../../../test/fake-bridge";
 import { deferred, memoryAdviceDto, resetRecorder, settle } from "../../../test/launcher";
 import { SETTINGS_COMMANDS, SettingsCommandsProvider, type SettingsCommands } from "../commands";
@@ -115,9 +115,11 @@ beforeEach(() => {
   vi.spyOn(console, "info").mockImplementation(() => undefined);
 });
 
-afterEach(() => {
+afterEach(async () => {
   view?.unmount();
   view = undefined;
+  // 每个用例都重装一次假时钟：不先排空帧循环，后面的用例 framer-motion 一帧都推不动（见 test/dom 的 drainFrames）
+  await drainFrames();
   vi.useRealTimers();
 });
 
@@ -189,6 +191,12 @@ describe("游戏 · 内存提醒的进出", () => {
     const memory = card("内存");
     const notices = () => live<HTMLElement>(memory, '[data-tone="warn"]').map((el) => el.textContent);
     expect(notices()).toEqual(["需要 13 GB，本机最多给 8 GB（物理内存的一半），内存可能不够用。"]);
+    // 封顶提示随估算晚到才出现，入场停在起点、等画出第一帧才起步；起步之前就撤掉的还看不见，不播退场、随即移除。
+    // 要看它关掉自动分配后原地淡出，先推几帧让它起步
+    await stepFrames(3);
+    const capped = live<HTMLElement>(memory, '[data-tone="warn"]')[0].parentElement;
+    if (capped === null) throw new Error("封顶提示没有包裹层");
+    expect(Number(capped.style.opacity)).toBeGreaterThan(0);
 
     await click(toggle("自动分配"));
     const leaving = [...memory.querySelectorAll<HTMLElement>("[inert]")];

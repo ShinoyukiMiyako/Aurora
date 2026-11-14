@@ -117,9 +117,24 @@ function sidebarItem(key: string): HTMLElement {
   return el;
 }
 
-/** 按看得见的文字找按钮：文案槽（LabelSlot）里叠着全部候选，看得见的只有标着 data-current 的那条。 */
+/**
+ * 按钮上看得见的文字。会换的文案叠着全部候选，按 textContent 读会读到每一条：文案槽（LabelSlot）里看得见的只有
+ * 标着 data-current 的那条，其余是 visibility: hidden；首次启动向导的主按钮两条文案各一层交叉淡化，非当前层带 aria-hidden。
+ */
+function visibleText(el: Element): string {
+  let out = "";
+  for (const child of el.childNodes) {
+    if (child instanceof Text) out += child.data;
+    else if (child instanceof Element && child.getAttribute("aria-hidden") !== "true" && !(el.hasAttribute("data-align") && !child.hasAttribute("data-current"))) {
+      out += visibleText(child);
+    }
+  }
+  return out;
+}
+
+/** 按看得见的文字找按钮。 */
 function buttonIn(scope: ParentNode, label: string): HTMLButtonElement {
-  const el = [...scope.querySelectorAll<HTMLButtonElement>("button")].find((b) => (b.querySelector("[data-align] > [data-current]") ?? b).textContent?.trim() === label);
+  const el = [...scope.querySelectorAll<HTMLButtonElement>("button")].find((b) => visibleText(b).trim() === label);
   if (el === undefined) throw new Error(`找不到按钮「${label}」`);
   return el;
 }

@@ -9,7 +9,7 @@ import { SLOW_HINT_MS } from "../../domain/limits";
 // 版本清单、加载器版本、Java 这几条查询落到假后端。静态引入让假后端在首个查询之前就加载完：
 // 几条查询同时触发桥里的动态引入时，后到的会拿到还没执行完的模块。
 import { IpcError } from "../../ipc/errors";
-import { fade } from "../../lib/motion";
+import { fade, springAt } from "../../lib/motion";
 import type { JavaInstallationDto } from "../../ipc/java";
 import type { ManifestDto } from "../../state/queries/catalog";
 import { mockInvoke, resetMocks } from "../../ipc/mock";
@@ -611,6 +611,46 @@ describe("新建实例：完整走一遍", () => {
     expect(dialog().textContent).not.toContain("约 ");
   });
 
+  it("创建进行中新实例已进实例列表、名称与它重名：主按钮仍是加载态，不变成禁用、不降不透明度，焦点不丢", async () => {
+    await mount();
+    await fillName("周末生存");
+    await next();
+    await next();
+    await next();
+    expect(subtitle()).toBe("第 5 步，共 5 步 · 确认");
+    // 实例先入队进了列表，设为当前实例那一步还没回来：创建仍在进行
+    const selecting = deferred<void>();
+    ipc.overrides.set("update_config", async (args) => {
+      await selecting.promise;
+      return mockInvoke("update_config", args);
+    });
+    const primary = button(CREATE_COPY.create);
+    primary.focus();
+    click(primary);
+    await flush();
+    expect(launcher.state.instances.map((i) => i.id)).toContain("周末生存");
+    expect(onClose).not.toHaveBeenCalled();
+    expect(primary.getAttribute("aria-busy")).toBe("true");
+    expect(visibleText(primary)).toBe(CREATE_COPY.creating);
+    // 不是原生禁用：原生禁用整颗降到禁用的不透明度，聚焦着的按钮还会把焦点丢回 body
+    expect(primary.disabled).toBe(false);
+    expect(primary.hasAttribute("data-disabled")).toBe(false);
+    expect(document.activeElement).toBe(primary);
+    // 加载态照样挡住再点：不会第二次创建
+    expect(primary.getAttribute("aria-disabled")).toBe("true");
+    click(primary);
+    await flush();
+    expect(callsOf(ipc, "install_version")).toHaveLength(1);
+
+    await act(async () => {
+      selecting.resolve();
+      await settle();
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(callsOf(ipc, "update_config")).toEqual([{ selectedVersion: "周末生存" }]);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("创建失败：弹窗留在确认步，顶部给出原因，主按钮恢复可点", async () => {
     await mount();
     await fillName("周末生存");
@@ -1179,11 +1219,83 @@ describe("新建实例：占位与换态", () => {
     expect(glyphs()).toEqual(["download"]);
   });
 
-  it("底栏按钮行的让位与弹窗外框走同一条 morph：换步时「上一步」出没，「取消」的横滑与底栏随外框的位移同拍到位", async () => {
+  it("底栏按钮行的让位走 morph：起步时刻钉在提交那一刻，「上一步」的入场延迟按同一条弹簧、同一个时钟算", async () => {
     await mount();
     const actions = dialog().querySelector('[class*="_footActions_"]');
     if (actions === null) throw new Error("底栏没有按钮行");
     expect(reflowSprings.get(actions)).toBe("morph");
+  });
+
+  describe("底栏：「上一步」出没时与「取消」不叠着画", () => {
+    /** 「上一步」所在的那一格（按钮外包的那层），不在时为 null。 */
+    const backItem = () => [...dialog().querySelectorAll<HTMLElement>('[class*="_footActions_"] > [class*="_footItem_"]')].find((item) => item.textContent === CREATE_COPY.back) ?? null;
+
+    it("插进来时先保持透明，「取消」沿 morph 滑出这一格之前一帧也不显出来，之后淡入到不透明", async () => {
+      await mount();
+      setInput(nameInput(), "周末生存");
+      click(button(CREATE_COPY.next));
+      const item = backItem();
+      if (item === null) throw new Error("换到第 2 步后底栏没有「上一步」");
+      // 这一格是「上一步」的宽加一个间距（默认字号下约 95 + 10 px）：「取消」离终点还超过一个间距时，它还压在这一格上
+      const gap = 10;
+      const width = 95;
+      let clearMs = 0;
+      while (springAt("morph", 1, 0, clearMs / 1000).x > gap / (width + gap)) clearMs += 1;
+      const opacities: number[] = [];
+      for (let t = 16; t <= clearMs; t += 16) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(16);
+        });
+        opacities.push(Number(item.style.opacity));
+      }
+      expect(opacities.length).toBeGreaterThan(8);
+      expect(opacities).toEqual(opacities.map(() => 0));
+      await flush();
+      expect(item.style.opacity).toBe("1");
+      expect(item.isConnected).toBe(true);
+    });
+
+    it("减少动画：「取消」一步换到新位置，「上一步」不用等，当场淡入", async () => {
+      await mount(null, { ...DEFAULT_APPEARANCE, reduceMotion: true });
+      setInput(nameInput(), "周末生存");
+      click(button(CREATE_COPY.next));
+      const item = backItem();
+      if (item === null) throw new Error("换到第 2 步后底栏没有「上一步」");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync((fade.in.duration * 1000) / 2);
+      });
+      expect(Number(item.style.opacity)).toBeGreaterThan(0.5);
+      await flush();
+      expect(item.style.opacity).toBe("1");
+    });
+
+    it("退场时留在布局里淡完才拿掉：不先抽出布局，「取消」等它淡完才滑回来", async () => {
+      await mount();
+      await fillName("周末生存");
+      const item = backItem();
+      if (item === null) throw new Error("第 2 步的底栏没有「上一步」");
+      // jsdom 不做布局：给它一个尺寸，抽出布局（popLayout）才认得出它
+      item.style.width = "95px";
+      item.style.height = "36px";
+      click(button(CREATE_COPY.back));
+      expect(subtitle()).toBe("第 1 步，共 5 步 · 名称");
+      // 退场中点不到、聚焦不到
+      expect(item.hasAttribute("inert")).toBe(true);
+      const seen: { popped: boolean; opacity: number }[] = [];
+      while (item.isConnected) {
+        if (seen.length > 60) throw new Error("「上一步」的退场一直没播完");
+        seen.push({ popped: item.hasAttribute("data-motion-pop-id"), opacity: Number(item.style.opacity) });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(16);
+        });
+      }
+      expect(seen.length).toBeGreaterThan(3);
+      expect(seen.filter((s) => s.popped)).toEqual([]);
+      // 一路淡下去，拿掉时已经全透明
+      expect(seen.map((s) => s.opacity)).toEqual(seen.map((s) => s.opacity).sort((a, b) => b - a));
+      expect(item.style.opacity).toBe("0");
+      expect(backItem()).toBeNull();
+    });
   });
 
   it("底栏提示：两句叠在同一格，只有当前那句可见", async () => {
@@ -1519,6 +1631,9 @@ describe("新建实例：占位与换态", () => {
     setInput(nameInput(), "取值");
     expect(value()?.textContent).toBe("取值");
     expect(value()?.style.opacity).toBe("0");
+    // 淡入等这一行画出第一帧才起步：放行是 rAF 之后那个任务里的一次状态更新，推进它的 act 收尾时才提交，
+    // 所以淡入要到下一段推进里才走
+    await flush();
     await flush();
     expect(value()?.style.opacity).toBe("1");
     // 同一行换值只换字，不重播淡入

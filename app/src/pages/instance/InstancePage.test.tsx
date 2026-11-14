@@ -22,7 +22,7 @@ import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, useLauncherSelector, type LauncherApi } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
-import { drainFrames, keydown, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { drainFrames, fakeAnimate, keydown, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered, type ResizeObserverStub, type StubAnimation } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { emulateFocusFixup } from "../../test/focus-fixup";
 import { CORE_EVENT } from "../../ipc/tasks";
@@ -35,20 +35,25 @@ import { creationRef, creationRefEqual, installStage } from "./model";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
-// 让位挂到了哪些容器上、走哪条弹簧：jsdom 不做布局，让位本身在这里测不了，只核对它挂对了地方；挂载照常交给真实现
+// 让位挂到了哪些容器上、走哪条弹簧：jsdom 不做布局，让位本身在这里测不了，只核对它挂对了地方；挂载照常交给真实现，
+// 当场补跑的 sync 也原样交出
 const reflowed = vi.hoisted(() => new Map<Element, string>());
 vi.mock("../../lib/reflow", async (orig) => {
   const mod = await orig<typeof import("../../lib/reflow")>();
-  const { useCallback } = await import("react");
+  const { useMemo } = await import("react");
   return {
     ...mod,
     useReflow: <T extends HTMLElement>(spring: Parameters<typeof mod.useReflow>[0] = "settle") => {
       const real = mod.useReflow<T>(spring);
-      return useCallback(
-        (el: T | null) => {
-          if (el !== null) reflowed.set(el, spring);
-          return real(el);
-        },
+      return useMemo(
+        () =>
+          Object.assign(
+            (el: T | null) => {
+              if (el !== null) reflowed.set(el, spring);
+              return real(el);
+            },
+            { sync: real.sync },
+          ),
         [real, spring],
       );
     },
@@ -82,6 +87,7 @@ const NOW = new Date(2026, 9, 31, 12, 0, 0).getTime();
 let view: Rendered | undefined;
 let nav: NavApi;
 let launcher: LauncherApi;
+let sizes: ResizeObserverStub;
 let instances: InstanceDto[];
 let settings: InstanceSettingsDto;
 let mods: InstalledMod[];
@@ -257,7 +263,7 @@ beforeEach(() => {
   vi.mocked(pickSaveFile).mockReset();
   vi.mocked(pickSaveFile).mockRejectedValue(new Error("这个用例不该弹保存对话框"));
   stubMatchMedia(false);
-  stubResizeObserver();
+  sizes = stubResizeObserver();
   stubCanvas();
   vi.stubGlobal(
     "IntersectionObserver",
@@ -2166,12 +2172,21 @@ describe("实例详情：概览", () => {
     act(() => emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 40, finished: 30, bytes: 30_720, total_bytes: 40_960, speed: 2_097_152 }));
     await flush();
     expect(shown(bars())).toEqual([[task.title, "75"]]);
+    // 横幅是概览挂上之后才出现的一项，先停在看不见的起点，画出第一帧之后才淡入；还没起步就撤掉的不播退场、当场移除。
+    // 先推几帧让它淡入起步，完成时才有一段退场可看
+    const item = bars()[0].closest('[class*="_banner_"]')?.parentElement;
+    if (item === null || item === undefined) throw new Error("安装横幅没有出入场的包裹层");
+    expect(item.style.opacity).toBe("0");
+    await stepFrames(3);
+    expect(Number(item.style.opacity)).toBeGreaterThan(0);
 
     await act(async () => {
       repair.resolve({ reinstalled: false, libraries: 40, assets: 0, natives: 0 });
       await settle(20);
     });
     expect(launcher.state.tasks.find((t) => t.id === task.id)?.status).toBe("done");
+    expect(item.isConnected).toBe(true);
+    expect(item.hasAttribute("inert")).toBe(true);
     expect(bars().filter((bar) => bar.closest("[inert]") === null)).toEqual([]);
     expect(shown(bars().filter((bar) => bar.closest("[inert]") !== null))).toEqual([[task.title, "100"]]);
     expect(text()).toContain(" · 2.0 MB/s · 共 40.0 KB");
@@ -2422,6 +2437,84 @@ describe("实例详情：概览", () => {
     expect(more.parentElement).toBe(slot);
     // 名称、标签所在的文字列也是这一行的直接子项：胶囊变宽时它变窄，文字列变高时它在行里重新居中
     expect([...row.children].some((child) => child.querySelector("h1") !== null)).toBe(true);
+  });
+
+  it("胶囊的形变一起步，头图这一行当场补跑让位：图钉与更多钮跟胶囊左缘同一刻起步，不等尺寸观察；尺寸观察随后报到时不再起第二段", async () => {
+    // 图钉只在不是最窄一档时排在行里
+    vi.stubGlobal("innerWidth", 1200);
+    // 胶囊变宽多少随机取：图钉与更多钮各被往左挤这么多。尺寸观察报到之前假时钟走多少也随机
+    const grow = 100 + Math.round(Math.random() * 200);
+    const resizeAfter = 1 + Math.round(Math.random() * 14);
+    const played: { el: Element; frames: Keyframe[]; animation: StubAnimation }[] = [];
+    // jsdom 没有 Web Animations，装上之后让位才开始观察，所以要在挂载之前装
+    Object.defineProperty(HTMLElement.prototype, "animate", {
+      configurable: true,
+      value: fakeAnimate((el, frames, _options, animation) => played.push({ el, frames, animation })),
+    });
+    onTestFinished(() => {
+      delete (HTMLElement.prototype as { animate?: unknown }).animate;
+    });
+    // 启动一直不返回：胶囊停在加载面
+    ipc.overrides.set("launch_game", () => new Promise(() => undefined));
+    await open("overview");
+
+    const capsule = document.querySelector<HTMLElement>(`[role="group"][aria-label="启动「${ID}」"]`);
+    const row = capsule?.parentElement;
+    if (capsule === null || row === null || row === undefined) throw new Error("找不到启动胶囊所在的行");
+    const pin = button("固定到侧栏", row);
+    const more = button("更多操作", row);
+    // jsdom 不做布局：胶囊外框的宽度（布局动画据此认出它变宽），与两枚图标钮在行里的位置（行宽定死、胶囊贴右，
+    // 文字列吸收宽度变化），都按胶囊展开与否给出
+    const ROW_WIDTH = 900;
+    const ICON = 48;
+    const GAP = 12;
+    const width = () => (capsule.hasAttribute("data-expanded") ? 148 + grow : 148);
+    const leftOf = new Map<HTMLElement, () => number>([
+      [more, () => ROW_WIDTH - width() - GAP - ICON],
+      [pin, () => ROW_WIDTH - width() - 2 * (GAP + ICON)],
+    ]);
+    capsule.getBoundingClientRect = () => {
+      const w = width();
+      return { left: ROW_WIDTH - w, top: 0, right: ROW_WIDTH, bottom: 56, width: w, height: 56, x: ROW_WIDTH - w, y: 0, toJSON: () => ({}) } as DOMRect;
+    };
+    vi.spyOn(HTMLElement.prototype, "offsetParent", "get").mockImplementation(function (this: HTMLElement) {
+      return leftOf.has(this) ? row : null;
+    });
+    vi.spyOn(HTMLElement.prototype, "offsetLeft", "get").mockImplementation(function (this: HTMLElement) {
+      const left = leftOf.get(this);
+      return left === undefined ? 0 : left();
+    });
+    // 提示气泡的宿主在模块样式里是 display: contents，jsdom 读不到模块样式
+    for (const icon of [pin, more]) {
+      const host = icon.parentElement;
+      if (host === null || !host.hasAttribute("data-tooltip-host")) throw new Error("图标钮外面应是提示气泡的宿主");
+      host.style.display = "contents";
+    }
+    // 尺寸观察开始观察时先报一次：让位记下起点
+    sizes.resize(row, 0);
+    const slides = (el: Element) => played.filter((p) => p.el === el);
+    expect([slides(pin), slides(more)]).toEqual([[], []]);
+
+    click(button("启动游戏", capsule));
+    expect(capsule.hasAttribute("data-expanded")).toBe(true);
+    // 布局在提交后的微任务里冲刷，形变在那时起步；这之前假时钟不走、一帧也没走，尺寸观察也还没报
+    const morphAt = performance.now();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    for (const icon of [pin, more]) {
+      expect(slides(icon)).toHaveLength(1);
+      const [slide] = slides(icon);
+      expect(String(slide.frames[0].translate)).toBe(`${grow}px 0px`);
+      expect([slide.animation.startTime, slide.animation.fill, slide.animation.playState]).toEqual([morphAt, "backwards", "running"]);
+    }
+
+    // 尺寸观察要到下一帧的渲染步骤才报：位置已在形变起步时记过，不再起一段
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(resizeAfter);
+    });
+    sizes.resize(row, 0);
+    expect([slides(pin).length, slides(more).length]).toEqual([1, 1]);
   });
 
   it("标签条那一行是换标签时外壳滚回的锚点", async () => {

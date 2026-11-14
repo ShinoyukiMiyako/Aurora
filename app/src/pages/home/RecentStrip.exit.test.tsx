@@ -109,6 +109,11 @@ afterEach(async () => {
 it("停在主页时重扫因数据格式被拒：最近游玩整段退场，退场中的卡片不画启动入口，主页不落进页面错误边界，其余部分照常在", async () => {
   await mount();
   const section = liveRecent();
+  // 这一段是实例列表读完之后才出现的一项：先停在看不见的起点，画出第一帧之后才淡入；还没起步就撤掉的不播退场、当场移除。
+  // 等它淡入起步再让重扫被拒，才有一段退场可看
+  const item = section.parentElement;
+  if (item === null) throw new Error("最近游玩段没有出入场的包裹层");
+  await waitForFrames(() => expect(Number(item.style.opacity)).toBeGreaterThan(0));
   ipc.overrides.set("list_instances", () => {
     throw new IpcError("game_dir_data_too_new", `游戏目录 ${GAME_DIR} 的数据格式 3 比这一版认得的 2 新`, { path: GAME_DIR, found: 3, supported: 2, written_by: "1.1.0-dev.57", written_by_channel: "dev" });
   });

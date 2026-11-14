@@ -49,9 +49,9 @@ const flush = () =>
   });
 
 /** 已下好、等安装：打开面板。 */
-async function openReady() {
+async function openReady(reduceMotion = false) {
   view = render(
-    <AppearanceProvider initial={{ ...DEFAULT_APPEARANCE, petals: false }}>
+    <AppearanceProvider initial={{ ...DEFAULT_APPEARANCE, petals: false, reduceMotion }}>
       <LauncherProvider>
         <ShellProvider>
           <Probe />
@@ -75,8 +75,9 @@ function dialog(): HTMLElement {
 /** 正文末尾随阶段替换的状态块。 */
 const statusBlocks = () => [...dialog().querySelectorAll<HTMLElement>(`.${styles.status}`)];
 
+/** 还能操作的按钮：换阶段时退场的那一组带 inert 留在原处淡出，不算。 */
 function button(text: string): HTMLButtonElement {
-  const found = [...dialog().querySelectorAll<HTMLButtonElement>("button")].filter((b) => b.textContent === text);
+  const found = [...dialog().querySelectorAll<HTMLButtonElement>("button")].filter((b) => b.textContent === text && b.closest("[inert]") === null);
   if (found.length !== 1) throw new Error(`「${text}」按钮应当恰好一个，实为 ${found.length}`);
   return found[0];
 }
@@ -394,7 +395,7 @@ describe("通道说明行", () => {
 });
 
 describe("下好之后被拒装", () => {
-  const footerButtons = () => [...dialog().querySelectorAll<HTMLButtonElement>(`.${modalStyles.footer} button`)].map((b) => b.textContent);
+  const footerButtons = () => [...dialog().querySelectorAll<HTMLButtonElement>(`.${modalStyles.footer} button`)].filter((b) => b.closest("[inert]") === null).map((b) => b.textContent);
 
   it("说明块是红色的「读不了这台电脑上的数据」，不写下载失败、不放后端原文；底栏只有「关闭」，没有重试", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -472,5 +473,191 @@ describe("换阶段时弹窗形变", () => {
     await flush();
     expect(statusBlocks().map((el) => el.textContent)).toEqual([expect.stringContaining("连接被重置")]);
     expect(measures.count).toBeGreaterThan(0);
+  });
+});
+
+describe("换阶段时底栏换组", () => {
+  /** 底栏里的每个键与包着它、随阶段淡入淡出的那一层（键外面可能还有一层提示宿主）。 */
+  const footerItems = () =>
+    [...dialog().querySelectorAll<HTMLButtonElement>(`.${modalStyles.footer} button`)].map((b) => ({
+      button: b,
+      item: b.closest<HTMLElement>(`.${styles.footerItem}, .${styles.footerStart}`),
+      leaving: b.closest("[inert]") !== null,
+    }));
+
+  async function openAvailable(reduceMotion = false) {
+    info = { ...info, downloaded_version: null, downloaded_channel: null, downloaded_intent: null };
+    ipc.overrides.set("download_update", () => deferred<UpdateDto>().promise);
+    await openReady(reduceMotion);
+  }
+
+  it("开始下载：原来三个键留在原处淡出、点不到，「后台下载」「取消下载」各包一层从透明淡入，不在同一帧整组换掉", async () => {
+    await openAvailable();
+    const before = footerItems();
+    expect(before.map((f) => [f.button.textContent, f.item?.className, f.leaving])).toEqual([
+      [UPDATE_COPY.skip, styles.footerStart, false],
+      [UPDATE_COPY.later, styles.footerItem, false],
+      [UPDATE_COPY.download, styles.footerItem, false],
+    ]);
+    act(() => button(UPDATE_COPY.download).click());
+    await flush();
+    const after = footerItems();
+    // 退场的还是原来那三个节点（不重挂成别的样子），叠在新键上面淡出时点不到、聚焦不到
+    const leaving = after.filter((f) => f.leaving);
+    expect([leaving.length, leaving.every((f, i) => f.button === before[i].button)]).toEqual([3, true]);
+    expect(after.filter((f) => !f.leaving).map((f) => [f.button.textContent, f.item?.className, f.item?.style.opacity, f.item?.style.transform])).toEqual([
+      [UPDATE_COPY.background, styles.footerItem, "0", "scale(0.98)"],
+      [UPDATE_COPY.cancelDownload, styles.footerItem, "0", "scale(0.98)"],
+    ]);
+  });
+
+  it("减少动画：新的一组只从透明淡入，不带缩放", async () => {
+    await openAvailable(true);
+    act(() => button(UPDATE_COPY.download).click());
+    await flush();
+    expect(footerItems().filter((f) => !f.leaving).map((f) => [f.button.textContent, f.item?.style.opacity, f.item?.style.transform])).toEqual([
+      [UPDATE_COPY.background, "0", ""],
+      [UPDATE_COPY.cancelDownload, "0", ""],
+    ]);
+  });
+
+  it("开始安装：沿用的两个键还是原来那两个节点，不退场也不重播入场", async () => {
+    await openReady();
+    const before = footerItems();
+    expect(before.map((f) => f.button.textContent)).toEqual([UPDATE_COPY.installOnExit, UPDATE_COPY.restartInstall]);
+    act(() => button(UPDATE_COPY.restartInstall).click());
+    await flush();
+    const after = footerItems();
+    expect(after.map((f, i) => [f.button === before[i].button, f.item === before[i].item, f.leaving, f.item?.style.opacity])).toEqual([
+      [true, true, false, "1"],
+      [true, true, false, "1"],
+    ]);
+  });
+});
+
+describe("换阶段时键盘焦点", () => {
+  const TOTAL = 1200;
+
+  /** 键盘按下底栏的一个键：焦点先落在它上面再按（jsdom 的 click() 不挪焦点）。 */
+  function press(text: string) {
+    const target = button(text);
+    target.focus();
+    act(() => target.click());
+  }
+
+  /** 有新版本、还没下：下载命令依次挂到这几个 pending 落定为止，重试时再发的那一次拿下一个。 */
+  async function openAvailable(...pending: Deferred<UpdateDto>[]) {
+    info = { ...info, downloaded_version: null, downloaded_channel: null, downloaded_intent: null };
+    ipc.overrides.set("download_update", () => {
+      const next = pending.shift();
+      if (next === undefined) throw new Error("下载命令发得比预期的多");
+      return next.promise;
+    });
+    await openReady();
+  }
+
+  it("按「下载更新」：焦点交给新出现的「后台下载」，不留在淡出的旧键上", async () => {
+    await openAvailable(deferred<UpdateDto>());
+    press(UPDATE_COPY.download);
+    await flush();
+    expect(document.activeElement).toBe(button(UPDATE_COPY.background));
+  });
+
+  it("按「取消下载」退回可下载：焦点交给「下载更新」", async () => {
+    const pending = deferred<UpdateDto>();
+    ipc.overrides.set("cancel_task", () => true);
+    await openAvailable(pending);
+    press(UPDATE_COPY.download);
+    await flush();
+    press(UPDATE_COPY.cancelDownload);
+    await flush();
+    expect(callsOf(ipc, "cancel_task")).toHaveLength(1);
+    // 后端取消了任务，下载命令以取消返回
+    pending.reject(new IpcError("cancelled", "任务已取消"));
+    await flush();
+    expect(statusBlocks()).toEqual([]);
+    expect(document.activeElement).toBe(button(UPDATE_COPY.download));
+  });
+
+  it("下载失败：焦点交给「重试」；按「重试」再交给「后台下载」", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const first = deferred<UpdateDto>();
+    await openAvailable(first, deferred<UpdateDto>());
+    press(UPDATE_COPY.download);
+    await flush();
+    first.reject(new Error("连接被重置"));
+    await flush();
+    expect(document.activeElement).toBe(button(UPDATE_COPY.retry));
+    press(UPDATE_COPY.retry);
+    await flush();
+    expect(callsOf(ipc, "download_update")).toHaveLength(2);
+    expect(document.activeElement).toBe(button(UPDATE_COPY.background));
+  });
+
+  it("下好之后被拒装：焦点交给只剩下的「关闭」", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    info = { ...info, downloaded_version: null, downloaded_channel: null, downloaded_intent: null };
+    ipc.overrides.set("download_update", () => {
+      throw new IpcError("update_data_too_new", "0.2.0 认得的数据格式比这台电脑上的旧");
+    });
+    await openReady();
+    press(UPDATE_COPY.download);
+    await flush();
+    expect(document.activeElement).toBe(button(UPDATE_COPY.close));
+  });
+
+  it.each([UPDATE_COPY.background, UPDATE_COPY.cancelDownload])("下载完成时焦点停在「%s」上：收尾那一拍不动，换成已下好时交给「重启并安装」", async (resting) => {
+    const pending = deferred<UpdateDto>();
+    await openAvailable(pending);
+    act(() => button(UPDATE_COPY.download).click());
+    await flush();
+    const taskId = callsOf(ipc, "download_update")[0].taskId;
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: taskId, total: 1, finished: 0, bytes: TOTAL / 2, total_bytes: TOTAL, speed: 0 }));
+    await flush();
+    const before = button(resting);
+    before.focus();
+    act(() => pending.resolve(UPDATE));
+    await flush();
+    // 收尾那一拍还画着下载中的底栏：键没换，焦点不挪
+    expect([document.activeElement === before, before.closest("[inert]")]).toEqual([true, null]);
+    await act(() => vi.advanceTimersByTimeAsync(COMPLETION_HOLD_S * 1000));
+    await flush();
+    expect(statusBlocks().map((el) => el.textContent)).toEqual([UPDATE_COPY.readyNote]);
+    expect(document.activeElement).toBe(button(UPDATE_COPY.restartInstall));
+  });
+
+  it("按「退出时安装」：焦点交给「关闭」，不落在「改为现在安装」上，连按回车不会当场装", async () => {
+    ipc.overrides.set("set_install_on_exit", () => null);
+    await openReady();
+    press(UPDATE_COPY.installOnExit);
+    await flush();
+    expect(callsOf(ipc, "set_install_on_exit")).toEqual([{ enabled: true }]);
+    expect(document.activeElement).toBe(button(UPDATE_COPY.close));
+  });
+
+  it("开始安装：焦点留在按下的「重启并安装」上（还是原来那个节点）", async () => {
+    await openReady();
+    const restart = button(UPDATE_COPY.restartInstall);
+    press(UPDATE_COPY.restartInstall);
+    await flush();
+    expect([document.activeElement === restart, restart.getAttribute("aria-busy")]).toEqual([true, "true"]);
+  });
+
+  it("焦点不在底栏时换阶段不抢：停在弹窗本身就留在那里", async () => {
+    await openAvailable(deferred<UpdateDto>());
+    expect(document.activeElement).toBe(dialog());
+    act(() => button(UPDATE_COPY.download).click());
+    await flush();
+    expect(button(UPDATE_COPY.background).closest("[inert]")).toBeNull();
+    expect(document.activeElement).toBe(dialog());
+  });
+
+  it("焦点已经丢回 body 时换阶段：交给新一组的主键", async () => {
+    await openAvailable(deferred<UpdateDto>());
+    dialog().blur();
+    expect(document.activeElement).toBe(document.body);
+    act(() => button(UPDATE_COPY.download).click());
+    await flush();
+    expect(document.activeElement).toBe(button(UPDATE_COPY.background));
   });
 });

@@ -4,7 +4,8 @@ import { resolve } from "node:path";
 import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { springAt } from "../lib/motion";
-import { springTrack } from "../lib/slide";
+import { HOLD_AFTER_MUTATION, HOLD_AFTER_RESIZE, holdUntilPainted } from "../lib/reflow";
+import { playTrack, springTrack } from "../lib/slide";
 import type { Tier } from "../shell/tier";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
 import { keydown, render, stubResizeObserver, stubSpanAnimations, type Rendered, type ResizeObserverStub } from "../test/dom";
@@ -298,10 +299,29 @@ describe("Card 外框跟随（reflowEdge）", () => {
   let observer: ResizeObserverStub;
   /** 排着的动画帧回调：nextFrame() 一帧一帧地走。 */
   let frameQueue: FrameRequestCallback[] = [];
+  /** 走过的帧数，与此刻正在跑的是第几个动画帧回调（不在回调里时为 0），从用例开始数。 */
+  let frameNo = 0;
+  let callbackNo = 0;
+  let runningCallback = 0;
   const nextFrame = () => {
     const due = frameQueue;
     frameQueue = [];
-    for (const callback of due) callback(performance.now());
+    frameNo++;
+    for (const callback of due) {
+      runningCallback = ++callbackNo;
+      callback(performance.now());
+      runningCallback = 0;
+    }
+  };
+  /** 记下 animation 每次 play 时是第几帧、第几个动画帧回调。 */
+  const trackPlays = (animation: { play(): void }) => {
+    const plays: { frame: number; callback: number }[] = [];
+    const play = animation.play.bind(animation);
+    animation.play = () => {
+      plays.push({ frame: frameNo, callback: runningCallback });
+      play();
+    };
+    return plays;
   };
   const size = (el: Element) => {
     const found = sizes.get(el);
@@ -311,6 +331,8 @@ describe("Card 外框跟随（reflowEdge）", () => {
 
   beforeEach(() => {
     frameQueue = [];
+    frameNo = 0;
+    callbackNo = 0;
     observer = stubResizeObserver();
     vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function (this: HTMLElement) {
       return size(this).width;
@@ -325,6 +347,11 @@ describe("Card 外框跟随（reflowEdge）", () => {
   });
 
   afterEach(() => {
+    // lib/reflow 的等待队列是模块级的、按窗口共用一个回调：排着的回调丢掉不跑，下一个用例挂进来的会一直等这个不会来的回调
+    for (let i = 0; frameQueue.length > 0; i++) {
+      if (i === 10) throw new Error("动画帧回调走了 10 帧仍在排：等待队列没有收尾");
+      nextFrame();
+    }
     sizes.clear();
     document.documentElement.removeAttribute("data-sk-reduced");
     vi.restoreAllMocks();
@@ -340,6 +367,8 @@ describe("Card 外框跟随（reflowEdge）", () => {
     );
     const frame = card.firstElementChild as HTMLElement;
     expect(frame.getAttribute("aria-hidden")).toBe("true");
+    // jsdom 不套样式表：外框从卡片继承来的圆角（--sk-r-lg）按算好的样式交给它
+    frame.style.borderTopLeftRadius = "18px";
     resize(frame, width, height);
     return { card, frame };
   }
@@ -349,6 +378,12 @@ describe("Card 外框跟随（reflowEdge）", () => {
   }
   /** 外框某一帧的纵向缩放。 */
   const scaleY = (keyframe: Keyframe) => Number(String(keyframe.scale).split(" ")[1]);
+  /** 外框某一帧的圆角：[横向半径, 纵向半径]（像素）。 */
+  const radii = (keyframe: Keyframe) => {
+    const match = /^(\d+(?:\.\d+)?)px \/ (\d+(?:\.\d+)?)px$/.exec(String(keyframe.borderRadius));
+    if (match === null) throw new Error(`圆角关键帧应当写成「横 / 纵」两个像素值，收到 ${String(keyframe.borderRadius)}`);
+    return [Number(match[1]), Number(match[2])];
+  };
 
   it("卡片变矮（291 -> 251）：外框以上沿为原点从旧高度沿 settle 弹簧缩回，与被挤开的行同一条轨迹；从静止起步先停在起点，下一帧才播", () => {
     const waapi = stubSpanAnimations();
@@ -380,16 +415,87 @@ describe("Card 外框跟随（reflowEdge）", () => {
     expect(grow.frames.at(-1)).toEqual({ scale: "1 1" });
   });
 
+  it("缩放途中四角按缩放反向校正：每一帧的纵向半径是横向半径除以这一帧的纵向缩放，缩放之后四角仍是正圆；与缩放同一条时间轴、同起同停", () => {
+    const waapi = stubSpanAnimations();
+    const { frame } = edgeCard(600, 291);
+    resize(frame, 600, 251);
+    const shrink = waapi.running(frame, "scale");
+    const corners = waapi.running(frame, "borderRadius");
+    expect(corners.frames).toHaveLength(shrink.frames.length);
+    expect([corners.options.duration, corners.options.easing]).toEqual([shrink.options.duration, "linear"]);
+    // 起步那一帧外框还是旧高度（纵向放大 291/251 倍）：不校正的话下沿两角纵向被拉长近 3 px
+    expect(corners.frames[0]).toEqual({ borderRadius: "18px / 15.526px" });
+    expect(corners.frames.at(-1)).toEqual({ borderRadius: "18px / 18px" });
+    for (const [i, keyframe] of shrink.frames.entries()) {
+      const [rx, ry] = radii(corners.frames[i]);
+      expect([rx, Math.abs(ry * scaleY(keyframe) - 18) < 0.001]).toEqual([18, true]);
+    }
+    expect(corners.playState).toBe("paused");
+    nextFrame();
+    expect(corners.playState).toBe("running");
+  });
+
+  it("卡片变高时同样校正：外框起步时纵向压扁，纵向半径按比例放大", () => {
+    const waapi = stubSpanAnimations();
+    const { frame } = edgeCard(600, 251);
+    resize(frame, 600, 291);
+    const corners = waapi.running(frame, "borderRadius");
+    expect(corners.frames[0]).toEqual({ borderRadius: "18px / 20.869px" });
+  });
+
+  /** 卡内被挤开的一行（lib/reflow 让位起的位移，与外框同一条 settle 轨迹）：从静止起步时由让位挂进等待队列。 */
+  const rowShift = () => playTrack(document.createElement("span"), springTrack("settle", 0, 0, 40, 0));
+
+  it("卡内的行与外框在同一次尺寸观察里从静止起步：外框挂进让位的等待队列，下一帧与行在同一个动画帧回调里开播", () => {
+    const waapi = stubSpanAnimations();
+    const { frame } = edgeCard(600, 291);
+    const row = rowShift();
+    const rowPlays = trackPlays(row);
+    holdUntilPainted(row, window, HOLD_AFTER_RESIZE);
+    resize(frame, 600, 251);
+    const edge = [waapi.running(frame, "scale"), waapi.running(frame, "borderRadius")];
+    const edgePlays = edge.map(trackPlays);
+    expect([row.playState, ...edge.map((a) => a.playState)]).toEqual(["paused", "paused", "paused"]);
+    nextFrame();
+    expect([row.playState, ...edge.map((a) => a.playState)]).toEqual(["running", "running", "running"]);
+    expect(rowPlays).toEqual([{ frame: 1, callback: 1 }]);
+    expect(edgePlays).toEqual([[{ frame: 1, callback: 1 }], [{ frame: 1, callback: 1 }]]);
+  });
+
+  it("卡内的行由增删让位（提交后的微任务里挂进队列、等两帧），外框的尺寸观察到下一帧的渲染步骤才报（等一帧）：两边在同一帧的同一个回调里开播", () => {
+    const waapi = stubSpanAnimations();
+    const { frame } = edgeCard(600, 291);
+    const row = rowShift();
+    const rowPlays = trackPlays(row);
+    // 提交后的微任务：增删观察报到，被挤开的行停在起点
+    holdUntilPainted(row, window, HOLD_AFTER_MUTATION);
+    // 下一帧先跑动画帧回调，行还在等
+    nextFrame();
+    expect(row.playState).toBe("paused");
+    // 同一帧的渲染步骤里布局已换上新排布，外框的尺寸观察这时才报：比行晚一帧挂进来，少等一帧，落在同一帧
+    resize(frame, 600, 251);
+    const edge = [waapi.running(frame, "scale"), waapi.running(frame, "borderRadius")];
+    const edgePlays = edge.map(trackPlays);
+    expect(edge.map((a) => a.playState)).toEqual(["paused", "paused"]);
+    nextFrame();
+    expect([row.playState, ...edge.map((a) => a.playState)]).toEqual(["running", "running", "running"]);
+    expect(rowPlays).toEqual([{ frame: 2, callback: 2 }]);
+    expect(edgePlays).toEqual([[{ frame: 2, callback: 2 }], [{ frame: 2, callback: 2 }]]);
+  });
+
   it("途中又变：按弹簧算出此刻的下沿与速度，带着速度当场接着走，旧的那段取消", () => {
     const waapi = stubSpanAnimations();
     const { frame } = edgeCard(600, 291);
     resize(frame, 600, 251);
     const shrink = waapi.running(frame, "scale");
+    const shrinkCorners = waapi.running(frame, "borderRadius");
     nextFrame();
     shrink.currentTime = 50;
+    shrinkCorners.currentTime = 50;
     resize(frame, 600, 291);
-    expect(shrink.cancelled).toBe(true);
+    expect([shrink.cancelled, shrinkCorners.cancelled]).toEqual([true, true]);
     const back = waapi.running(frame, "scale");
+    expect(radii(waapi.running(frame, "borderRadius").frames[0])[1]).toBeCloseTo(18 / scaleY(back.frames[0]), 3);
     const now = springAt("settle", 40, 0, 0.05);
     expect(scaleY(back.frames[0])).toBeCloseTo((291 + now.x - 40) / 291, 4);
     expect(scaleY(back.frames[6])).toBeCloseTo((291 + springAt("settle", now.x - 40, now.v, 6 / 120).x) / 291, 4);
@@ -402,9 +508,10 @@ describe("Card 外框跟随（reflowEdge）", () => {
     const { frame } = edgeCard(600, 291);
     resize(frame, 600, 251);
     const shrink = waapi.running(frame, "scale");
+    const corners = waapi.running(frame, "borderRadius");
     resize(frame, 520, 291);
-    expect(shrink.cancelled).toBe(true);
-    expect(waapi.played).toHaveLength(1);
+    expect([shrink.cancelled, corners.cancelled]).toEqual([true, true]);
+    expect(waapi.played).toHaveLength(2);
   });
 
   it("减少动画：一步到位", () => {

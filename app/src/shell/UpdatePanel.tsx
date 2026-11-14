@@ -4,20 +4,23 @@
 // 换阶段时只换正文末尾的状态块（新块淡入、旧块同帧移除）与底栏按钮，更新说明一直留着；开始安装也不把正文换成转圈，
 // 按下的那个按钮转圈、状态块说明正在安装，弹窗尺寸不塌。
 
-import { motion } from "framer-motion";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { motion, useComposedRefs } from "framer-motion";
+import { isValidElement, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { PetalMark } from "../art/PetalMark";
 import { downloadFailureCopy, sourceSwitchedCopy, UPDATE_COPY, updateChannelNote } from "../copy/updater";
 import { formatBytes, formatDate } from "../domain/format";
 import { insertItem } from "../lib/motion";
-import { useCompletionHold, useDisplayCount, useFinishing } from "../lib/progress-display";
+import { useDisplayCount } from "../lib/progress-display";
+import { useReflow } from "../lib/reflow";
 import { useMounted } from "../lib/useMounted";
 import { cx } from "../lib/util";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { useOnline } from "../state/online";
 import { busyInstanceId } from "../state/selectors";
 import { downloadFraction, hasPanel, phaseUpdate, supportedChannels, type DownloadRefusal, type UpdateInfo, type UpdaterChannels, type UpdaterPhase } from "../state/updater/machine";
+import { useDownloadHold } from "../state/updater/useDownloadHold";
 import { useUpdater } from "../state/updater/useUpdater";
+import { Appear } from "../ui/Appear";
 import { Button } from "../ui/Button";
 import { Callout } from "../ui/Callout";
 import { Modal } from "../ui/Modal";
@@ -95,44 +98,50 @@ function channelNoteOf(update: UpdateInfo, channels: UpdaterChannels | null): st
   return updateChannelNote({ channel: update.channel, preference, packageChannel });
 }
 
-type Downloading = Extract<UpdaterPhase, { kind: "downloading" }>;
-
-/** 收尾要用的那一份下载阶段，与它换成已下好的时刻（还在下载时为 null）。 */
-interface DownloadEnd {
-  last: Downloading;
-  finishedAt: number | null;
-}
+/**
+ * 每个阶段底栏的主键带这个属性，换阶段时焦点没了着落就交给它（见 FooterRow）。主键是这一阶段接下来最顺的一步：
+ * 有主按钮的阶段就是主按钮；下载中是「后台下载」，不是「取消下载」；已设为退出时安装是「关闭」，不是「改为现在安装」：
+ * 刚按下「退出时安装」的人多按一下回车，不该当场关掉落樱去装。安装中是转圈的那个键。
+ */
+const MAIN_KEY_ATTR = "data-main-key";
+const MAIN_KEY = { [MAIN_KEY_ATTR]: "" };
 
 /**
- * 下载完成后在原处留住下载中的样子一拍（lib/progress-display 的收尾时长）再换成已下好：进度条推满，已下大小到了总量、
- * 立即换成「总量 / 总量」。下载完成常与最后一条进度落在同一帧，不留这一拍的话，进度条停在平滑追到的位置（常差两三成）、
- * 已下大小停在节流挂着的旧值上，就被整块换掉了。关于页更新卡的 useDownloadHold 是同一套规则（外壳不能引用页面，各留一份）。
- * 只留从下载中直接换到已下好的那一次；总量未知时没有满格可推、减少动画时收尾时长为 0，都不留。
- * holding 为 true 时实际阶段已是已下好，留住的下载中只是画法：按它去取消下载会被状态机拒绝。
+ * 底栏的按钮行。换阶段时整组换掉（开始下载：「跳过此版本」「稍后」「下载更新」换成「后台下载」「取消下载」）不在同一帧硬切：
+ * 每个键各包一层（ui/Appear），退场的抽出布局、在原处淡出，新的在终点淡入，交接的那几帧两组叠着交叉淡化，
+ * 换字、变宽、左缘移动都不是一帧跳过去的。key 跨阶段认同一个动作：留着的键（开始安装时的那两个、下载失败后的「稍后」）
+ * 还是原来那个节点，焦点不丢，被挤动时沿让位滑到新位置。让位走 morph：底栏随面板沿 morph 形变，键的横移与形变同一刻起步。
+ *
+ * 焦点停在退场的键上（键盘按下它换了阶段，或下载完成时焦点停在下载中的键上）时，它一带上 inert，浏览器就把焦点落回 body，
+ * 键盘用户只能从弹窗开头重新找起。所以这一组键换了、焦点停在退场的键上或已经丢回 body 时，在提交之后、绘制之前交给新一组的
+ * 主键（MAIN_KEY）：此刻焦点还在带上 inert 的旧键上，判得出是丢了。焦点在别处（弹窗本身、更新说明里的链接）时不抢；
+ * 弹窗打开时不接管，初始聚焦归 Modal。
  */
-function useDownloadHold(phase: UpdaterPhase): { phase: UpdaterPhase; holding: boolean } {
-  const holdS = useCompletionHold();
-  const [end, setEnd] = useState<DownloadEnd | null>(null);
-  let next = end;
-  if (phase.kind === "downloading") {
-    // 只在任务、源与总量变了时记下：已下大小约 100 ms 一变，记它就要每条进度多渲染一次。留住时已下大小按总量画，用不着它
-    if (next === null || next.finishedAt !== null || next.last.taskId !== phase.taskId || next.last.source !== phase.source || next.last.totalBytes !== phase.totalBytes) {
-      next = { last: phase, finishedAt: null };
-    }
-  } else if (phase.kind === "ready") {
-    if (next !== null && next.finishedAt === null) {
-      const fills = holdS > 0 && next.last.totalBytes !== null && next.last.update.version === phase.update.version;
-      next = fills ? { last: next.last, finishedAt: Date.now() } : null;
-    }
-  } else {
-    next = null;
-  }
-  if (next !== end) setEnd(next);
-  const finishing = useFinishing(next === null || next.finishedAt === null ? [] : [{ id: next.last.taskId, finishedAt: next.finishedAt }], holdS);
-  if (phase.kind !== "ready" || next === null || !finishing.has(next.last.taskId)) return { phase, holding: false };
-  const { last } = next;
-  if (last.totalBytes === null) throw new Error("下载完成的收尾只留总量已知的下载");
-  return { phase: { ...last, bytes: last.totalBytes }, holding: true };
+function FooterRow({ start, end }: { start: ReactNode; end: ReactNode[] }) {
+  const reflow = useReflow<HTMLDivElement>("morph");
+  const rowRef = useRef<HTMLDivElement | null>(null);
+  const attach = useComposedRefs(reflow, rowRef);
+  // 这一组键的身份：只有换了阶段、键有进有出时才变，下载进度的重渲染不变
+  const keys = [start, ...end].map((node) => (isValidElement(node) ? node.key : null)).join(" ");
+  const shown = useRef(keys);
+  useLayoutEffect(() => {
+    if (shown.current === keys) return;
+    shown.current = keys;
+    const row = rowRef.current;
+    if (row === null) throw new Error("更新面板底栏的按钮行没有挂上");
+    const active = document.activeElement;
+    const lost = active === null || active === document.body || (row.contains(active) && active.closest("[inert]") !== null);
+    if (!lost) return;
+    const main = [...row.querySelectorAll<HTMLElement>(`[${MAIN_KEY_ATTR}]`)].find((el) => el.closest("[inert]") === null);
+    if (main === undefined) throw new Error(`更新面板底栏换上的一组键（${keys}）里没有主键`);
+    main.focus();
+  }, [keys]);
+  return (
+    <div ref={attach} className={s.footerRow}>
+      <Appear itemClassName={s.footerStart}>{start}</Appear>
+      <Appear itemClassName={s.footerItem}>{end}</Appear>
+    </div>
+  );
 }
 
 /** 下好、验过签却不能装时的说明块。下载本身是成功的，不沿用「下载失败：……」的说法。 */
@@ -183,12 +192,13 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
   const download = () => void run(() => updater.download(), UPDATE_COPY.downloadStartFailed);
 
   let status: ReactNode = null;
-  let footer: ReactNode = null;
-  let footerStart: ReactNode = undefined;
+  let footer: ReactNode[] = [];
+  let footerStart: ReactNode = null;
   switch (phase.kind) {
     case "available":
       footerStart = (
         <Button
+          key="skip"
           size="sm"
           variant="ghost"
           onClick={() =>
@@ -201,30 +211,26 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
           {UPDATE_COPY.skip}
         </Button>
       );
-      footer = (
-        <>
-          <Button variant="ghost" onClick={onClose}>
-            {UPDATE_COPY.later}
-          </Button>
-          <Button variant="primary" icon="download" disabledReason={offlineReason} onClick={download}>
-            {UPDATE_COPY.download}
-          </Button>
-        </>
-      );
+      footer = [
+        <Button key="later" variant="ghost" onClick={onClose}>
+          {UPDATE_COPY.later}
+        </Button>,
+        <Button key="download" {...MAIN_KEY} variant="primary" icon="download" disabledReason={offlineReason} onClick={download}>
+          {UPDATE_COPY.download}
+        </Button>,
+      ];
       break;
     case "downloading":
       status = <DownloadProgress phase={phase} />;
-      footer = (
-        <>
-          <Button variant="ghost" onClick={onClose}>
-            {UPDATE_COPY.background}
-          </Button>
-          {/* 收尾那一拍里下载已经完成，没有可取消的：键留在原处、不可用，底栏不变形 */}
-          <Button disabled={holding} focusableWhenDisabled onClick={() => void run(() => updater.cancelDownload(), UPDATE_COPY.cancelFailed)}>
-            {UPDATE_COPY.cancelDownload}
-          </Button>
-        </>
-      );
+      footer = [
+        <Button key="background" {...MAIN_KEY} variant="ghost" onClick={onClose}>
+          {UPDATE_COPY.background}
+        </Button>,
+        // 收尾那一拍里下载已经完成，没有可取消的：键留在原处、不可用，底栏不变形
+        <Button key="cancel" disabled={holding} focusableWhenDisabled onClick={() => void run(() => updater.cancelDownload(), UPDATE_COPY.cancelFailed)}>
+          {UPDATE_COPY.cancelDownload}
+        </Button>,
+      ];
       break;
     case "download_failed": {
       if (phase.refusal !== null) {
@@ -234,7 +240,11 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
             {REFUSAL_NOTE[phase.refusal]}
           </Callout>
         );
-        footer = <Button onClick={onClose}>{UPDATE_COPY.close}</Button>;
+        footer = [
+          <Button key="close" {...MAIN_KEY} onClick={onClose}>
+            {UPDATE_COPY.close}
+          </Button>,
+        ];
         break;
       }
       const { summary, raw } = downloadFailureCopy(phase);
@@ -250,16 +260,14 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
           )}
         </>
       );
-      footer = (
-        <>
-          <Button variant="ghost" onClick={onClose}>
-            {UPDATE_COPY.later}
-          </Button>
-          <Button variant="primary" icon="refresh" disabledReason={offlineReason} onClick={download}>
-            {UPDATE_COPY.retry}
-          </Button>
-        </>
-      );
+      footer = [
+        <Button key="later" variant="ghost" onClick={onClose}>
+          {UPDATE_COPY.later}
+        </Button>,
+        <Button key="retry" {...MAIN_KEY} variant="primary" icon="refresh" disabledReason={offlineReason} onClick={download}>
+          {UPDATE_COPY.retry}
+        </Button>,
+      ];
       break;
     }
     case "ready":
@@ -272,14 +280,14 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
           {UPDATE_COPY.readyNote}
         </Callout>
       );
-      footer = (
-        <>
-          <Button onClick={() => void run(() => updater.setInstallOnExit(true), UPDATE_COPY.installOnExitFailed)}>{UPDATE_COPY.installOnExit}</Button>
-          <Button variant="primary" disabledReason={installReason} onClick={() => void installUpdate()}>
-            {UPDATE_COPY.restartInstall}
-          </Button>
-        </>
-      );
+      footer = [
+        <Button key="install-on-exit" onClick={() => void run(() => updater.setInstallOnExit(true), UPDATE_COPY.installOnExitFailed)}>
+          {UPDATE_COPY.installOnExit}
+        </Button>,
+        <Button key="restart" {...MAIN_KEY} variant="primary" disabledReason={installReason} onClick={() => void installUpdate()}>
+          {UPDATE_COPY.restartInstall}
+        </Button>,
+      ];
       break;
     case "install_on_exit":
       status = (
@@ -287,16 +295,14 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
           {UPDATE_COPY.installOnExitNote(update.version)}
         </Callout>
       );
-      footer = (
-        <>
-          <Button disabledReason={installReason} onClick={() => void installUpdate()}>
-            {UPDATE_COPY.switchToNow}
-          </Button>
-          <Button variant="ghost" onClick={onClose}>
-            {UPDATE_COPY.close}
-          </Button>
-        </>
-      );
+      footer = [
+        <Button key="switch-now" disabledReason={installReason} onClick={() => void installUpdate()}>
+          {UPDATE_COPY.switchToNow}
+        </Button>,
+        <Button key="close" {...MAIN_KEY} variant="ghost" onClick={onClose}>
+          {UPDATE_COPY.close}
+        </Button>,
+      ];
       break;
     case "installing":
       status = (
@@ -305,21 +311,23 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
         </Callout>
       );
       footer =
-        installFrom === "ready" ? (
-          <>
-            <Button disabled>{UPDATE_COPY.installOnExit}</Button>
-            <Button variant="primary" loading>
-              {UPDATE_COPY.restartInstall}
-            </Button>
-          </>
-        ) : (
-          <>
-            <Button loading>{UPDATE_COPY.switchToNow}</Button>
-            <Button variant="ghost" disabled>
-              {UPDATE_COPY.close}
-            </Button>
-          </>
-        );
+        installFrom === "ready"
+          ? [
+              <Button key="install-on-exit" disabled>
+                {UPDATE_COPY.installOnExit}
+              </Button>,
+              <Button key="restart" {...MAIN_KEY} variant="primary" loading>
+                {UPDATE_COPY.restartInstall}
+              </Button>,
+            ]
+          : [
+              <Button key="switch-now" {...MAIN_KEY} loading>
+                {UPDATE_COPY.switchToNow}
+              </Button>,
+              <Button key="close" variant="ghost" disabled>
+                {UPDATE_COPY.close}
+              </Button>,
+            ];
       break;
   }
 
@@ -335,8 +343,7 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
       title={UPDATE_COPY.panelTitle(update.version)}
       subtitle={UPDATE_COPY.panelSubtitle(update.current_version, update.date === null ? null : formatDate(update.date))}
       dismissible={phase.kind !== "installing"}
-      footer={footer}
-      footerStart={footerStart}
+      footer={<FooterRow start={footerStart} end={footer} />}
     >
       <div className={s.panelBody}>
         <Notes notes={update.notes} />

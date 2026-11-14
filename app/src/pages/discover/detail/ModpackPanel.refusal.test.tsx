@@ -111,6 +111,11 @@ const flush = () =>
     await settle();
   });
 
+const advance = (ms: number) =>
+  act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+
 async function mount() {
   crashed = undefined;
   view = render(
@@ -188,6 +193,10 @@ describe("整合包面板：导入刚完成时实例列表被清空", () => {
     act(() => install.click());
     await flush();
     expect(callsOf(ipc, "install_modpack").map((a) => a.name)).toEqual([PACK]);
+    // 装好的那一块画出第一帧才开始淡入，放行（rAF 加一个任务里的 setState）在 act 里只入队、到 act 结束才提交：先推一段让它提交，
+    // 再推一段把淡入播完。不推的话它停在起点就被撤掉，与退场目标相同，不建退场就直接移除，停不到退场中的那一刻
+    await advance(100);
+    await advance(1000);
     const note = readyNote();
     expect(note.closest("[inert]")).toBeNull();
     expect(capsules()).toHaveLength(1);

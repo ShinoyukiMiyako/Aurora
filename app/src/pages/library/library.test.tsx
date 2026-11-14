@@ -526,6 +526,8 @@ describe("实例库：筛选、搜索与空状态", () => {
     });
     expect(cardNames()).toHaveLength(4);
     expect(repairBanner()).toBe(true);
+    // 骨架的淡出等内容画出第一帧才开始：放行的更新排在 act 里，到这一段结束才提交，淡出要下一段才播得完
+    await afterMotion();
     await afterMotion();
     expect(skeletonGrid()).toBeNull();
   });
@@ -1179,6 +1181,8 @@ describe("实例库：动作", () => {
     await afterMotion();
     expect(reason.isConnected).toBe(false);
     expect(repairButton.isConnected).toBe(false);
+    // 统计行的淡入等它画出第一帧才开始：放行的更新排在 act 里，到上一段结束才提交，淡入要这一段才播得完
+    await afterMotion();
     expect(stats?.parentElement?.style.opacity).toBe("1");
   });
 

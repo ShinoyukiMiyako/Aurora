@@ -15,7 +15,10 @@
   white-space: nowrap;
 }
 
-/* 跟随祖先而不是写死 visible：整颗按钮放进 visibility: hidden 的隐形垫宽占位时，当前这条不能自己露出来 */
+/*
+ * 跟随祖先而不是写死 visible：visible 的后代在 visibility: hidden 的祖先里照样画出来、接得到指针、进可访问性树。
+ * 槽可能落在整片藏起来的祖先里（ui/Popover、ui/Tooltip 定好位置之前的面板），这时当前这条要跟着藏。
+ */
 .option[data-current] {
   visibility: inherit;
 }

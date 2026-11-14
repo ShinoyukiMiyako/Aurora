@@ -1616,7 +1616,8 @@ describe("设置页：关于与启动器更新", () => {
     });
     const switchNow = () => all<HTMLButtonElement>(OPEN_DIALOG + ' button').find((b) => b.textContent === "改为现在安装") as HTMLButtonElement;
     const confirmButton = (label: string) => {
-      const found = all<HTMLButtonElement>(OPEN_DIALOG + ' button').find((b) => b.textContent === label);
+      // 更新面板换阶段时退场的那一组键还在原处淡出，同名的「重启并安装」不算
+      const found = live<HTMLButtonElement>(OPEN_DIALOG + ' button').find((b) => b.textContent === label);
       if (found === undefined) throw new Error(`确认框里没有「${label}」`);
       return found;
     };

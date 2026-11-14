@@ -98,7 +98,8 @@ const SCROLL_GLIDE_MS = { minMs: 200, maxMs: 480, pxPerMs: 10 } as const;
  * 组件逐帧写滚动位置的补间（日志控制台的「跳到最新」与 Home），交给 tweenAt 用；时长按起步时要滚的距离给。
  * 不交给浏览器的平滑滚动：途中终点一直在变（新行进来、折行的行第一次量出高度），对进行中的平滑滚动再发 scrollTo，
  * 浏览器从当前位置以零速重起一段，终点改得比起步还勤就一直停在起步段。时长封顶：几万像素的日志一屏屏飞过去本来就看不清，
- * 拖长只是让人等。曲线沿用淡入那条，起步快、落点前收住。
+ * 拖长只是让人等。曲线沿用淡入那条，起步快、落点前收住。换曲线时不能选过冲的：终点途中变了时组件按曲线余下的进度（1 − 当前进度）
+ * 摊剩下的路，进度在到时长之前要一直小于 1。
  */
 export function scrollGlide(distance: number): { duration: number; ease: typeof fade.in.ease } {
   const ms = Math.min(SCROLL_GLIDE_MS.maxMs, SCROLL_GLIDE_MS.minMs + distance / SCROLL_GLIDE_MS.pxPerMs);

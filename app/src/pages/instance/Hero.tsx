@@ -20,7 +20,7 @@ import { useMounted } from "../../lib/useMounted";
 import { useNav, useShell } from "../../shell/shell";
 import { useLauncherSelector } from "../../state/launcher";
 import { reimportRoute } from "../../state/route";
-import { canPinMore, importingPlaceholder, installTask } from "../../state/selectors";
+import { canPinMore, importingModpack, installTask } from "../../state/selectors";
 import { Card } from "../../ui/Card";
 import { Cover } from "../../ui/Cover";
 import { IconButton } from "../../ui/IconButton";
@@ -58,7 +58,7 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
   const cover = useInstanceCover(inst);
   const backdrop = useCoverBackdrop(inst);
   const pinBlocked = useLauncherSelector((s) => !inst.pinned && !canPinMore(s));
-  const importing = useLauncherSelector((s) => importingPlaceholder(s, inst));
+  const importing = useLauncherSelector((s) => importingModpack(s, inst));
   const renameReason = lockReason(ops.locks.rename, "rename");
   const repairReason = lockReason(ops.locks.repair, "repair");
   const deleteReason = lockReason(ops.locks.delete, "delete");
@@ -71,7 +71,8 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
   // 方块、文字列、图钉、更多钮与启动胶囊同在一行，整行挂让位，走胶囊同一条 morph 弹簧：胶囊换面变宽变窄（自己按布局动画形变）时，
   // 图钉与更多钮跟着它的左缘滑过去，不再一帧瞬移、也不被还没缩回的胶囊盖住；文字列变高变矮时滑到新的居中位置。
   // 行本身是定宽的：只挂在动作那一小段上不行，那一段随胶囊变宽，让位会把它当成容器尺寸变化而不动。
-  // 两个图标钮外面的提示气泡宿主没有盒子（display: contents），让位会越过它直接挪里面的按钮，不用再垫一层
+  // 两个图标钮外面的提示气泡宿主没有盒子（display: contents），让位会越过它直接挪里面的按钮，不用再垫一层。
+  // 让位在胶囊的形变起步时当场补跑（onMorphStart）：等尺寸观察报上来要晚一帧以上，胶囊变宽一大截时左缘先盖到更多钮上
   const row = useReflow<HTMLDivElement>("morph");
   // 状态标签增减时同一行里后面的标签滑过去
   const chips = useReflow<HTMLDivElement>();
@@ -85,7 +86,8 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
   // 导入中：图钉按带原因的禁用画，点击无效，悬停提示在名称下写原因。侧栏满了不同：点了由状态层弹上限提示，
   // 所以图钉只标 aria-disabled、名称换成上限那一句
   const pinLabel = pinBlocked && !importing ? TOAST_COPY.pinLimit : inst.pinned ? HERO_COPY.unpin : HERO_COPY.pin;
-  const pinReason = importing ? LOCK_REASON.pinImporting : pinBlocked ? TOAST_COPY.pinLimit : undefined;
+  const importReason = inst.pinned ? LOCK_REASON.unpinImporting : LOCK_REASON.pinImporting;
+  const pinReason = importing ? importReason : pinBlocked ? TOAST_COPY.pinLimit : undefined;
   // 禁用原因走菜单项的悬停提示气泡，不放右侧提示位：那一位与标签同一行、不折行，长原因会把标签挤成省略号
   const menu: MenuEntry[] = [
     { label: HERO_COPY.rename, icon: "edit", disabled: renameReason !== undefined, disabledReason: renameReason, onSelect: () => onRenamingChange(true) },
@@ -192,13 +194,13 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
                 size="lg"
                 variant="secondary"
                 pressed={inst.pinned}
-                disabledReason={importing ? LOCK_REASON.pinImporting : undefined}
+                disabledReason={importing ? importReason : undefined}
                 aria-disabled={pinBlocked || undefined}
                 onClick={ops.togglePin}
               />
             )}
             <MoreMenu items={menu} size="lg" />
-            <LaunchCapsule instanceId={inst.id} size="lg" />
+            <LaunchCapsule instanceId={inst.id} size="lg" onMorphStart={row.sync} />
           </div>
         </Cover>
       </div>

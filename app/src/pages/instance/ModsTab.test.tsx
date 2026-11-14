@@ -19,7 +19,7 @@ import { WindowPortProvider, browserWindowPort, type WindowDropEvent, type Windo
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
-import { fakeAnimate, render, stepFrames, stubMatchMedia, stubResizeObserver, stubSpanAnimations, type Rendered } from "../../test/dom";
+import { drainFrames, fakeAnimate, render, stepFrames, stubMatchMedia, stubResizeObserver, stubSpanAnimations, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
@@ -330,9 +330,11 @@ beforeEach(() => {
   ipc.overrides.set("update_mod", () => new Promise(() => undefined));
 });
 
-afterEach(() => {
+afterEach(async () => {
   view?.unmount();
   view = undefined;
+  // 帧排在这个假时钟上时直接换计时器，帧循环就卡在没人推的旧时钟上，后面的用例里出入场一帧都不走（见 test/dom 的 drainFrames）
+  await drainFrames();
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -707,8 +709,12 @@ describe("摘要行与锁定横幅的出入场", () => {
     expect(item.style.opacity).not.toBe("");
     expect(Number(item.style.opacity)).toBeLessThan(1);
     expect(item.hasAttribute("inert")).toBe(false);
+    // 横幅先停在起点，画出第一帧之后才淡入；还没起步就撤掉的不播退场、当场移除。先推几帧让它淡入起步，再结束游戏
+    await stepFrames(3);
+    expect(Number(item.style.opacity)).toBeGreaterThan(0);
 
     await setActivity(null);
+    expect(bannerItem()).toBe(item);
     expect(bannerItem()?.hasAttribute("inert")).toBe(true);
   });
 

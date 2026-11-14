@@ -256,7 +256,8 @@ function PeekHead({ activeCount }: { activeCount: number }) {
 function PeekList({ rows, finishing, onCancel, onSettled }: { rows: readonly Task[]; finishing: ReadonlySet<string>; onCancel: (task: Task) => void; onSettled: () => void }) {
   const mounted = useMounted();
   // 走 morph：外框、主体下沿与底栏随同一次变化沿 morph 形变，行若走更快的 settle，删中间一行时下面的行先到位、
-  // 与还在收的下沿之间空出一道缝，插入时末行先滑出、被主体裁掉半截
+  // 与还在收的下沿之间空出一道缝，插入时末行先滑出、被主体裁掉半截。
+  // 行的位移只来自行的增删（行里没有自己变尺寸的布局节点），增删观察报在提交后的微任务里，与外框的形变同一刻起步，不用补跑（sync）
   const list = useReflow<HTMLUListElement>("morph");
   return (
     // 列表与空态先退后进：最后一行跟着列表一起淡出，空态再淡入；退场的列表不脱离布局，外框在换手的那一刻才形变

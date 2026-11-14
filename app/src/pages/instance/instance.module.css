@@ -1115,7 +1115,9 @@
   min-width: 0;
 }
 
+/* 日志区贴着卡片下沿：下角圆角取卡片内沿的半径（扣掉 1px 描边） */
 .consoleBody {
+  --log-corner: calc(var(--sk-r-lg) - 1px);
   height: 100%;
 }
 

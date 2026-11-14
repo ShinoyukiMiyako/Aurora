@@ -11,6 +11,7 @@
 
 import { createContext, useCallback, useContext, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { springAt } from "../lib/motion";
+import { HOLD_AFTER_RESIZE, holdUntilPainted } from "../lib/reflow";
 import { elapsedSeconds, playTrack, springTrack } from "../lib/slide";
 import { cssVars, cx } from "../lib/util";
 import styles from "./Card.module.css";
@@ -102,9 +103,32 @@ function edgeTrack(height: number, d: number, v: number): ReturnType<typeof spri
 }
 
 /**
- * 盯着外框层自己的尺寸（它铺满卡片的边框盒）：高度变了就补一段从旧高度回到新高度的缩放，返回停止函数。
- * 起步的时机与 lib/reflow 的尺寸让位一致：都在尺寸观察里起步，从静止起步的先停在起点、下一帧才计时，途中再变的带着速度当场接着走；
- * 两边同一帧开始计时，下沿与被挤开的行才对得齐。宽度变了（窗口缩放、换档引起的重排）与减少动画时一步到位，还在走的当场落定。
+ * 与 edgeTrack 逐帧对应的圆角。外框纵向缩放 sy 时四角的纵向半径也跟着乘上 sy：变矮的起步那一帧外框还是旧高度，四角被纵向拉长，
+ * 变高时被压扁，291 与 251 之间换一次差近 3 px。每一帧把纵向半径写成 radius / sy，缩放之后正好回到 radius，四角一直是正圆；
+ * 横向不缩放，横向半径不动。圆角不能在合成线程上播，单独成一段：缩放那一段照旧在合成线程上走，主线程卡住时只是圆角晚一两帧。
+ * 弹窗形变时 framer-motion 按缩放反向校正圆角，是同一个做法。
+ */
+function cornerTrack(scaleTrack: ReturnType<typeof springTrack>, radius: number): ReturnType<typeof springTrack> {
+  const frames = scaleTrack.frames.map((keyframe) => {
+    const sy = Number(String(keyframe.scale).split(" ")[1]);
+    return { borderRadius: `${radius}px / ${Math.round((radius / sy) * 1000) / 1000}px` };
+  });
+  return { ...scaleTrack, frames };
+}
+
+/** 外框的圆角（从卡片继承 --sk-r-lg，四角同一个值）。只在尺寸观察里起步时读，那时样式已经算好，不另起一次样式计算。 */
+function frameRadius(view: Window, frame: HTMLElement): number {
+  const value = view.getComputedStyle(frame).borderTopLeftRadius;
+  const match = /^(\d+(?:\.\d+)?)px$/.exec(value);
+  if (match === null) throw new Error(`卡片外框的圆角应当是一个像素值，实为「${value}」`);
+  return Number(match[1]);
+}
+
+/**
+ * 盯着外框层自己的尺寸（它铺满卡片的边框盒）：高度变了就补一段从旧高度回到新高度的缩放，四角的圆角同步反向校正，返回停止函数。
+ * 起步的时机与 lib/reflow 的尺寸让位一致：都在尺寸观察里起步，从静止起步的先停在起点、挂进让位的等待队列（holdUntilPainted），
+ * 下一帧与卡内的让位在同一个回调里开播；途中再变的带着速度当场接着走。两边同一帧开始计时，下沿与被挤开的行才对得齐。
+ * 宽度变了（窗口缩放、换档引起的重排）与减少动画时一步到位，还在走的当场落定。
  * 测量只在尺寸观察报了变化时做，读的是已排好的布局。运行环境没有 ResizeObserver 或 Web Animations（组件测试的 jsdom）时什么也不做。
  */
 function observeEdge(frame: HTMLElement): () => void {
@@ -112,9 +136,10 @@ function observeEdge(frame: HTMLElement): () => void {
   if (view === null || typeof ResizeObserver === "undefined" || typeof frame.animate !== "function") return () => {};
   let width: number | null = null;
   let height = 0;
-  let flight: { animation: Animation; d: number; v: number } | null = null;
+  // 缩放与圆角两段同起同停：第一段是缩放，接续时按它读走了多久
+  let flight: { animations: Animation[]; d: number; v: number } | null = null;
   const land = () => {
-    flight?.animation.cancel();
+    flight?.animations.forEach((animation) => animation.cancel());
     flight = null;
   };
   const sizes = new ResizeObserver(() => {
@@ -133,23 +158,24 @@ function observeEdge(frame: HTMLElement): () => void {
     // 此刻画出来的下沿离旧布局的下沿多远、往哪走。还没开始计时的就是起步时记下的值：欠阻尼弹簧在 t=0 算出的速度带舍入误差
     let now = { x: 0, v: 0 };
     if (flight !== null) {
-      const t = elapsedSeconds(flight.animation);
+      const t = elapsedSeconds(flight.animations[0]);
       now = t === 0 ? { x: flight.d, v: flight.v } : springAt("settle", flight.d, flight.v, t);
     }
     const d = now.x - grown;
-    flight?.animation.cancel();
-    const animation = playTrack(frame, edgeTrack(nextHeight, d, now.v));
-    const current = { animation, d, v: now.v };
+    land();
+    const scale = edgeTrack(nextHeight, d, now.v);
+    const radius = frameRadius(view, frame);
+    const animations = radius === 0 ? [playTrack(frame, scale)] : [playTrack(frame, scale), playTrack(frame, cornerTrack(scale, radius))];
+    const current = { animations, d, v: now.v };
     flight = current;
-    animation.onfinish = () => {
+    animations[0].onfinish = () => {
       if (flight === current) flight = null;
     };
     if (now.v !== 0) return;
-    // 新排布要等这一帧画完才上屏：先停在起点（首帧当场生效），下一帧再播，与让位里从静止起步的行同一刻计时
-    animation.pause();
-    view.requestAnimationFrame(() => {
-      if (flight === current && animation.playState === "paused") animation.play();
-    });
+    // 新排布要等这一帧画完才上屏：先停在起点（首帧当场生效），挂进让位的等待队列，与卡内从静止起步的行在同一个动画帧回调里开播。
+    // 这里只由尺寸观察触发，等 HOLD_AFTER_RESIZE 帧。卡内的让位由增删引起时等两帧，但它在提交后的微任务里就挂上了，
+    // 比外框的尺寸观察早一帧，两边落在同一帧；外框跟着等两帧反而晚一帧。被顶替、落定时两段已当场取消，队列不再播
+    for (const animation of animations) holdUntilPainted(animation, view, HOLD_AFTER_RESIZE);
   });
   sizes.observe(frame);
   return () => sizes.disconnect();

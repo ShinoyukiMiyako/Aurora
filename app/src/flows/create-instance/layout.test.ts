@@ -224,6 +224,5 @@ describe("底栏", () => {
     const actions = declarations("footActions");
     expect(actions).toMatch(/flex:\s*1 1 0/);
     expect(actions).toMatch(/justify-content:\s*flex-end/);
-    expect(actions).toMatch(/position:\s*relative/);
   });
 });

@@ -2,9 +2,11 @@
 // @module-tag heavy-page
 // 「继续游玩」大卡读取出错后的重试：这一轮不开加载门，错误面留在原处、重试按钮转圈，结果回来再原位换掉。
 // jsdom 不跑完动画，这里断言节点是否同一个、是否带 inert、加载区是否标着忙，以及挂载那一刻的 initial 样式。
+// 以及启动胶囊变宽时「实例详情」的让位与胶囊的形变同一刻起步。
 import { act } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
+import { LAUNCH_COPY } from "../../copy/flows";
 import { LOADING_DELAY_MS } from "../../domain/limits";
 import type { InstanceDto } from "../../ipc/instances";
 import { IpcError } from "../../ipc/errors";
@@ -14,10 +16,11 @@ import { ShellProvider } from "../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { DEFAULT_UI_SHAPE, UiShapeProvider } from "../../state/ui-shape";
-import { drainFrames, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { drainFrames, fakeAnimate, render, stubMatchMedia, stubResizeObserver, type Rendered, type ResizeObserverStub, type StubAnimation } from "../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, configDto, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
+import { HOME_COPY } from "./copy";
 import HomePage from "./index";
 import s from "./home.module.css";
 
@@ -32,6 +35,7 @@ const PLAY_DAYS: PlayDayDto[] = [{ date: "2026-10-30", minutes: 95, instances: [
 
 let view: Rendered | undefined;
 let launcher: LauncherApi;
+let sizes: ResizeObserverStub;
 let instances: InstanceDto[];
 /** 实例列表这一次读取怎么回：用例中途换成挂起的读取，控制重试的结果什么时候回来。 */
 let listInstances: () => Promise<InstanceDto[]>;
@@ -83,7 +87,7 @@ async function mount() {
 beforeEach(() => {
   vi.useFakeTimers({ now: NOW });
   resetRecorder(ipc);
-  stubResizeObserver();
+  sizes = stubResizeObserver();
   stubMatchMedia(false);
   stubCanvas();
   vi.stubGlobal(
@@ -211,5 +215,80 @@ describe("继续游玩大卡：读取出错后重试", () => {
     expect(face.closest("[inert]")).not.toBeNull();
     expect(liveFaces(card).map((el) => el.querySelector("h2")?.textContent)).toEqual(["生存"]);
     expect(card.querySelector('div[aria-busy="true"]')).toBeNull();
+  });
+});
+
+describe("继续游玩大卡：胶囊变宽时「实例详情」让位", () => {
+  /** 就绪面胶囊的宽度，与它和「实例详情」之间的间距。 */
+  const READY_WIDTH = 148;
+  const GAP = 10;
+
+  function buttonIn(root: ParentNode, text: string): HTMLButtonElement {
+    const button = [...root.querySelectorAll("button")].find((b) => b.textContent?.includes(text));
+    if (button === undefined) throw new Error(`找不到按钮「${text}」`);
+    return button;
+  }
+
+  it("胶囊的形变一起步，让位就当场补跑、起步时刻钉在这一刻，不等尺寸观察；尺寸观察随后报到时不再起第二段", async () => {
+    // 展开后的宽度随机取：让位的起点位移就是两者之差。尺寸观察报到之前假时钟走多少也随机
+    const expandedWidth = 200 + Math.round(Math.random() * 200);
+    const resizeAfter = 1 + Math.round(Math.random() * 14);
+    const played: { el: Element; frames: Keyframe[]; animation: StubAnimation }[] = [];
+    // jsdom 没有 Web Animations，装上之后让位才开始观察，所以要在挂载之前装
+    Object.defineProperty(HTMLElement.prototype, "animate", {
+      configurable: true,
+      value: fakeAnimate((el, frames, _options, animation) => played.push({ el, frames, animation })),
+    });
+    onTestFinished(() => {
+      delete (HTMLElement.prototype as { animate?: unknown }).animate;
+    });
+    listInstances = () => Promise.resolve(instances);
+    // 启动一直不返回：胶囊停在加载面
+    ipc.overrides.set("launch_game", () => new Promise(() => undefined));
+    await mount();
+
+    const details = buttonIn(document, HOME_COPY.details);
+    const row = details.closest<HTMLElement>(`.${s.heroActions}`);
+    const capsule = row?.querySelector<HTMLElement>('[role="group"]');
+    const host = details.parentElement;
+    if (row === null || row === undefined || capsule === null || capsule === undefined || host === null) throw new Error("动作行里应有启动胶囊与「实例详情」");
+    // jsdom 不做布局：胶囊外框的宽度（布局动画据此认出它变宽）与按钮在动作行里的位置，都按胶囊展开与否给出
+    const width = () => (capsule.hasAttribute("data-expanded") ? expandedWidth : READY_WIDTH);
+    capsule.getBoundingClientRect = () => {
+      const w = width();
+      return { left: 0, top: 0, right: w, bottom: 56, width: w, height: 56, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+    };
+    vi.spyOn(HTMLElement.prototype, "offsetParent", "get").mockImplementation(function (this: HTMLElement) {
+      return this === details ? row : null;
+    });
+    vi.spyOn(HTMLElement.prototype, "offsetLeft", "get").mockImplementation(function (this: HTMLElement) {
+      return this === details ? width() + GAP : 0;
+    });
+    // 提示气泡的包裹层在模块样式里是 display: contents，jsdom 读不到模块样式
+    host.style.display = "contents";
+    // 尺寸观察开始观察时先报一次：让位记下起点
+    sizes.resize(row, 0);
+    const slides = () => played.filter((p) => p.el === details);
+    expect(slides()).toEqual([]);
+
+    act(() => buttonIn(capsule, LAUNCH_COPY.launch).click());
+    expect(capsule.hasAttribute("data-expanded")).toBe(true);
+    // 布局在提交后的微任务里冲刷，形变在那时起步；这之前假时钟不走、一帧也没走，尺寸观察也还没报
+    const morphAt = performance.now();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(slides()).toHaveLength(1);
+    const [slide] = slides();
+    expect(String(slide.frames[0].translate)).toBe(`${READY_WIDTH - expandedWidth}px 0px`);
+    expect([slide.animation.startTime, slide.animation.fill, slide.animation.playState]).toEqual([morphAt, "backwards", "running"]);
+
+    // 尺寸观察要到下一帧的渲染步骤才报：位置已在形变起步时记过，不再起一段，起步时刻也不挪
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(resizeAfter);
+    });
+    sizes.resize(row, 0);
+    expect(slides()).toHaveLength(1);
+    expect(slide.animation.startTime).toBe(morphAt);
   });
 });

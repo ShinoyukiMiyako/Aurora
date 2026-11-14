@@ -34,3 +34,15 @@ describe("更新包的下载进度文字", () => {
     expect(Number(width[1])).toBeGreaterThanOrEqual(longest.length);
   });
 });
+
+describe("底栏的按钮行", () => {
+  it("是定位元素：换阶段时退场的键按它在这一行里的偏移抽出布局，原地淡出，不落到别的定位祖先上错位", () => {
+    expect(rule(".footerRow").get("position")).toBe("relative");
+  });
+
+  it("铺满底栏，「跳过此版本」那一层靠左、其余靠右；每个键外那层是 flex，不多出行框的下沿空隙", () => {
+    const row = rule(".footerRow");
+    expect([row.get("display"), row.get("flex"), row.get("justify-content")]).toEqual(["flex", "1 1 0", "flex-end"]);
+    expect([rule(".footerStart").get("margin-right"), rule(".footerStart").get("display"), rule(".footerItem").get("display")]).toEqual(["auto", "flex", "flex"]);
+  });
+});

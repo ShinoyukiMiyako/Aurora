@@ -13,6 +13,7 @@ import { BlossomBranch } from "../../art/illustrations/BlossomBranch";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { fade, stepPane, stepPaneFade } from "../../lib/motion";
 import { useMounted } from "../../lib/useMounted";
+import { cx } from "../../lib/util";
 import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { describeError, gameDirDataRejectionOf } from "../../state/errors";
@@ -20,7 +21,7 @@ import type { FlowProps } from "../../state/flows";
 import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { useDiscoveredGameDirectories } from "../../state/queries/catalog";
 import { Appear } from "../../ui/Appear";
-import { Button, GlyphSlot } from "../../ui/Button";
+import { Button, CONTROL_ICON_SIZE, GlyphSlot } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
 import { Loadable } from "../../ui/Loadable";
 import { DIR_COPY, FOOTER_COPY, STEP_COPY, stepCounter, WIZARD_LABEL } from "./copy";
@@ -310,6 +311,8 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
   const ready = settings !== null;
   const busy = finishing !== null || committing;
   const last = wizard.index === LAST_STEP;
+  // 主按钮在第一步是提交中、在第四步是收尾中才转圈
+  const primaryLoading = last ? finishing === "finish" : committing;
 
   return (
     <motion.div className={s.root} exit={reduced ? FINISH_EXIT_REDUCED : FINISH_EXIT}>
@@ -362,33 +365,32 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
                   </Button>
                 )}
               </Appear>
-              {/* 隐形的「开始使用 →」垫在同一格里撑出宽度，真按钮撑满这一格：宽度跟着按钮组件自己的尺寸走，不在这里复写 */}
-              <div className={s.primarySlot}>
-                {last ? (
-                  <Button
-                    className={s.primaryAction}
-                    variant="primary"
-                    iconRight="arrow-right"
-                    block
-                    loading={finishing === "finish"}
-                    disabled={!ready || (busy && finishing !== "finish")}
-                    // 加载中文字淡去但保留占位，换成更长的字看不见却会撑宽按钮：可见文案不换，进行中的说法只给读屏
-                    aria-label={finishing === "finish" ? FOOTER_COPY.preparing : undefined}
-                    onClick={() => void finish("finish")}
-                  >
-                    {FOOTER_COPY.finish}
-                  </Button>
-                ) : (
-                  <Button className={s.primaryAction} variant="primary" block loading={committing} disabled={!ready || (busy && !committing)} onClick={() => void next()}>
-                    {FOOTER_COPY.next}
-                  </Button>
-                )}
-                <span className={s.primaryGhost} aria-hidden="true" inert>
-                  <Button variant="primary" iconRight="arrow-right">
-                    {FOOTER_COPY.finish}
-                  </Button>
+              {/*
+               * 主按钮从头到尾是同一颗按钮（聚焦着的按钮不丢焦点），每一步都一样宽，左边的「跳过」不被推走：
+               * - 「开始使用」与后置箭头排成一行撑出宽度。箭头常驻，前三步由样式表按 data-face 隐去，到第四步淡入，
+               *   不随按钮的 iconRight 来去一帧出没。
+               * - 两条文案各一层叠着交叉淡化；「下一步」铺满按钮居中，停在原来不带图标的按钮上的位置。
+               */}
+              <Button
+                className={s.primaryAction}
+                variant="primary"
+                data-face={last ? "finish" : "next"}
+                loading={primaryLoading}
+                disabled={!ready || (busy && !primaryLoading)}
+                // 加载中文字淡去但保留占位，换成更长的字看不见却会撑宽按钮：可见文案不换，进行中的说法只给读屏
+                aria-label={finishing === "finish" ? FOOTER_COPY.preparing : undefined}
+                onClick={() => void (last ? finish("finish") : next())}
+              >
+                <span className={cx(s.primaryFace, s.primaryNext)} data-current={!last || undefined} aria-hidden={last || undefined}>
+                  {FOOTER_COPY.next}
                 </span>
-              </div>
+                <span className={s.primaryFinish}>
+                  <span className={s.primaryFace} data-current={last || undefined} aria-hidden={!last || undefined}>
+                    {FOOTER_COPY.finish}
+                  </span>
+                  <Icon name="arrow-right" size={CONTROL_ICON_SIZE.md} className={s.primaryArrow} />
+                </span>
+              </Button>
             </div>
           </footer>
         </section>

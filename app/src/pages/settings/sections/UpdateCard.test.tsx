@@ -9,10 +9,11 @@ import { percent } from "../../../domain/format";
 import { COMPLETION_HOLD_S, SPEED_REFRESH_MS } from "../../../lib/progress-display";
 import { OverlayProvider, OverlayRoot } from "../../../shell/overlay";
 import { INITIAL_UPDATER_STATE, type DownloadSource, type UpdateInfo, type UpdaterChannels, type UpdaterPhase } from "../../../state/updater/machine";
+import { useDownloadHold } from "../../../state/updater/useDownloadHold";
 import { deferred, type Deferred } from "../../../test/launcher";
 import { drainFrames, keydown, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
 import s from "../settings.module.css";
-import { ChannelPicker, StatusLine, useDownloadHold } from "./UpdateCard";
+import { ChannelPicker, StatusLine } from "./UpdateCard";
 import { updateCardView, type CardContext, type ChannelChangeCost, type ChannelId } from "./update-view";
 
 /** 外层统一错误处理换成只记下通知的版本：选项块不需要整个状态容器，只要看写失败时报了什么。 */
@@ -184,14 +185,13 @@ describe("更新卡下载完成时的收尾", () => {
     return <StatusLine view={updateCardView({ ...INITIAL_UPDATER_STATE, currentVersion: "0.2.0", phase: shown.phase }, CTX)} onAction={() => undefined} />;
   }
 
-  function held(phase: UpdaterPhase, reducedMotion = false): ReactNode {
-    const node = (
+  function held(phase: UpdaterPhase): ReactNode {
+    return (
       <OverlayProvider>
         <HeldLine phase={phase} />
         <OverlayRoot />
       </OverlayProvider>
     );
-    return reducedMotion ? <MotionConfig reducedMotion="always">{node}</MotionConfig> : node;
   }
 
   it("下载完成：先在原处留一拍，主句的百分数推到 100%、次句换到总量，收尾时长过了才换成已下好", async () => {
@@ -209,10 +209,6 @@ describe("更新卡下载完成时的收尾", () => {
     expect([title(), sub(), buttonLabel()]).toEqual(["正在下载 0.3.0 · 100%", "10.0 MB / 10.0 MB", UPDATE_COPY.viewProgress]);
     await stepFrames(2);
     expect([title(), sub(), buttonLabel()]).toEqual([UPDATE_COPY.ready("0.3.0"), UPDATE_COPY.readySub, UPDATE_COPY.restartInstall]);
-    // 收尾只留一次：改为退出时安装再改回来，已下好不再被留住
-    view.rerender(held({ kind: "install_on_exit", update: UPDATE }));
-    view.rerender(held(READY));
-    expect(title()).toBe(UPDATE_COPY.ready("0.3.0"));
   });
 
   it("换过源的下载完成：留住的次句带着换源说明，百分数接着这个源的平滑推满", async () => {
@@ -224,24 +220,6 @@ describe("更新卡下载完成时的收尾", () => {
     expect([title(), sub()]).toEqual(["正在下载 0.3.0 · 75%", "10.0 MB / 10.0 MB · 已换用备用下载源（2/4）"]);
     await stepFrames(HOLD_FRAMES);
     expect(title()).toBe("正在下载 0.3.0 · 100%");
-  });
-
-  it("减少动画：收尾时长为 0，完成的那一次提交就换成已下好", () => {
-    view = render(held(downloading(TOTAL / 2), true));
-    view.rerender(held(READY, true));
-    expect([title(), buttonLabel()]).toEqual([UPDATE_COPY.ready("0.3.0"), UPDATE_COPY.restartInstall]);
-  });
-
-  it("总量未知时没有满格可推：完成就换成已下好", () => {
-    view = render(held(downloading(3 * MB, null)));
-    view.rerender(held(READY));
-    expect(title()).toBe(UPDATE_COPY.ready("0.3.0"));
-  });
-
-  it("下载失败不留：失败的那一次提交就换成失败的说法", () => {
-    view = render(held(downloading(TOTAL / 2)));
-    view.rerender(held({ kind: "download_failed", update: UPDATE, reason: "连接被重置", signature: false, network: null, sourcesTried: 1, refusal: null }));
-    expect(title()).toBe(UPDATE_COPY.available("0.3.0"));
   });
 });
 

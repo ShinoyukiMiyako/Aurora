@@ -7,9 +7,9 @@ import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LogLine } from "../domain/types";
 import { APP_NAME } from "../lib/app-info";
-import { scrollGlide } from "../lib/motion";
+import { scrollGlide, springAt } from "../lib/motion";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { focusByKeyboard, keydown, render, stubResizeObserver, waitForFrames, type Rendered, type ResizeObserverStub } from "../test/dom";
+import { drainFrames, focusByKeyboard, keydown, render, stepFrames, stubResizeObserver, waitForFrames, type Rendered, type ResizeObserverStub } from "../test/dom";
 import {
   countLogLevels,
   distanceFromBottom,
@@ -20,6 +20,7 @@ import {
   LOG_ROW_HEIGHT,
   LogConsole,
   longestTextColumns,
+  noteClearDelay,
   STICK_THRESHOLD,
   textColumns,
   WRAP_RENDER_LIMIT,
@@ -622,6 +623,50 @@ describe("贴底与跳到最新", () => {
     expect(scroller().scrollTop).toBe(scroller().scrollHeight);
   });
 
+  it("滚到底的补间尾段来了新的一批行：推远的那一截从当前位置改道、摊到余下的帧上，不在一帧里补齐；到时长落在当时的底部并恢复贴底", async () => {
+    // 实时会话：环形缓冲只在尾部追加，已有的行对象不换；每批 3 行
+    const all = lines(207);
+    const batch = 3 * LOG_ROW_HEIGHT;
+    mount({ lines: all.slice(0, 200), live: true });
+    userScroll(maxTop(200) - 3000);
+    const total = glideMs(3000);
+    // 按 250 Hz 左右的帧推进（宿主是高刷屏）：尾段还剩十几到几十帧，推远的那一截有帧可摊
+    const FAST_MS = 4;
+    // 两批分别在补间走到约 85% 与 92% 的时刻进来：此时补间本身几乎停下，原写法会把整批行高落在下一帧里
+    const arrivals = [Math.round(total * 0.85), Math.round(total * 0.92)];
+    clickJump();
+    frame(FAST_MS);
+    let count = 200;
+    let elapsed = 0;
+    let last = scroller().scrollTop;
+    const steps: number[] = [];
+    while (queued.size > 0) {
+      if (elapsed > 1000) throw new Error("补间走了一秒还没结束");
+      elapsed += FAST_MS;
+      if (arrivals.length > 0 && elapsed >= arrivals[0]) {
+        arrivals.shift();
+        count += 3;
+        const before = scroller().scrollTop;
+        view?.rerender(ui({ lines: all.slice(0, count), live: true }));
+        expect(scroller().scrollTop, "提交新行时不写滚动位置").toBe(before);
+      }
+      frame(FAST_MS);
+      if (count > 200) steps.push(scroller().scrollTop - last);
+      last = scroller().scrollTop;
+    }
+    expect(arrivals, "两批都在补间途中进来").toEqual([]);
+    expect(steps.length).toBeGreaterThan(10);
+    for (const step of steps) expect(step, "只往下走").toBeGreaterThanOrEqual(0);
+    expect(Math.max(...steps), `批次进来之后每帧的位移：${steps.map((s) => s.toFixed(1)).join(", ")}`).toBeLessThan(batch / 2);
+    // 到时长：写到这一刻的底部，补间结束
+    expect(scroller().scrollTop).toBe(maxTop(206));
+    expect(scrollToCalls).toEqual([]);
+    await waitForFrames(() => expect(jump()).toBeUndefined());
+    // 恢复贴底：之后新行照常即时贴底
+    view?.rerender(ui({ lines: all, live: true }));
+    expect(scroller().scrollTop).toBe(scroller().scrollHeight);
+  });
+
   it("换行时落点附近有从没量过的折行行：跳到最新之后每一行都按量出的真实高度排开，不叠在下一行上", async () => {
     // 在底部打开换行再上翻：之后新来的行从没挂载过、没量过；其中后段的行折成两行
     mount({ lines: lines(40) });
@@ -965,6 +1010,15 @@ describe("LogConsole 样式", () => {
     expect(zIndex(ring)).toBeGreaterThan(zIndex(rule(".omittedSlot")));
   });
 
+  it("日志区的下角圆角取所在页面经 --log-corner 给的值、不给时是直角，焦点环与滚动区的底色沿它收住，不越出外面卡片的圆角", () => {
+    expect(rule(".area")).toMatch(/border-bottom-left-radius: var\(--log-corner, 0\);/);
+    expect(rule(".area")).toMatch(/border-bottom-right-radius: var\(--log-corner, 0\);/);
+    for (const inner of [rule(".area:has(> .scroller:focus-visible)::after"), rule(".scroller")]) {
+      expect(inner).toMatch(/border-bottom-left-radius: inherit;/);
+      expect(inner).toMatch(/border-bottom-right-radius: inherit;/);
+    }
+  });
+
   it("省略说明的计数槽按四位定宽、右对齐，用等宽数字：位数在四位以内变化时后面的文字不右移", () => {
     expect(rule(".omittedCount")).toMatch(/display: inline-block;/);
     expect(rule(".omittedCount")).toMatch(/min-width: 4ch;/);
@@ -1113,6 +1167,125 @@ describe("筛选后为空", () => {
       expect(noteEl()?.textContent).toBe(NOTE);
       expect(noteEl()?.hasAttribute("data-glide")).toBe(false);
     });
+  });
+});
+
+describe("省略说明条的进出时机", () => {
+  // 逐帧看条的透明度，走假时钟：用例开始前在真实计时器上把帧循环排空再换假时钟，收尾先卸载、再排空、再换回真实计时器
+  const BAR = 31;
+  const NOTE = "当前筛选下没有日志行";
+  const infoOnly = [line(0, "info"), line(1, "info")];
+  beforeEach(async () => {
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+      if (this.textContent?.startsWith("较早的") === true) return BAR;
+      return this.dataset.index === undefined ? 0 : LOG_ROW_HEIGHT;
+    });
+    await drainFrames();
+    vi.useFakeTimers();
+  });
+  afterEach(async () => {
+    view?.unmount();
+    view = undefined;
+    await drainFrames();
+    vi.useRealTimers();
+  });
+  /** 说明条外面那层出现动画的包裹：透明度写在它身上。 */
+  const slot = () => scroller().querySelector<HTMLElement>(`.${styles.omittedSlot}`);
+  const opacityOf = (el: HTMLElement | null) => {
+    if (el === null) throw new Error("说明条不在");
+    return Number(el.style.opacity);
+  };
+  const toggleWrap = () => act(() => document.querySelector<HTMLButtonElement>('button[aria-label="自动换行"]')?.click());
+
+  it("关掉换行、说明条随之收起：后面的行同一次提交就排到了顶上，条当帧撤掉，不在它们上面原地淡出", async () => {
+    mount({ lines: lines(WRAP_RENDER_LIMIT + 3) });
+    toggleWrap();
+    await stepFrames(30);
+    const bar = slot();
+    expect(opacityOf(bar)).toBe(1);
+    toggleWrap();
+    await stepFrames(1);
+    expect(bar?.isConnected).toBe(false);
+  });
+
+  it("换筛选、说明条随之收起（含换到筛选为空、说明排到顶上）：条当帧撤掉", async () => {
+    const mixed = [...Array.from({ length: WRAP_RENDER_LIMIT - 10 }, (_, i) => line(i, "warn")), ...lines(20, WRAP_RENDER_LIMIT)];
+    mount({ lines: mixed, filteredEmpty: NOTE });
+    toggleWrap();
+    await stepFrames(30);
+    const bar = slot();
+    expect(opacityOf(bar)).toBe(1);
+    view?.rerender(ui({ lines: mixed, level: "warn", filteredEmpty: NOTE }));
+    await stepFrames(1);
+    expect(bar?.isConnected).toBe(false);
+
+    view?.rerender(ui({ lines: mixed, level: "all", filteredEmpty: NOTE }));
+    await stepFrames(30);
+    const again = slot();
+    expect(opacityOf(again)).toBe(1);
+    view?.rerender(ui({ lines: mixed, level: "error", filteredEmpty: NOTE }));
+    expect(scroller().textContent).toContain(NOTE);
+    await stepFrames(1);
+    expect(again?.isConnected).toBe(false);
+  });
+
+  it("不是用户切换带出的收起（换成了没有省略的日志）：条照常原地淡出", async () => {
+    mount({ lines: lines(3), dropped: 5 });
+    const bar = slot();
+    view?.rerender(ui({ lines: lines(3), dropped: 0 }));
+    await stepFrames(1);
+    expect(bar?.isConnected).toBe(true);
+    expect(bar?.hasAttribute("inert")).toBe(true);
+    await stepFrames(3);
+    expect(opacityOf(bar)).toBeGreaterThan(0);
+    expect(opacityOf(bar)).toBeLessThan(1);
+    await stepFrames(60);
+    expect(bar?.isConnected).toBe(false);
+  });
+
+  it("说明已在屏上时说明条出现：条等说明那一行滑到条的下沿以下再淡入，不半透明地叠在说明上", async () => {
+    mount({ lines: infoOnly, level: "error", filteredEmpty: NOTE });
+    view?.rerender(ui({ lines: infoOnly, level: "error", filteredEmpty: NOTE, dropped: 5 }));
+    const bar = slot();
+    // 条高 31：说明要走过 23 px，settle 弹簧约 101 ms，从画出第一帧之后算起；第 5 帧（80 ms）仍是透明的
+    await stepFrames(5);
+    expect(opacityOf(bar)).toBe(0);
+    await stepFrames(10);
+    expect(opacityOf(bar)).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ["后面是日志行：行经上内边距在条出现的那一帧就让开了", () => mount({ lines: lines(3) }), (dropped: number) => ui({ lines: lines(3), dropped })],
+    [
+      "说明与条一起出现：说明直接排在条下面，不滑",
+      () => mount({ lines: infoOnly, filteredEmpty: NOTE }),
+      (dropped: number) => ui({ lines: infoOnly, level: "error", filteredEmpty: NOTE, dropped }),
+    ],
+    [
+      "减少动画：说明一步到位",
+      () => {
+        view = render(<MotionConfig reducedMotion="always">{ui({ lines: infoOnly, level: "error", filteredEmpty: NOTE })}</MotionConfig>);
+      },
+      (dropped: number) => <MotionConfig reducedMotion="always">{ui({ lines: infoOnly, level: "error", filteredEmpty: NOTE, dropped })}</MotionConfig>,
+    ],
+  ] as const)("%s：条画出第一帧之后就淡入，不等", async (_, first, next) => {
+    first();
+    view?.rerender(next(5));
+    const bar = slot();
+    await stepFrames(3);
+    expect(opacityOf(bar)).toBeGreaterThan(0);
+  });
+
+  it("说明让出条高要等多久：settle 弹簧把说明那一行整个送到条的下沿以下的时刻，早一毫秒还差一点", () => {
+    for (const bar of [30, 31, 38, 120]) {
+      const delay = noteClearDelay(bar);
+      const moved = (t: number) => (1 - springAt("settle", 1, 0, t).x) * bar;
+      // 说明的正文从上内边距 8 px 处起
+      expect(moved(delay)).toBeGreaterThanOrEqual(bar - 8);
+      expect(moved(delay - 0.001)).toBeLessThan(bar - 8);
+    }
+    expect(noteClearDelay(30)).toBeCloseTo(0.099, 3);
+    expect(noteClearDelay(8)).toBe(0);
   });
 });
 

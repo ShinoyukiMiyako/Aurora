@@ -5,12 +5,15 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { act, Profiler } from "react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
-import { CONFIRM_COPY, LAUNCH_COPY, PHASE_LABEL, SESSION_COPY, STOPPED_LABEL } from "../copy/flows";
+import { CONFIRM_COPY, failureCopy, LAUNCH_COPY, PHASE_LABEL, SESSION_COPY, STOPPED_LABEL } from "../copy/flows";
 import { stubCanvas } from "../art/illustrations/test-canvas";
+import { IpcError } from "../ipc/errors";
 import { GAME_EXIT_EVENT, GAME_LOG_EVENT, LAUNCH_PHASE_EVENT } from "../ipc/launch";
 import { formatSpeed } from "../domain/format";
 import { BREATH_DELAY_VAR } from "../launch/breath";
+import { fade } from "../lib/motion";
 import { feedSpeed, publishSpeed, SPEED_REFRESH_MS, startSpeed } from "../lib/progress-display";
+import { springTrack } from "../lib/slide";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { startSession, type SessionState } from "../state/session";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
@@ -752,6 +755,370 @@ describe("状态岛", () => {
       [styles.action, false, "0", "scale(0.98)"],
       [styles.action, false, "0", "scale(0.98)"],
     ]);
+  });
+
+  describe("新插入的按钮不与压着它的按钮叠着画：先停在全透明，等滑过来的兄弟让开、原地退场的按钮淡完再淡入", () => {
+    // jsdom 不做布局、也没有 Web Animations：动作行各项的布局矩形与「完整日志」身上让位的那一段轨迹由这里给出，
+    // 按钮上的 animate 只记下调用。动作行右对齐，「完整日志」在最左，崩溃后右边插进「收起」「查看诊断」，它从右边滑回来
+    const GAP = 8;
+    const LOGS_W = 76;
+    const DISMISS_W = 56;
+    interface Box {
+      left: number;
+      width: number;
+      /** 不写的在第一行。 */
+      top?: number;
+    }
+    interface Hold {
+      button: HTMLButtonElement;
+      frames: Keyframe[];
+      options: KeyframeAnimationOptions;
+      fill: FillMode | undefined;
+      startTime: number | null;
+      cancelled: boolean;
+    }
+    let boxes: Map<string, Box>;
+    let passage: { startTime: number; effect: FakeKeyframeEffect } | null;
+    let holds: Hold[];
+    // 换组之后排到下一帧的回调由这里收着，用例在 firstFrame 里按 frameAt 跑；framer-motion 在模块加载时已取走 jsdom 自己的那个，不受影响
+    let pendingFrames: FrameRequestCallback[];
+    /** 换组之后第一帧跑 rAF 回调的那一刻：比提交时的 performance.now() 晚，起步时刻必须按它算。 */
+    let frameAt: number;
+
+    class FakeKeyframeEffect {
+      constructor(
+        private readonly frames: Keyframe[],
+        private readonly ms: number,
+      ) {}
+      getKeyframes() {
+        return this.frames.map((frame, i) => ({ ...frame, offset: null, computedOffset: i / (this.frames.length - 1), easing: "linear", composite: "auto" }));
+      }
+      getTiming() {
+        const duration = this.ms;
+        return { duration };
+      }
+    }
+
+    const boxOf = (el: HTMLElement): Box | null => {
+      if (!el.classList.contains(styles.action)) return null;
+      const box = boxes.get(String(el.textContent));
+      if (box === undefined) throw new Error(`动作行里的「${el.textContent}」没有登记布局`);
+      return box;
+    };
+
+    beforeEach(() => {
+      boxes = new Map();
+      passage = null;
+      holds = [];
+      pendingFrames = [];
+      frameAt = performance.now() + 20 + Math.round(Math.random() * 600) / 10;
+      vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => pendingFrames.push(callback));
+      vi.stubGlobal("KeyframeEffect", FakeKeyframeEffect);
+      // jsdom 自己的 offset* 恒为 0：动作行以外的元素照旧给 0
+      vi.spyOn(HTMLElement.prototype, "offsetLeft", "get").mockImplementation(function (this: HTMLElement) {
+        const box = boxOf(this);
+        return box === null ? 0 : box.left;
+      });
+      vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function (this: HTMLElement) {
+        const box = boxOf(this);
+        return box === null ? 0 : box.width;
+      });
+      vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
+        const box = boxOf(this);
+        return box === null || box.top === undefined ? 0 : box.top;
+      });
+      vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+        return boxOf(this) === null ? 0 : 30;
+      });
+      Object.defineProperty(HTMLElement.prototype, "getAnimations", {
+        configurable: true,
+        writable: true,
+        value: function (this: HTMLElement) {
+          const sliding = this.classList.contains(styles.action) && this.textContent === ISLAND_COPY.fullLog && !this.hasAttribute("inert");
+          return passage !== null && sliding ? [passage] : [];
+        },
+      });
+      // 只装在按钮上：framer-motion 看 Element.prototype 上有没有 animate 决定走不走 Web Animations，让位看容器（div）有没有
+      Object.defineProperty(HTMLButtonElement.prototype, "animate", {
+        configurable: true,
+        writable: true,
+        value: function (this: HTMLButtonElement, frames: Keyframe[], options: KeyframeAnimationOptions) {
+          const hold: Hold = { button: this, frames, options, fill: undefined, startTime: null, cancelled: false };
+          holds.push(hold);
+          return {
+            get startTime() {
+              return hold.startTime;
+            },
+            set startTime(value: number | null) {
+              hold.startTime = value;
+            },
+            effect: {
+              updateTiming(timing: OptionalEffectTiming) {
+                hold.fill = timing.fill;
+              },
+            },
+            cancel() {
+              hold.cancelled = true;
+            },
+          };
+        },
+      });
+    });
+    afterEach(() => {
+      Reflect.deleteProperty(HTMLElement.prototype, "getAnimations");
+      Reflect.deleteProperty(HTMLButtonElement.prototype, "animate");
+    });
+
+    /**
+     * 跑一遍这时排着的帧回调：换组之后的第一帧，跑的时候此刻是 frameAt。主线程前面压着长任务时，帧的时间戳是这一帧开始排的时刻、
+     * 比提交还早，这里也给一个比提交早的时间戳，起步时刻不能取它。
+     */
+    async function firstFrame() {
+      const due = pendingFrames.splice(0);
+      const stamp = performance.now() - 64;
+      const clock = vi.spyOn(performance, "now").mockReturnValue(frameAt);
+      try {
+        act(() => {
+          for (const callback of due) callback(stamp);
+        });
+      } finally {
+        clock.mockRestore();
+      }
+      await flush();
+    }
+
+    /** 运行中打开详情，再让游戏崩溃，画出崩溃后的第一帧：动作行从「完整日志」「结束游戏」换成「完整日志」「收起」「查看诊断」。 */
+    async function crashWithDetailOpen() {
+      ipc.overrides.set("launch_game", () => ({ pid: 4242 }));
+      view = render(
+        <LauncherProvider>
+          <ShellProvider>
+            <Probe />
+            <StatusIsland />
+            <OverlayRoot />
+          </ShellProvider>
+        </LauncherProvider>,
+      );
+      await flush();
+      await act(async () => {
+        await launcher.actions.launch("生存");
+        await settle();
+      });
+      const island = document.querySelector<HTMLButtonElement>("[aria-haspopup='dialog']");
+      if (island === null) throw new Error("状态岛没有出现");
+      act(() => island.click());
+      await flush();
+      expect(holds).toEqual([]);
+      pendingFrames.length = 0;
+      act(() => emit(GAME_EXIT_EVENT, { version_id: "生存", exit_code: 1, crashed: true, killed: false, duration_ms: 60_000 }));
+      await flush();
+      expect(launcher.state.session?.phase).toBe("crashed");
+      // 换组的那次提交本身不挂淡出与停住，等到第一帧
+      expect(holds).toEqual([]);
+      await firstFrame();
+    }
+
+    const buttonOf = (label: string) => {
+      const found = [...liveDetail().querySelectorAll<HTMLButtonElement>(`.${styles.action}:not([inert]) button`)].filter((b) => b.textContent === label);
+      if (found.length !== 1) throw new Error(`动作行里应有且只有一个「${label}」，实为 ${found.length} 个`);
+      return found[0];
+    };
+
+    // 起点 dx 在 72 以下时只压过「收起」（「完整日志」右沿到「查看诊断」左沿是 8 + 56 + 8），以上时两颗都压过
+    it.each([
+      ["只压过「收起」", 40 + Math.round(Math.random() * 25)],
+      ["两颗都压过", 100 + Math.round(Math.random() * 40)],
+    ])("%s：各自等到「完整日志」最后一次压在自己上面之后的那一帧才开始淡入", async (_, dx) => {
+      const crashW = 60 + Math.round(Math.random() * 40);
+      const dismissLeft = LOGS_W + GAP;
+      const crashLeft = dismissLeft + DISMISS_W + GAP;
+      boxes.set(ISLAND_COPY.fullLog, { left: 0, width: LOGS_W });
+      // 退场的「结束游戏」：popLayout 抽出布局之前要量它。摆在不压着新按钮的地方，这两条只看让位；压着时见下面的用例
+      boxes.set(LAUNCH_COPY.stopGame, { left: 400, width: 88 });
+      boxes.set(LAUNCH_COPY.dismiss, { left: dismissLeft, width: DISMISS_W });
+      boxes.set(LAUNCH_COPY.viewCrash, { left: crashLeft, width: crashW });
+      const track = springTrack("morph", dx, 0, 0, 0);
+      const start = performance.now() + 1000 + Math.round(Math.random() * 1e5) / 10;
+      passage = { startTime: start, effect: new FakeKeyframeEffect(track.frames, track.duration) };
+      const xs = track.frames.map((frame) => parseFloat(String(frame.translate)));
+      const step = track.duration / (xs.length - 1);
+      /** 「完整日志」压在 [left, left + width) 上的最后一个关键帧之后那一帧的时刻；从没压上时为 null。 */
+      const clearOf = (box: Box) => {
+        let last = -1;
+        xs.forEach((x, i) => {
+          if (x + LOGS_W > box.left && x < box.left + box.width) last = i;
+        });
+        return last < 0 ? null : start + (last + 1) * step;
+      };
+
+      await crashWithDetailOpen();
+
+      const dismissAt = clearOf({ left: dismissLeft, width: DISMISS_W });
+      const crashAt = clearOf({ left: crashLeft, width: crashW });
+      // 前提：「收起」紧挨着「完整日志」的终点，一定被压过；「查看诊断」按 dx 分两种
+      if (dismissAt === null) throw new Error("「收起」应当被「完整日志」压过");
+      expect(crashAt !== null).toBe(dx > GAP + DISMISS_W + GAP);
+      const expected = [{ label: LAUNCH_COPY.dismiss, startTime: dismissAt }, ...(crashAt === null ? [] : [{ label: LAUNCH_COPY.viewCrash, startTime: crashAt }])];
+      expect(holds.map((h) => ({ label: h.button.textContent, startTime: h.startTime }))).toEqual(expected);
+      expect(holds.map((h) => h.button)).toEqual(expected.map((e) => buttonOf(e.label)));
+      for (const hold of holds) {
+        // 从全透明淡到按钮自己的透明度，淡入用 fade.in；起步之前停在第一帧
+        expect(hold.frames).toEqual([{ opacity: 0 }, {}]);
+        expect(hold.options.duration).toBe(fade.in.duration * 1000);
+        expect(hold.fill).toBe("backwards");
+      }
+      // 停住的时长确实覆盖了压着的那一段：起步时「完整日志」已离开「收起」
+      const leftAt = Math.round((dismissAt - start) / step);
+      expect(xs[leftAt] + LOGS_W).toBeLessThanOrEqual(dismissLeft);
+      expect(xs[leftAt - 1] + LOGS_W).toBeGreaterThan(dismissLeft);
+    });
+
+    it("让位没有起动画（减少动画，或这次没有兄弟被挪动），退场的按钮也不压着新按钮：新按钮照常淡入，不停住", async () => {
+      boxes.set(ISLAND_COPY.fullLog, { left: 0, width: LOGS_W });
+      boxes.set(LAUNCH_COPY.stopGame, { left: 400, width: 88 });
+      boxes.set(LAUNCH_COPY.dismiss, { left: LOGS_W + GAP, width: DISMISS_W });
+      boxes.set(LAUNCH_COPY.viewCrash, { left: LOGS_W + GAP + DISMISS_W + GAP, width: 80 });
+      await crashWithDetailOpen();
+      expect(holds).toEqual([]);
+    });
+
+    const isFadeOut = (hold: Hold) => hold.frames.length === 2 && hold.frames[0].opacity === undefined && hold.frames[1].opacity === 0;
+    const QUICK_MS = fade.quick.duration * 1000;
+
+    /** 退场项按钮上的那一段淡出：钉在 at 起步、用 fade.quick 淡到全透明并停在那里。 */
+    function expectFadedAway(hold: Hold, at: number) {
+      expect(hold.frames).toEqual([{}, { opacity: 0 }]);
+      expect(hold.options.duration).toBe(QUICK_MS);
+      expect(hold.fill).toBe("forwards");
+      expect(hold.startTime).toBe(at);
+    }
+
+    // 「收起」与「查看诊断」都落在退场的「结束游戏」原处；「完整日志」从右边滑回来只压过「收起」
+    it.each([
+      ["让位早已走完", -2000],
+      ["让位晚于退场的按钮淡完", 1000],
+    ])("退场的按钮与滑过来的兄弟都压着新按钮（%s）：新按钮等两者里晚的那个", async (_, offset) => {
+      const dx = 40 + Math.round(Math.random() * 25);
+      const crashW = 60 + Math.round(Math.random() * 40);
+      const dismissLeft = LOGS_W + GAP;
+      const crashLeft = dismissLeft + DISMISS_W + GAP;
+      boxes.set(ISLAND_COPY.fullLog, { left: 0, width: LOGS_W });
+      boxes.set(LAUNCH_COPY.stopGame, { left: dismissLeft, width: 88 + Math.round(Math.random() * 20) });
+      boxes.set(LAUNCH_COPY.dismiss, { left: dismissLeft, width: DISMISS_W });
+      boxes.set(LAUNCH_COPY.viewCrash, { left: crashLeft, width: crashW });
+      const track = springTrack("morph", dx, 0, 0, 0);
+      const start = frameAt + offset;
+      passage = { startTime: start, effect: new FakeKeyframeEffect(track.frames, track.duration) };
+      const xs = track.frames.map((frame) => parseFloat(String(frame.translate)));
+      const step = track.duration / (xs.length - 1);
+      let last = -1;
+      xs.forEach((x, i) => {
+        if (x + LOGS_W > dismissLeft) last = i;
+      });
+      if (last < 0) throw new Error("「收起」应当被「完整日志」压过");
+      const passedAt = start + (last + 1) * step;
+
+      await crashWithDetailOpen();
+
+      const [away, ...fadeIns] = holds;
+      expectFadedAway(away, frameAt);
+      expect(away.button.textContent).toBe(LAUNCH_COPY.stopGame);
+      expect(away.button.closest(`.${styles.action}`)?.hasAttribute("inert")).toBe(true);
+      expect(fadeIns.some(isFadeOut)).toBe(false);
+      const vacated = frameAt + QUICK_MS;
+      expect(fadeIns.map((h) => ({ button: h.button, startTime: h.startTime, fill: h.fill }))).toEqual([
+        { button: buttonOf(LAUNCH_COPY.dismiss), startTime: Math.max(passedAt, vacated), fill: "backwards" },
+        { button: buttonOf(LAUNCH_COPY.viewCrash), startTime: vacated, fill: "backwards" },
+      ]);
+    });
+
+    const JAVA_PARAMS = { mc_version: "1.20.1", current: 8, major: 17, pinned_by: "global" };
+    const JAVA_FIX = failureCopy("java_too_old", JAVA_PARAMS, { accountName: "Steve", accountKind: "microsoft", javaPinned: false }).fix.label;
+
+    /**
+     * 加载中打开详情，再让启动以 java_too_old 失败：动作行从「完整日志」「取消启动」换成「完整日志」「收起」修复按钮。
+     * 面板窄时折行：「完整日志」「收起」留在第一行，「收起」落在退场的「取消启动」原处；修复按钮另起一行。
+     * frame 为真时接着画出失败后的第一帧。
+     */
+    async function failWithDetailOpen(frame = true): Promise<void> {
+      const LINE = 278;
+      const CANCEL_W = 96;
+      const FIX_W = 136;
+      boxes.set(LAUNCH_COPY.cancel, { left: LINE - CANCEL_W, width: CANCEL_W });
+      boxes.set(ISLAND_COPY.fullLog, { left: LINE - DISMISS_W - GAP - LOGS_W, width: LOGS_W });
+      boxes.set(LAUNCH_COPY.dismiss, { left: LINE - DISMISS_W, width: DISMISS_W });
+      boxes.set(JAVA_FIX, { left: LINE - FIX_W, width: FIX_W, top: 38 });
+      const launch = deferred<never>();
+      ipc.overrides.set("launch_game", () => launch.promise);
+      view = render(
+        <LauncherProvider>
+          <ShellProvider>
+            <Probe />
+            <StatusIsland />
+            <OverlayRoot />
+          </ShellProvider>
+        </LauncherProvider>,
+      );
+      await flush();
+      act(() => void launcher.actions.launch("生存"));
+      await flush();
+      const island = document.querySelector<HTMLButtonElement>("[aria-haspopup='dialog']");
+      if (island === null) throw new Error("状态岛没有出现");
+      act(() => island.click());
+      await flush();
+      expect(holds).toEqual([]);
+      pendingFrames.length = 0;
+      act(() => launch.reject(new IpcError("java_too_old", "Java 太旧", JAVA_PARAMS)));
+      await flush();
+      expect(launcher.state.session?.phase).toBe("failed");
+      expect(holds).toEqual([]);
+      if (frame) await firstFrame();
+    }
+
+    it("加载转失败（折行）：退场的「取消启动」压着新插入的「收起」，它先淡到全透明，「收起」等它淡完才淡入；另起一行的修复按钮照常淡入", async () => {
+      await failWithDetailOpen();
+      expect(holds).toHaveLength(2);
+      const [away, dismiss] = holds;
+      // 从失败后的第一帧起淡：那一帧画出来时它还是满的，不是一出来就淡掉了一截
+      expectFadedAway(away, frameAt);
+      expect(away.button.textContent).toBe(LAUNCH_COPY.cancel);
+      expect(away.button.closest(`.${styles.action}`)?.hasAttribute("inert")).toBe(true);
+      expect(dismiss.button).toBe(buttonOf(LAUNCH_COPY.dismiss));
+      expect(dismiss.frames).toEqual([{ opacity: 0 }, {}]);
+      expect(dismiss.options.duration).toBe(fade.in.duration * 1000);
+      expect(dismiss.fill).toBe("backwards");
+      // 「取消启动」淡完的那一刻「收起」才开始淡入：两者没有同时看得见的一帧
+      expect(dismiss.startTime).toBe(frameAt + QUICK_MS);
+      expect(holds.some((h) => h.button === buttonOf(JAVA_FIX))).toBe(false);
+    });
+
+    it("淡出中的退场项又回来了（失败后马上重新启动）：撤掉它按钮上的那段淡出，不停在全透明", async () => {
+      await failWithDetailOpen();
+      const away = holds[0];
+      expect(away.button.textContent).toBe(LAUNCH_COPY.cancel);
+      expect(away.cancelled).toBe(false);
+      ipc.overrides.set("launch_game", () => deferred<never>().promise);
+      act(() => void launcher.actions.launch("生存"));
+      await flush();
+      expect(launcher.state.session?.phase).not.toBe("failed");
+      // 还是原来那颗按钮：退场没播完，framer-motion 让它原地回来
+      expect(buttonOf(LAUNCH_COPY.cancel)).toBe(away.button);
+      expect(away.cancelled).toBe(true);
+    });
+
+    it("退场项在失败后的第一帧画出来之前就回来了：不给它挂淡出，回来的按钮等原处退场的「收起」淡完再淡入", async () => {
+      await failWithDetailOpen(false);
+      const cancel = liveDetail().querySelector<HTMLButtonElement>(`.${styles.action}[inert] button`);
+      if (cancel === null || cancel.textContent !== LAUNCH_COPY.cancel) throw new Error("退场中的应是「取消启动」");
+      ipc.overrides.set("launch_game", () => deferred<never>().promise);
+      act(() => void launcher.actions.launch("生存"));
+      await flush();
+      expect(buttonOf(LAUNCH_COPY.cancel)).toBe(cancel);
+      // 两次换组排下的两帧回调一起跑：第一次换组时退场的「取消启动」已经回来，只有第二次换组退场的「收起」淡出
+      await firstFrame();
+      expect(holds.filter(isFadeOut).map((h) => h.button.textContent)).toEqual([LAUNCH_COPY.dismiss]);
+      expect(holds.filter((h) => h.button === cancel).map((h) => ({ frames: h.frames, startTime: h.startTime }))).toEqual([{ frames: [{ opacity: 0 }, {}], startTime: frameAt + QUICK_MS }]);
+    });
   });
 
   describe("结束这一局后动作行不删按钮：结束按钮留在原位改为不可用，「完整日志」不挪", () => {

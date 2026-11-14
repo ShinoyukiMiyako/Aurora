@@ -145,11 +145,14 @@ export function pinnedInstances(state: LauncherState): InstanceSummary[] {
 }
 
 /**
- * 导入中的整合包占位项：实例目录建好之前后端不认这个名字，固定只会报找不到，实例库卡片与详情页头图的固定入口据此禁用。
- * 新建的占位项不在此列，状态层替它记着装好后要不要固定。只在占位项上才去翻任务表。
+ * 有进行中的整合包导入任务指向这个实例名：实例库卡片与详情页头图的固定入口据此禁用，状态层的 togglePin 也据此拦下。目录建好之前后端不认这个名字，
+ * 固定只会报找不到；建好之后装到一半的目录被重扫扫到、扫描项接替了占位项，后端倒是认了，可导入失败或取消时它会删掉目录，
+ * 留下一条指向不存在实例的固定。所以按任务判断、不看是不是占位项，与状态层按任务认新建实例同一口径。
+ * 新建的不在此列，状态层替它记着装好后要不要固定。导入中的实例在派生里一定是安装中（占位项与扫到的半成品都是），
+ * 先看它：其余实例每次状态变化不必翻任务表。
  */
-export function importingPlaceholder(state: Pick<LauncherState, "tasks">, inst: Pick<InstanceSummary, "id" | "placeholder">): boolean {
-  return inst.placeholder && state.tasks.some((t) => t.kind === "modpack" && t.instanceId === inst.id && isActiveTask(t));
+export function importingModpack(state: Pick<LauncherState, "tasks">, inst: Pick<InstanceSummary, "id" | "status">): boolean {
+  return inst.status === "installing" && state.tasks.some((t) => t.kind === "modpack" && t.instanceId === inst.id && isActiveTask(t));
 }
 
 /** 还能再固定一个（已固定的取消固定不受此限）。 */

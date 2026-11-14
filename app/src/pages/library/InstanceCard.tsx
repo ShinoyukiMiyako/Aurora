@@ -21,7 +21,7 @@ import { popMark } from "../../lib/motion";
 import { useNav } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
-import { busyInstanceId, canPinMore, findInstance, importingPlaceholder } from "../../state/selectors";
+import { busyInstanceId, canPinMore, findInstance, importingModpack } from "../../state/selectors";
 import { Appear } from "../../ui/Appear";
 import { Card, CardTitleButton } from "../../ui/Card";
 import { Cover } from "../../ui/Cover";
@@ -59,7 +59,7 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
   const currentTag = useReducedMotionConfig() === true ? popMark.reduced : popMark.tag;
   const busy = useLauncherSelector((s) => busyInstanceId(s) === id);
   const canPin = useLauncherSelector(canPinMore);
-  const importing = useLauncherSelector((s) => importingPlaceholder(s, inst));
+  const importing = useLauncherSelector((s) => importingModpack(s, inst));
   // 崩溃报告不会被之后的正常启动清空：菜单项按「崩溃过」出现，提示只在之后没再正常玩过时给出；
   // 刚崩溃、列表还没重扫到崩溃时刻时，以会话的崩溃态为准
   const viewKind = useLauncherSelector((s) => (findInstance(s, id) === undefined ? null : launchView(s, inst).kind));
@@ -73,6 +73,7 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
   const deleteReason = lockReason(locks.delete, "delete");
   const moveBlocked = moveReason(inst, locks);
   const pinAllowed = inst.pinned || canPin;
+  const importReason = inst.pinned ? LOCK_REASON.unpinImporting : LOCK_REASON.pinImporting;
   const cover = useInstanceCover(inst);
   const backdrop = useCoverBackdrop(inst);
   const justCrashed = viewKind === "crashed";
@@ -109,7 +110,7 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
       label: inst.pinned ? LIBRARY_COPY.menu.unpin : LIBRARY_COPY.menu.pin,
       icon: inst.pinned ? "pin-off" : "pin",
       disabled: importing || !pinAllowed,
-      disabledReason: importing ? LOCK_REASON.pinImporting : pinAllowed ? undefined : LIBRARY_COPY.menu.pinFull,
+      disabledReason: importing ? importReason : pinAllowed ? undefined : LIBRARY_COPY.menu.pinFull,
       onSelect: () => void togglePin(),
     },
     {
@@ -155,7 +156,7 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
       label={pinLabel}
       size="sm"
       pressed={inst.pinned}
-      disabledReason={importing ? LOCK_REASON.pinImporting : undefined}
+      disabledReason={importing ? importReason : undefined}
       tooltip={importing || pinAllowed}
       aria-disabled={pinAllowed ? undefined : true}
       className={styles.pin}

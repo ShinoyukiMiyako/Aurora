@@ -11,7 +11,7 @@ import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import type { RouteOf } from "../../state/route";
-import { render, stubResizeObserver, type Rendered } from "../../test/dom";
+import { drainFrames, render, stepFrames, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import type { InstanceDto } from "../../ipc/instances";
 import { bootOverrides, callsOf, cancelledError, deferred, emit, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
@@ -216,9 +216,11 @@ beforeEach(() => {
     return d.promise;
   });
 });
-afterEach(() => {
+afterEach(async () => {
   view?.unmount();
   view = undefined;
+  // 每个用例都重装一次假时钟：不先排空帧循环，后面的用例 framer-motion 一帧都推不动（见 test/dom 的 drainFrames）
+  await drainFrames();
   vi.useRealTimers();
 });
 
@@ -697,6 +699,17 @@ describe("下载任务页：进行中", () => {
     expect(leaving[0].querySelector('button[aria-label="取消任务"]')?.getAttribute("aria-disabled")).toBe("true");
   }
 
+  /**
+   * 「已结束」组随这次换组才出现，入场停在起点、等画出第一帧才起步；起步之前就被撤掉的还看不见，不播退场、随即移除。
+   * 要看它被清掉时留在原处淡出，清除之前先推几帧让它起步。
+   */
+  async function startEndedGroup() {
+    await stepFrames(3);
+    const group = [...page().querySelectorAll("section")].find((el) => el.querySelector("h2")?.textContent?.startsWith("已结束"))?.parentElement;
+    if (group === null || group === undefined) throw new Error("页面上没有「已结束」组");
+    expect(Number(group.style.opacity)).toBeGreaterThan(0);
+  }
+
   it("减少动画时任务完成：不留收尾这一拍，行立即换到已结束；进行中组里淡出的那份照收尾画满格，不在淡出时换成已结束的样子", async () => {
     const ids = await fourJavaTasks({ reduced: true });
     act(() => emit(CORE_EVENT, { kind: "download", task_id: `${ids[0]}#1`, total: 10, finished: 6, bytes: 60 * MB, total_bytes: 100 * MB, speed: 5 * MB }));
@@ -749,6 +762,7 @@ describe("下载任务页：进行中", () => {
     javaRuns.get(`${ids[0]}#1`)?.resolve(JAVA_8);
     await flush();
     expectLeavingAsFinishing(ids[0]);
+    await startEndedGroup();
 
     act(() => buttonIn(header(), "清除已结束（1）").click());
     await flush();
@@ -772,6 +786,7 @@ describe("下载任务页：进行中", () => {
     await flush();
     expect(headings()).toEqual(["进行中 · 3", "已结束 · 1"]);
     expect(taskRows(ids[0]).leaving).toHaveLength(1);
+    await startEndedGroup();
 
     act(() => buttonIn(header(), "清除已结束（1）").click());
     await flush();

@@ -82,3 +82,29 @@
   overflow-wrap: anywhere;
   user-select: text;
 }
+
+/*
+ * 底栏的按钮行铺满底栏：「跳过此版本」靠左，其余靠右。换阶段时退场的键被抽出布局、相对这一行定位，在原处淡出，
+ * 所以这一行要是定位元素
+ */
+.footerRow {
+  position: relative;
+  display: flex;
+  flex: 1 1 0;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sk-space-10);
+}
+
+/* 每个键外那层：按钮是 inline-flex，包在块里会多出行框的下沿空隙，底栏就高了几像素 */
+.footerItem {
+  display: flex;
+  flex: none;
+}
+
+.footerStart {
+  display: flex;
+  flex: none;
+  margin-right: auto;
+}

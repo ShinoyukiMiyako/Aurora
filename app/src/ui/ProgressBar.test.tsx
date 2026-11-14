@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { MotionConfig, type MotionValue } from "framer-motion";
 import { afterEach, describe, expect, it } from "vitest";
 import { render, waitForFrames, type Rendered } from "../test/dom";
-import { fillOffset, MIN_VISIBLE_PROGRESS, nextProgressTarget, ProgressBar, useSmoothProgress, visibleProgress } from "./ProgressBar";
+import { fillOffset, MIN_VISIBLE_PROGRESS, nextProgressTarget, ProgressBar, useSmoothProgress } from "./ProgressBar";
 import { ProgressRing, RING_EMPTY_TEXT, RING_PLACEHOLDER, RING_STROKE, ringHasLabel } from "./ProgressRing";
 
 let view: Rendered | undefined;
@@ -41,19 +41,16 @@ describe("进度推演", () => {
     expect(() => nextProgressTarget({ track: "a", target: 0 }, "a", Number.NaN)).toThrow(/NaN/);
   });
 
-  it("大于 0 时最少显示 2%，0 仍是空轨道", () => {
-    expect(MIN_VISIBLE_PROGRESS).toBe(0.02);
-    expect(visibleProgress(0)).toBe(0);
-    expect(visibleProgress(0.001)).toBe(0.02);
-    expect(visibleProgress(0.02)).toBe(0.02);
-    expect(visibleProgress(0.5)).toBe(0.5);
-    expect(visibleProgress(1.4)).toBe(1);
-  });
-
-  it("填充位移为 (p − 1) × 100%", () => {
+  // 弹簧补满时会略冲过 1：不截断的话位移变正，填充左缘离开轨道左端、露出一道缝
+  it("填充位移为 (p − 1) × 100%，截断到 [0, 1]，不加最少显示长度", () => {
     expect(fillOffset(0.25)).toBe("-75%");
     expect(fillOffset(1)).toBe("0%");
     expect(fillOffset(0)).toBe("-100%");
+    expect(fillOffset(1.0015)).toBe("0%");
+    expect(fillOffset(-0.2)).toBe("-100%");
+    expect(fillOffset(MIN_VISIBLE_PROGRESS / 4)).toBe("-99.5%");
+    const p = 0.05 + Math.random() * 0.9;
+    expect(Number.parseFloat(fillOffset(p))).toBeCloseTo((p - 1) * 100, 9);
   });
 });
 

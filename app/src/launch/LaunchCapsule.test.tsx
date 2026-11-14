@@ -44,6 +44,8 @@ let launcher: LauncherApi;
 let showSecond: (on: boolean) => void = () => {
   throw new Error("Host 还没挂载");
 };
+/** 交给第一枚胶囊的 onMorphStart；用例自己装，收尾清掉。 */
+let morphStart: (() => void) | undefined;
 
 function Host() {
   launcher = useLauncher();
@@ -52,7 +54,7 @@ function Host() {
   return (
     <>
       <button type="button">别处</button>
-      {launcher.state.instances.some((i) => i.id === "生存") && <LaunchCapsule instanceId="生存" />}
+      {launcher.state.instances.some((i) => i.id === "生存") && <LaunchCapsule instanceId="生存" onMorphStart={morphStart} />}
       {second && (
         <div data-testid="second">
           <LaunchCapsule instanceId="生存" />
@@ -107,6 +109,7 @@ beforeEach(async () => {
 afterEach(() => {
   view?.unmount();
   view = undefined;
+  morphStart = undefined;
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -629,5 +632,46 @@ describe("换面与文字", () => {
     expect(leave(true, {}, {})).toEqual({ opacity: 0, transition: fade.out });
     expect(enter(false, {}, {})).toEqual({ opacity: 0, y: 6 });
     expect(leave(false, {}, {})).toEqual({ opacity: 0, y: -6, transition: fade.out });
+  });
+});
+
+describe("形变起步的回调", () => {
+  /**
+   * jsdom 不做布局：胶囊的外框按展开与否给两种宽度（就绪 148、展开 312，同高 56）。
+   * 布局动画在提交前后各量一次外框，据此认出它变宽了、起一段形变。
+   */
+  function sizedCapsule(): HTMLElement {
+    const capsule = document.querySelector<HTMLElement>(`[role="group"][aria-label="${LAUNCH_COPY.group("生存")}"]`);
+    if (capsule === null) throw new Error("找不到启动胶囊");
+    capsule.getBoundingClientRect = () => {
+      const width = capsule.hasAttribute("data-expanded") ? 312 : 148;
+      return { left: 0, top: 0, right: width, bottom: 56, width, height: 56, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+    };
+    return capsule;
+  }
+
+  it("换面变宽：形变在提交后的微任务里起步，onMorphStart 就在这时调用、只调一次，不等下一帧；只改数字与阶段名的重渲染不调", async () => {
+    let calls = 0;
+    morphStart = () => {
+      calls += 1;
+    };
+    sizedCapsule();
+    act(() => buttonByText(LAUNCH_COPY.launch).click());
+    expect(document.querySelector('[data-face="loading"]')).not.toBeNull();
+    // 提交后的微任务里冲刷布局：一帧都没走
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(calls).toBe(1);
+
+    const session = launcher.state.session;
+    if (session === null) throw new Error("没有会话");
+    act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "preparing", stage_index: 1 }));
+    act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 4, download: { finished: 3, total: 100, bytes: 0, total_bytes: null, speed: 1024 } }));
+    await flush();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    expect(calls).toBe(1);
   });
 });

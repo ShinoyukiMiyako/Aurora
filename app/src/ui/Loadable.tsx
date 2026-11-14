@@ -5,6 +5,7 @@
 //   不算在内：它正从半透明往 0 走，这时内容到达照常播退场，不在半透明时一帧消失；已经走到 0 的照样同一帧拿掉。
 // - skeleton：骨架淡入。
 // - content：内容淡入；骨架同时淡出，这时它已经脱离布局、叠在内容上，容器立即取内容的尺寸。
+//   两层都等内容画出第一帧之后才起步：到达那次提交再长，交叉淡化也从头走。
 // - 从内容退回加载（出错后重试、换了请求）：反过来交叉淡化。内容脱离布局、叠在骨架上淡出，骨架照上面的规则出现：
 //   回到 pending 时先不可见地占位，直接回到 skeleton 时从透明淡入。
 //
@@ -23,11 +24,12 @@
 // - 退场还没播完内容又回来时，同一层接着用、子树不重挂：挂载时定下状态的组件（useState 的初值、只在挂载时读一次的东西）
 //   不会因为这次重新加载而重置。需要每一轮都从头来的，由调用方给内容里的那一块加 key（例如按请求参数）。
 
-import { AnimatePresence, motion, useIsPresent } from "framer-motion";
-import { useEffect, useState, type ReactNode, type Ref } from "react";
+import { AnimatePresence, motion, PresenceContext, useIsPresent, usePresence, type TargetAndTransition } from "framer-motion";
+import { useContext, useEffect, useMemo, useState, type ReactNode, type Ref } from "react";
 import type { LoadingView } from "../lib/loading-gate";
 import { fade } from "../lib/motion";
 import { REFLOW_SKIP_ATTR } from "../lib/reflow";
+import { usePaintedOnce } from "../lib/usePaintedOnce";
 import { cx } from "../lib/util";
 import styles from "./Loadable.module.css";
 import { EntranceGate } from "./Page";
@@ -74,22 +76,9 @@ export function Loadable({ view, skeleton, children, busyLabel, className, conte
       {(view !== "content" || shown) && (
         <AnimatePresence mode="popLayout" initial={hadContent} onExitComplete={() => setShown(false)}>
           {view !== "content" && (
-            <motion.div
-              key="skeleton"
-              className={styles.skeleton}
-              data-pending={view === "pending" || undefined}
-              aria-hidden="true"
-              initial={hadContent ? { opacity: 0 } : false}
-              // 等待期占着位但看不见。用透明度而不是 visibility：到了该出现的时刻骨架是淡入的
-              animate={{ opacity: view === "pending" ? 0 : 1, transition: fade.in }}
-              exit={{ opacity: 0, transition: fade.out }}
-              // 被新目标打断的动画不报完成（framer-motion 停掉它时不结清它的 promise），等待期里报完成的只会是走到 0 的那一段
-              onAnimationComplete={() => {
-                if (view === "pending") setShown(false);
-              }}
-            >
-              <EntranceGate own={hadContent}>{skeleton}</EntranceGate>
-            </motion.div>
+            <SkeletonLayer key="skeleton" pending={view === "pending"} fadeIn={hadContent} onHidden={() => setShown(false)}>
+              {skeleton}
+            </SkeletonLayer>
           )}
         </AnimatePresence>
       )}
@@ -127,6 +116,62 @@ function BusyStatus({ text }: { text: string }) {
   );
 }
 
+/** 骨架层淡出的目标。第一个关键帧取当前值：停在哪都建得出一段动画、播完时报完成，据此放它离开。 */
+const SKELETON_LEAVE: TargetAndTransition = { opacity: [null, 0], transition: fade.out };
+const registerNothing = () => () => {};
+
+interface SkeletonLayerProps {
+  /** popLayout 把退场的骨架抽出布局时要量这一层，由 AnimatePresence 递进来。 */
+  ref?: Ref<HTMLDivElement>;
+  /** 等待期：占着位但看不见。 */
+  pending: boolean;
+  /** 内容出现过之后才挂上的骨架：从透明淡入，里面的区块不再领页面入场序号。只在挂载那一刻读。 */
+  fadeIn: boolean;
+  /** 等待期里淡到 0 了。 */
+  onHidden: () => void;
+  children: ReactNode;
+}
+
+/**
+ * 骨架层。内容到达时它照常在那次提交里脱离布局（popLayout 看的是在不在场，不看动画），淡出却等第一帧画出来才开始，
+ * 与停在透明、同样等这一帧的内容层同一刻起步。数据到达那次提交往往很长，淡出要是在提交里就建、从建的那一刻计时，
+ * 第一帧画出来时骨架已淡掉一截而内容还没开始，两层之间露出一段空白。
+ * framer-motion 的 exit 在在场变化的那次提交里就建，推迟不了，所以这一层的去留由 usePresence 自己管：放行之后换成淡出的目标，
+ * 播完再告诉 AnimatePresence 可以移除。里面的 motion 元素拿到一份始终在场、不登记退场的在场上下文，不各自响应退场：
+ * 各自的退场一下就报完，回到在场时 framer-motion 会把报完的元素跳回 initial，退场途中被拉回的骨架就会一帧变透明。
+ * 外层的 initial 照传：首次挂载时骨架里的区块仍不播入场。
+ */
+function SkeletonLayer({ ref, pending, fadeIn, onHidden, children }: SkeletonLayerProps) {
+  const outer = useContext(PresenceContext);
+  const [present, safeToRemove] = usePresence();
+  const leave = usePaintedOnce(present ? "present" : "leaving", !present) && !present;
+  const inner = useMemo(
+    () => (outer === null ? null : { id: outer.id, initial: outer.initial, custom: outer.custom, isPresent: true, register: registerNothing }),
+    [outer],
+  );
+  return (
+    <PresenceContext.Provider value={inner}>
+      <motion.div
+        ref={ref}
+        className={styles.skeleton}
+        data-pending={pending || undefined}
+        aria-hidden="true"
+        initial={fadeIn ? { opacity: 0 } : false}
+        // 等待期占着位但看不见。用透明度而不是 visibility：到了该出现的时刻骨架是淡入的
+        animate={leave ? SKELETON_LEAVE : { opacity: pending ? 0 : 1, transition: fade.in }}
+        // 被新目标打断的动画不报完成（framer-motion 停掉它时不结清它的 promise）：报完成的淡出就是播完了；
+        // 其余报完成、又在等待期的只会是走到 0 的那一段，退场放行之前走到的也一样，这时它已经看不见
+        onAnimationComplete={(definition) => {
+          if (definition === SKELETON_LEAVE) safeToRemove?.();
+          else if (pending) onHidden();
+        }}
+      >
+        <EntranceGate own={fadeIn}>{children}</EntranceGate>
+      </motion.div>
+    </PresenceContext.Provider>
+  );
+}
+
 interface ContentLayerProps {
   /** popLayout 把退场的内容抽出布局时要量这一层，由 AnimatePresence 递进来。 */
   ref?: Ref<HTMLDivElement>;
@@ -136,14 +181,24 @@ interface ContentLayerProps {
   children: ReactNode;
 }
 
+/** 等过加载的内容层先停在这里。与 initial 是同一个对象：挂载时 framer-motion 认出起点与目标相同，不建一段 0 到 0 的动画。 */
+const LAYER_HIDDEN = { opacity: 0 } as const;
+const LAYER_SHOWN = { opacity: 1, transition: fade.in } as const;
+
 /**
  * 内容层。退回加载时它脱离布局、叠在骨架上淡出，这一段带 inert：点不到、聚焦不到，读屏也不再读它，
  * 按选择器找内容的代码与测试用 :not([inert]) 排除它。淡完之前内容又回来时，同一层接着用、淡回不透明。
+ * 等过加载才挂上的这一层停在透明，画出第一帧之后才淡入（usePaintedOnce）：数据到达那次提交往往很长，
+ * 从提交就计时的话第一帧画出来时淡入已走掉一截。停在透明时就退回加载的，退场目标与当前值相同、也没有动画在走，
+ * framer-motion 不建退场，这一层随即移除：它本来就看不见。
  */
 function ContentLayer({ ref, waited, className, children }: ContentLayerProps) {
   const present = useIsPresent();
+  // 冻结挂载那一刻的值：一挂上就是内容的这一层，退回加载、淡完之前又被接着用时 waited 已经为真，不能因此退回透明再等一帧
+  const [entering] = useState(waited);
+  const painted = usePaintedOnce("content", entering);
   return (
-    <motion.div ref={ref} className={className} inert={!present} initial={waited ? { opacity: 0 } : false} animate={{ opacity: 1, transition: fade.in }} exit={{ opacity: 0, transition: fade.out }}>
+    <motion.div ref={ref} className={className} inert={!present} initial={entering ? LAYER_HIDDEN : false} animate={painted ? LAYER_SHOWN : LAYER_HIDDEN} exit={{ opacity: 0, transition: fade.out }}>
       <EntranceGate own={waited}>{children}</EntranceGate>
     </motion.div>
   );

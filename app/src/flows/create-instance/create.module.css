@@ -40,10 +40,8 @@
 
 /*
  * 按钮行占满提示之外的宽度并靠右：宽度不随按钮增减而变，「上一步」出没时「取消」才有位置可让（让位只认定宽的容器）。
- * 定位基准：退场中的「上一步」脱离布局后原地淡出。
  */
 .footActions {
-  position: relative;
   display: flex;
   flex: 1 1 0;
   align-items: center;

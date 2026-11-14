@@ -342,7 +342,8 @@ function HeroContent({ inst, height }: { inst: InstanceSummary; height: number }
   const cover = useInstanceCover(inst);
   const backdrop = useCoverBackdrop(inst);
   const mounted = useMounted();
-  // 胶囊换面时按 morph 伸缩：「详情」用同一条弹簧让位，和胶囊的右缘一起走，中间不裂缝也不叠
+  // 胶囊换面时按 morph 伸缩：「详情」用同一条弹簧让位，和胶囊的右缘一起走，中间不裂缝也不叠。
+  // 让位在胶囊的形变起步时当场补跑（onMorphStart）：等尺寸观察报上来要晚一帧以上，变宽一大截时右缘先压到按钮上
   const actionsRef = useReflow<HTMLDivElement>("morph");
 
   // 游戏退出后状态层作废这个实例的存档缓存，这里订阅着就会重取，信息行里的存档名才是刚玩的那个。
@@ -419,7 +420,7 @@ function HeroContent({ inst, height }: { inst: InstanceSummary; height: number }
         </div>
 
         <div ref={actionsRef} className={s.heroActions}>
-          <LaunchCapsule instanceId={inst.id} size="lg" />
+          <LaunchCapsule instanceId={inst.id} size="lg" onMorphStart={actionsRef.sync} />
           {/* 外面提示气泡的包裹是 display: contents，让位会越过它直接移动按钮，不必再垫一层盒子 */}
           <Button size="lg" variant="secondary" iconRight="arrow-right" onClick={() => go({ page: "instance", id: inst.id, tab: "overview" })}>
             {HOME_COPY.details}

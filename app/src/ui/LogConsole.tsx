@@ -17,7 +17,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { Icon } from "../art/Icon";
 import { clock } from "../domain/format";
 import { APP_NAME } from "../lib/app-info";
-import { fade, insertItemFade, popMark, scrollGlide, springs, tweenAt } from "../lib/motion";
+import { fade, insertItemFade, popMark, scrollGlide, SPRING_PARAMS, springAt, springs, tweenAt } from "../lib/motion";
 import { cssVars, cx } from "../lib/util";
 import { Appear } from "./Appear";
 import { Button } from "./Button";
@@ -66,10 +66,16 @@ const HOLD_SCROLL_ADJUSTMENT = () => false;
 interface Glide {
   /** 往哪一头走。 */
   to: "end" | "top";
-  /** 起点的滚动位置。 */
-  from: number;
   /** 按起步时的距离定下的时长与曲线。 */
   tween: ReturnType<typeof scrollGlide>;
+  /** 这一段的起点：起步时是起步位置，终点变过之后是终点变化前一帧写下的位置。 */
+  base: number;
+  /** 这一段起点处曲线已走到的进度：起步时为 0。 */
+  baseProgress: number;
+  /** 上一帧定下的终点、写下的位置与曲线进度：终点变了就从这里改道。 */
+  lastEnd: number;
+  lastTop: number;
+  lastProgress: number;
   /** 起步那一帧的时间戳，第一帧到来前为 null：只拿帧回调给的时间戳相减，计时与画面同一个来源。 */
   startedAt: number | null;
   /** 排着的下一帧。 */
@@ -125,6 +131,22 @@ export function droppedHead(before: readonly LogConsoleLine[], after: readonly L
   if (before.length === 0 || after.length === 0 || before[0] === after[0]) return 0;
   const at = before.indexOf(after[0]);
   return at > 0 ? at : 0;
+}
+
+/**
+ * 筛选为空的说明已在屏上、说明条随后出现时，条的入场要等多少秒：说明沿 settle 弹簧（--sk-spring-settle 由同一组参数生成）
+ * 下移条高，等它那一行整个滑到条的下沿以下，条再淡入。说明占的是首行的位置，上内边距与日志区的上内边距相同（样式里是 --sk-space-8），
+ * 正文从那里起，所以要走过的是条高减去这一截。
+ */
+export function noteClearDelay(barHeight: number): number {
+  const need = (barHeight - LIST_PADDING_TOP) / barHeight;
+  if (need <= 0) return 0;
+  // 弹簧在两个感知时长之后离终点已不到十万分之二，条高再大要走的比例也到不了那里
+  const limitMs = 2 * SPRING_PARAMS.settle.duration * 1000;
+  for (let ms = 0; ms <= limitMs; ms++) {
+    if (1 - springAt("settle", 1, 0, ms / 1000).x >= need) return ms / 1000;
+  }
+  throw new Error(`说明条高 ${barHeight} px：settle 弹簧在 ${limitMs} ms 内走不到 ${need}`);
 }
 
 // 全角字符的大致范围（东亚宽字符、全角标点与符号、表情）：等宽字体里没有这些字形，回落字体里约占两个字符位
@@ -326,10 +348,17 @@ export function LogConsole({
   useLayoutEffect(() => {
     noteSettled.current = filteredOut && (noteSettled.current || padSettled);
   }, [filteredOut, padSettled]);
+  // 说明滑开时条要是照常淡入，淡入起步快、滑开起步慢，条先变得可见、半透明地盖在还没让开的说明上：条等说明让出位置再淡入。
+  // 条高要在条挂上之后量，量出来的那次重渲染排在条放行入场之前。减少动画时说明一步到位，不用等
+  const noteGlides = filteredOut && filteredEmpty !== undefined && noteSettled.current && !reduced;
+  const noteClear = useMemo(() => (omittedPad > 0 ? noteClearDelay(omittedPad) : undefined), [omittedPad]);
 
   /**
    * 滚到底或滚到顶：组件逐帧写 scrollTop 的定长补间，时长按起步时的距离给。滚到底时每帧把终点取为当时元素能滚到的最大位置，
    * 途中新行进来、换行时途经的行第一次量出高度，只是把终点推远，不重起；到时长写到当时的终点就结束，不等 scrollend。
+   * 终点变了就从上一帧写下的位置改道，剩下的路（含推远的那一截）按曲线余下的进度摊到余下的帧上。不能每帧按「起点 + (终点 − 起点) × 进度」算：
+   * 终点推远 Δ 的那一帧会多走 Δ × 进度，尾段进度接近 1、补间本身几乎停下，实时会话的一批新行（不换行约 66 px，换行能到两百多）整批落在一帧里。
+   * 离到时长只剩一两帧时进来的仍近乎一帧补齐：余下的进度只够摊这么几帧。
    * 不交给浏览器的平滑滚动：底部一变就得重发 scrollTo，浏览器对进行中的平滑滚动再发一次，会从当前位置以零速重起一段，
    * 实时会话每批新行、换行时每量出一行都要重起，滚动一直停在起步段，几十秒到不了底，实时会话里永远到不了。
    * Home 也不交给浏览器的键盘平滑滚动：换行时往上途经的行第一次量出高度、起点在滚动位置之上，虚拟列表各写一次瞬时滚动找补，
@@ -341,7 +370,18 @@ export function LogConsole({
   const glideTo = (el: HTMLElement, to: Glide["to"]) => {
     const from = el.scrollTop;
     const destination = () => (to === "end" ? el.scrollHeight - el.clientHeight : 0);
-    const state: Glide = { to, from, tween: scrollGlide(Math.abs(destination() - from)), startedAt: null, frame: 0 };
+    const start = destination();
+    const state: Glide = {
+      to,
+      tween: scrollGlide(Math.abs(start - from)),
+      base: from,
+      baseProgress: 0,
+      lastEnd: start,
+      lastTop: from,
+      lastProgress: 0,
+      startedAt: null,
+      frame: 0,
+    };
     // 写完当场派发一次 scroll：浏览器的滚动事件要到下一帧才来，虚拟列表照它换渲染的行。长距离起步时一帧滚过几千像素，
     // 等它的话这一帧画出来的还是上一帧位置的那些行，整个可视区一片空白；当场通知，这一帧就画上新位置的行。
     // 下一帧浏览器自己的滚动事件读到的是同一个位置，虚拟列表不再重渲染
@@ -359,7 +399,17 @@ export function LogConsole({
         endGlide();
         return;
       }
-      moveTo(from + (end - from) * tweenAt(state.tween, elapsed));
+      const progress = tweenAt(state.tween, elapsed);
+      if (end !== state.lastEnd) {
+        state.base = state.lastTop;
+        state.baseProgress = state.lastProgress;
+        state.lastEnd = end;
+      }
+      // scrollGlide 的曲线不过冲、只在终点到 1：没到时长时进度小于 1，记下的 baseProgress 也小于 1，分母不为 0
+      const top = state.base + ((end - state.base) * (progress - state.baseProgress)) / (1 - state.baseProgress);
+      moveTo(top);
+      state.lastTop = top;
+      state.lastProgress = progress;
       state.frame = requestAnimationFrame(step);
     };
     virtualizer.shouldAdjustScrollPositionOnItemSizeChange = HOLD_SCROLL_ADJUSTMENT;
@@ -492,6 +542,9 @@ export function LogConsole({
   };
 
   const lastIndex = shown.length - 1;
+  // 这一次渲染换了筛选或换行：说明条因此收起时，后面的行或说明在同一次提交里就整批换上、排到了条底下，
+  // 条当帧撤掉，不在新内容上原地淡出。会话换了之类不是用户切换带出的收起照常淡出
+  const userSwitched = committed.current.level !== level || committed.current.source !== source || committed.current.wrap !== wrap;
 
   return (
     <div className={cx(styles.console, className)} data-wrap={wrap || undefined}>
@@ -544,7 +597,7 @@ export function LogConsole({
         >
           {/* 说明条叠在滚动区顶上、自身不占布局：出现时日志区的外框与画布都不挪位置，行经虚拟列表的上内边距让出这一截（只动 transform），
               由上面的贴底写入或滚动找补接住，正在看的行不动；条本身淡入。放在日志区外面的话，它一出现日志区上沿就一帧下移这一截 */}
-          <Appear itemClassName={styles.omittedSlot}>
+          <Appear itemClassName={styles.omittedSlot} enterDelay={noteGlides ? noteClear : undefined} exitTransition={userSwitched ? fade.none : undefined}>
             {omittedShown && (
               <div ref={omittedRef} className={styles.omitted}>
                 <span className={styles.omittedText}>

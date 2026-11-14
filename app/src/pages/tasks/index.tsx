@@ -16,7 +16,7 @@ import type { Task } from "../../domain/types";
 import { useLoadingGate } from "../../lib/loading-gate";
 import type { SpringName } from "../../lib/motion";
 import { useCompletionHold, useFinishing } from "../../lib/progress-display";
-import { observeReflow, REFLOW_MAX_ITEMS, useReflow } from "../../lib/reflow";
+import { followReflow, HOLD_AFTER_RESIZE, observeReflow, REFLOW_MAX_ITEMS, useReflow } from "../../lib/reflow";
 import { playTrack, springTrack } from "../../lib/slide";
 import { cssVars } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
@@ -81,6 +81,8 @@ const OVERVIEW_STYLE = cssVars({ "--tasks-overview-h": `${OVERVIEW_HEIGHT}px` })
  * 组里新来的那一行又从旧位置飞过来：量飞行终点时已带上分组的位移，两段方向相反、起点几乎抵消。弹簧不同就衰减得不同步，
  * 叠起来行先偏出去再折回（让出一行任务的高度时约 20 px）。取 settle：内容区、组内与列表行的让位都走它，
  * 飞行跟它一致，套在哪一层里都同步。
+ * 两层还要同一帧起步：起步差一帧，露出的就是单层弹簧在这一帧走的那一截，60 Hz 下偏出约 20 px，与弹簧不同时同一量级。
+ * 分组的让位从静止起步时停在起点、等新排布画出来才计时，上一段没走完又被挤时带着速度当场接着走；飞行跟着分组这一趟走，见 flyAcross。
  */
 const TASK_MOVE_SPRING: SpringName = "settle";
 
@@ -398,6 +400,11 @@ function centerOf(el: Element): { x: number; y: number } {
  * 两者叠着交接，看上去是同一行换了地方。
  * 量的时机放在下一次尺寸观察的回调里：所在分组被挤开后的让位在那一轮观察里才起步，这个观察者建得晚、回调排在它们之后，
  * 量到的新位置已经带着分组的让位，飞的距离不会把分组的位移再算一遍。都在绘制之前，新行不会先在终点露一帧。
+ * 建好的飞行跟着新行所在分组包裹层这一趟的让位起步（lib/reflow 的 followReflow），起步时刻与它同一帧定下：
+ * - 分组从静止起步、停在起点等新排布画出来（增删观察报出的隔两帧、尺寸观察报出的隔一帧）：飞行也停在起点，挂进同一个等待，
+ *   在同一个动画帧回调里开播。建好就播的话比分组早一到两帧。
+ * - 分组上一段还没走完又被挤，带着速度当场接着走：飞行也建好就播。照样排队的话比分组晚一帧。
+ * - 分组没被挪动：飞行按从静止起步处理，等量的这一帧把新排布画出来，下一帧再播。
  */
 function flyAcross(root: HTMLElement, ids: readonly string[]): void {
   if (typeof root.animate !== "function" || typeof ResizeObserver === "undefined") return;
@@ -415,10 +422,16 @@ function flyAcross(root: HTMLElement, ids: readonly string[]): void {
       if (leaving === null || arriving === null) continue;
       const from = centerOf(leaving);
       const to = centerOf(arriving);
-      playTrack(arriving, springTrack(TASK_MOVE_SPRING, from.x - to.x, 0, from.y - to.y, 0));
+      followReflow(playTrack(arriving, springTrack(TASK_MOVE_SPRING, from.x - to.x, 0, from.y - to.y, 0)), groupItemOf(root, arriving), HOLD_AFTER_RESIZE);
     }
   });
   probe.observe(root);
+}
+
+/** el 所在的分组包裹层：root 的直接子项，分组之间的让位挪的是它。 */
+function groupItemOf(root: HTMLElement, el: HTMLElement): HTMLElement {
+  for (let node: HTMLElement | null = el; node !== null; node = node.parentElement) if (node.parentElement === root) return node;
+  throw new Error("换组的行不在分组容器里");
 }
 
 function TaskList({ groups, filter, finishing, tasks, now, ...handlers }: TaskListProps) {

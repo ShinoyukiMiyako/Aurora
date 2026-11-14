@@ -3,11 +3,12 @@
 // 漫游 tabindex：←→ 移动并激活，Home / End 到首尾。标签与面板按同一个 id 关联（aria-controls / aria-labelledby）。
 
 import { AnimatePresence, motion, useReducedMotionConfig, type Variants } from "framer-motion";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useCallback, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { Icon, type IconName } from "../art/Icon";
 import { fade, popMark, springs, tabPanel, type PanelFrom } from "../lib/motion";
 import { useReflow } from "../lib/reflow";
 import { useMounted } from "../lib/useMounted";
+import { usePaintedOnce } from "../lib/usePaintedOnce";
 import { cx, isImeComposing } from "../lib/util";
 import { EntranceBoundary, usePageEntrance, usePageFirstFrame } from "./Page";
 import { nextEnabled } from "./roving";
@@ -237,28 +238,6 @@ export interface TabPanelProps {
   initial?: boolean;
   className?: string;
   children: ReactNode;
-}
-
-/**
- * 换上的面板画出第一帧之后才为真；key 换了（换了一块面板）重新等。hold 为假时恒为真。
- * 一整块新面板挂上的那一帧可能要几十毫秒（挂载本身加上这一帧的样式、布局与绘制）：入场要是从提交就计时，
- * 这一段全算进了入场时长，第一帧画出来时淡入已走掉大半。rAF 回调在这一帧绘制之前跑，再排一个任务才落到绘制之后。
- */
-function usePaintedOnce(key: string, hold: boolean): boolean {
-  const [state, setState] = useState({ key, painted: false });
-  if (state.key !== key) setState({ key, painted: false });
-  useEffect(() => {
-    if (!hold) return;
-    let task: ReturnType<typeof setTimeout> | undefined;
-    const frame = requestAnimationFrame(() => {
-      task = setTimeout(() => setState((s) => (s.key === key ? { key, painted: true } : s)), 0);
-    });
-    return () => {
-      cancelAnimationFrame(frame);
-      clearTimeout(task);
-    };
-  }, [key, hold]);
-  return !hold || (state.key === key && state.painted);
 }
 
 /**

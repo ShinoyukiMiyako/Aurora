@@ -17,26 +17,12 @@ export type ProgressBarSize = "sm" | "md" | "lg";
 /** 进度大于 0 时最少显示的比例：再短的填充在 4px 高的胶囊里就看不出来了。 */
 export const MIN_VISIBLE_PROGRESS = 0.02;
 
-/** 显示用的填充比例：截断到 [0, 1]，大于 0 时不少于 MIN_VISIBLE_PROGRESS。 */
-export function visibleProgress(p: number): number {
-  const v = clamp(p, 0, 1);
-  return v > 0 ? Math.max(v, MIN_VISIBLE_PROGRESS) : 0;
-}
-
 /**
  * 填充层的位移（百分比字符串），对应 translateX((p − 1) × 100%)；p 截断到 [0, 1]，不加最少显示长度。
- * 最少显示长度已经放在平滑终点上（useSmoothProgress 的 minVisible）时，由平滑值派生位移用它。
- */
-export function rawFillOffset(p: number): string {
-  return `${(clamp(p, 0, 1) - 1) * 100}%`;
-}
-
-/**
- * 填充层的位移，大于 0 时不少于 MIN_VISIBLE_PROGRESS。用在逐帧平滑之后时，弹簧离开 0 的第一帧会一下冒出这一截；
- * 下限放在平滑终点上的写法见 DeterminateBar（useSmoothProgress 的 minVisible）。
+ * 下限在平滑里定好再交给它（两种写法见 useSmoothProgress 的 minVisible 说明），这里只换算。
  */
 export function fillOffset(p: number): string {
-  return rawFillOffset(visibleProgress(p));
+  return `${(clamp(p, 0, 1) - 1) * 100}%`;
 }
 
 export interface ProgressTarget {
@@ -72,7 +58,10 @@ function springEnd(target: number, minVisible: number): number {
  * 挂载时从目标起步。别处要显示同一进度时直接读这里的 smooth（ui/SmoothPercent 的 PercentOf），不另起一条平滑。
  *
  * minVisible 是最少显示长度：目标大于 0 时，弹簧的终点不低于它，smooth 从 0 一路连续地长上去；target 仍是原值。
- * 下限要放在终点上：加在逐帧平滑之后（对 smooth 取 visibleProgress），弹簧离开 0 的第一帧就一下冒出那一截。
+ * 固定的下限不能加在逐帧平滑之后（smooth 大于 0 的帧取 max(p, 下限)），那样弹簧离开 0 的第一帧就一下冒出那一截。
+ * 放进终点的代价是 smooth 自己带着下限：同一条 smooth 还要写百分数时，真实进度不到下限也写成下限。
+ * 这时 smooth 不传 minVisible，下限单独起一条平滑（目标大于 0 时为 MIN_VISIBLE_PROGRESS、否则为 0，track 相同，换标识时与 smooth 一起跳），
+ * 条取两者的较大者，字读不带下限的 smooth（shell/StatusIsland 的 useIslandProgress）。
  */
 export function useSmoothProgress(value: number, track?: string, minVisible = 0): { smooth: MotionValue<number>; target: number } {
   const reduced = useReducedMotionConfig() === true;
@@ -81,10 +70,11 @@ export function useSmoothProgress(value: number, track?: string, minVisible = 0)
   const next = nextProgressTarget(state.current, track, value);
   const smooth = useSpring(springEnd(next.target, minVisible), springs.settle as SpringOptions);
 
-  // 提交之后再推目标，不放在布局 effect 里：调用方接着用 useTransform 由它派生位移与文字，多数就在同一组件里
-  // （状态岛把它交给子组件 IslandBar 去派生）。useTransform 每次渲染都在布局阶段先退订、再按 hook 顺序重订
-  // （framer-motion 的 useCombineMotionValues），同一组件里排在后面的订阅这时还没重订：jump 放在布局 effect 里会落在
-  // 退订与重订之间，没人收到，减少动画下显示总慢一次上报，换了标识后停在上一个任务的进度上。
+  // 提交之后再推目标，不放在布局 effect 里：调用方接着用 useTransform 由它派生位移与文字，通常就在同一组件里
+  // （状态岛的 useIslandProgress 在同一个钩子里把它与下限那条平滑一起交给 useTransform）。
+  // useTransform 每次渲染都在布局阶段先退订、再按 hook 顺序重订（framer-motion 的 useCombineMotionValues），
+  // 同一组件里排在后面的订阅这时还没重订：jump 放在布局 effect 里会落在退订与重订之间，没人收到，
+  // 减少动画下显示总慢一次上报，换了标识后停在上一个任务的进度上。
   // 被动 effect 在整次提交的布局阶段之后才跑，订阅不管在同一组件还是子组件里都已重订
   useEffect(() => {
     if (state.current === null) throw new Error("进度平滑状态在挂载前丢失");
@@ -141,7 +131,7 @@ export function ProgressBar({ value, tone = "accent", size = "md", track, label,
 function DeterminateBar({ attrs, value, track }: { attrs: BarAttrs; value: number; track: string | undefined }) {
   // 最少显示长度落在平滑的终点上，逐帧的位移不再加下限；读屏报 target，是原值
   const { smooth, target } = useSmoothProgress(value, track, MIN_VISIBLE_PROGRESS);
-  const x = useTransform(smooth, rawFillOffset);
+  const x = useTransform(smooth, fillOffset);
   return (
     <span {...attrs} aria-valuenow={Math.round(target * 100)}>
       <motion.span className={styles.fill} style={{ x }} />
