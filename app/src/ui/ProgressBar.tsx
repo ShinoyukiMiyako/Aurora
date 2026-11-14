@@ -23,8 +23,11 @@ export function visibleProgress(p: number): number {
   return v > 0 ? Math.max(v, MIN_VISIBLE_PROGRESS) : 0;
 }
 
-/** 填充层的位移（百分比字符串），对应 translateX((p − 1) × 100%)；p 截断到 [0, 1]，不加最少显示长度。 */
-function rawFillOffset(p: number): string {
+/**
+ * 填充层的位移（百分比字符串），对应 translateX((p − 1) × 100%)；p 截断到 [0, 1]，不加最少显示长度。
+ * 最少显示长度已经放在平滑终点上（useSmoothProgress 的 minVisible）时，由平滑值派生位移用它。
+ */
+export function rawFillOffset(p: number): string {
   return `${(clamp(p, 0, 1) - 1) * 100}%`;
 }
 

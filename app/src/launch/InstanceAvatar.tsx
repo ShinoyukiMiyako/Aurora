@@ -9,9 +9,10 @@ import { useRef } from "react";
 import { INSTANCE_AVATAR_SPECS, InstanceAvatarBase, type InstanceAvatarSize } from "../art/iso/InstanceAvatarBase";
 import type { InstanceSummary } from "../domain/adapt";
 import { fade, popMark } from "../lib/motion";
+import { clamp } from "../lib/util";
 import { useLauncherSelector } from "../state/launcher";
 import { progressTrack } from "../state/tasks";
-import { useSmoothProgress, visibleProgress } from "../ui/ProgressBar";
+import { MIN_VISIBLE_PROGRESS, useSmoothProgress } from "../ui/ProgressBar";
 import { useBreathPhase } from "./breath";
 import { useInstanceCover } from "./cover";
 import styles from "./InstanceAvatar.module.css";
@@ -145,8 +146,10 @@ function ProgressRingOverlay({ size, tone, progress, track, appear }: { size: In
   const next = usePresenceData() as AvatarIndicator | undefined;
   // 启动走完进入运行：环在淡出的同时补满，不带着缺口消失；失败、取消时停在原处淡出
   const completed = !present && next !== undefined && next.type === "badge" && next.tone === "ok";
-  const { smooth, target } = useSmoothProgress(completed ? 1 : progress, track);
-  const dashOffset = useTransform(smooth, (p) => length * (1 - visibleProgress(p)));
+  // 最少显示长度落在平滑的终点上，环上直接用平滑值：从 0 起步时弧一帧帧长出来，不在第一帧冒出那一截。
+  // 仍截到 [0, 1]（同 rawFillOffset）：settle 弹簧补满时会略冲过 1，描边偏移变负，弧的起点让出一道缝
+  const { smooth, target } = useSmoothProgress(completed ? 1 : progress, track, MIN_VISIBLE_PROGRESS);
+  const dashOffset = useTransform(smooth, (p) => length * (1 - clamp(p, 0, 1)));
   return (
     <motion.svg
       className={styles.ring}

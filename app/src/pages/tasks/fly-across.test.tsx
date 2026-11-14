@@ -13,7 +13,7 @@ import { springTrack } from "../../lib/slide";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
-import { render, stubResizeObserver, type Rendered, type ResizeObserverStub } from "../../test/dom";
+import { fakeAnimate, render, stubResizeObserver, type Rendered, type ResizeObserverStub } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, resetRecorder, settle } from "../../test/launcher";
 import TasksPage from "./index";
@@ -94,10 +94,7 @@ beforeEach(() => {
   Object.defineProperty(HTMLElement.prototype, "animate", {
     configurable: true,
     writable: true,
-    value(this: HTMLElement, frames: Keyframe[]) {
-      played.push({ el: this, frames });
-      return { cancel() {}, currentTime: 0, onfinish: null, oncancel: null };
-    },
+    value: fakeAnimate<HTMLElement>((el, frames) => played.push({ el, frames })),
   });
   // 只有任务行有位置：正在淡出的那一行（祖先带 inert）在旧处，在场的那一行在新处；其余元素都是 0
   vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {

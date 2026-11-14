@@ -3,7 +3,7 @@
 // 漫游 tabindex：←→ 移动并激活，Home / End 到首尾。标签与面板按同一个 id 关联（aria-controls / aria-labelledby）。
 
 import { AnimatePresence, motion, useReducedMotionConfig, type Variants } from "framer-motion";
-import { useCallback, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { Icon, type IconName } from "../art/Icon";
 import { fade, popMark, springs, tabPanel, type PanelFrom } from "../lib/motion";
 import { useReflow } from "../lib/reflow";
@@ -240,6 +240,28 @@ export interface TabPanelProps {
 }
 
 /**
+ * 换上的面板画出第一帧之后才为真；key 换了（换了一块面板）重新等。hold 为假时恒为真。
+ * 一整块新面板挂上的那一帧可能要几十毫秒（挂载本身加上这一帧的样式、布局与绘制）：入场要是从提交就计时，
+ * 这一段全算进了入场时长，第一帧画出来时淡入已走掉大半。rAF 回调在这一帧绘制之前跑，再排一个任务才落到绘制之后。
+ */
+function usePaintedOnce(key: string, hold: boolean): boolean {
+  const [state, setState] = useState({ key, painted: false });
+  if (state.key !== key) setState({ key, painted: false });
+  useEffect(() => {
+    if (!hold) return;
+    let task: ReturnType<typeof setTimeout> | undefined;
+    const frame = requestAnimationFrame(() => {
+      task = setTimeout(() => setState((s) => (s.key === key ? { key, painted: true } : s)), 0);
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(task);
+    };
+  }, [key, hold]);
+  return !hold || (state.key === key && state.painted);
+}
+
+/**
  * 面板必须以变体标签（hidden / show）驱动入场：面板内部带 variants 的子元素等最近的变体祖先来编排，
  * 写成 initial / animate 对象字面量时面板不是变体节点，子元素挂到只在页面挂载时编排过一次的上层祖先，
  * 切换一次标签后就永久停在 hidden。
@@ -247,6 +269,7 @@ export interface TabPanelProps {
  * 面板是一块内容，只动一次：里面的卡片、横幅不再认领页面入场序号（否则面板淡入的同时它们按序号再等一拍、
  * 再上移一次，内容分两段出现）。面板放在页面一级位置时，进页那一次由面板自己按序号随页面入场；
  * 嵌套在首帧里的一级区块之内时，进页那一次跟着那个区块走，自己不动；之后换标签只走面板的切换动画。
+ * 面板自己播的入场（换标签、不归页面管的第一次挂载）先停在 hidden，画出第一帧之后才切到 show（usePaintedOnce）。
  */
 export function TabPanel({ tabsId, value, motion: kind = "page", from, initial: firstEntrance = kind === "page", className, children }: TabPanelProps) {
   const entrance = usePageEntrance();
@@ -260,6 +283,8 @@ export function TabPanel({ tabsId, value, motion: kind = "page", from, initial: 
   // 不归页面管却赶上了首帧：嵌在首帧里的区块之内，外层整块已在随页面入场（或直接是成品），面板跟着它走
   const withBlock = !switched && entrance === null && firstFrame;
   const still = withPage ? entrance === "still" : !switched && (withBlock || !firstEntrance);
+  // 页面错开入场的那一次与兄弟区块同一个时钟起步，不单独等
+  const painted = usePaintedOnce(value, !withPage && !still);
   return (
     <motion.div
       key={value}
@@ -269,7 +294,7 @@ export function TabPanel({ tabsId, value, motion: kind = "page", from, initial: 
       className={className}
       {...(withPage && entrance !== "still" ? entrance : own)}
       initial={still ? false : "hidden"}
-      animate="show"
+      animate={painted ? "show" : "hidden"}
     >
       <EntranceBoundary>{children}</EntranceBoundary>
     </motion.div>

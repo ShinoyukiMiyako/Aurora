@@ -356,7 +356,13 @@ interface TaskListProps extends RowHandlers {
  */
 function TaskListRow({ task: placed, finishing, queuePosition, now, handlers }: { task: Task; finishing: boolean; queuePosition: number | null; now: number; handlers: RowHandlers }) {
   const running = placed.status === "running";
-  const task = useLauncherSelector((s) => (running ? s.tasks.find((t) => t.id === placed.id) : placed));
+  // 读不到时沿用上一次读到的。任务从表里拿掉是结构变化，在场的行随即被页面撤走，碰上这种情况的只有退场副本（见下）：
+  // 淡出途中任务被「清除已结束」拿掉，照拿掉前的样子淡完。不退回 placed：运行中的 placed 停在上一次结构变化时，
+  // 进度会倒回去、收尾的满格会换回运行中。行已带 inert，只剩这一百多毫秒；挂载时就读不到仍是列表的错，照样抛
+  const task = useLauncherSelector(
+    (s) => (running ? s.tasks.find((t) => t.id === placed.id) : placed),
+    (prev, next) => next === undefined || prev === next,
+  );
   if (task === undefined) throw new Error(`任务 ${placed.id} 已不在任务表里，列表却还在画它`);
   // 退场中的行 props 停在离开前的那次渲染（AnimatePresence 冻结），任务却照样按实时订阅读。减少动画时没有收尾这一拍
   // （useCompletionHold 为 0），完成的那一刻行就离开进行中，原处淡出的那份拿着 finishing=false 读到已完成，会在淡出时

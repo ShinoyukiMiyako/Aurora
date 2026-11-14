@@ -147,10 +147,9 @@ describe("底栏", () => {
     expect(block(".primaryButton,\n.primaryGhost")).toMatch(/grid-area:\s*1 \/ 1/);
   });
 
-  it("隐形的创建按钮整层透明，不靠 visibility 藏：它里面的定宽文案槽把当前那条显式设成 visible，会压在「下一步」上露出来", () => {
-    const ghost = block(".primaryGhost");
-    expect(ghost).toMatch(/opacity:\s*0/);
-    expect(ghost).not.toMatch(/visibility/);
+  it("隐形的创建按钮整层完全透明：透明度作用于整个子树，按钮里当前那条文案自己算成可见也透不出来", () => {
+    // 只认恰好为 0：半透明的「创建并开始安装」照样会叠在「下一步」上
+    expect(block(".primaryGhost")).toMatch(/(^|[\s;])opacity:\s*0\s*;/);
   });
 
   it("按钮行占满提示之外的宽度：宽度不随按钮增减变化，让位才接得住", () => {

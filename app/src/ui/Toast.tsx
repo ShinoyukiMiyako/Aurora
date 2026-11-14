@@ -14,7 +14,7 @@ import { useEffect, useRef, type Ref } from "react";
 import { Icon, type IconName } from "../art/Icon";
 import { fade, insertItemFade, nudge, springs } from "../lib/motion";
 import { cssVars, cx } from "../lib/util";
-import { useOverlayState } from "../shell/overlay";
+import { useScrimOpen } from "../shell/overlay";
 import { Button } from "./Button";
 import { IconButton } from "./IconButton";
 import styles from "./Toast.module.css";
@@ -86,7 +86,7 @@ export interface ToastProps {
 }
 
 export function Toast({ tone, title, body, action, onClose, countdown, side = 1, layoutDependency, repeats, ref, className }: ToastProps) {
-  const { scrimOpen } = useOverlayState();
+  const scrimOpen = useScrimOpen();
   const moves = useReducedMotionConfig() === true ? insertItemFade : SLIDE_MOTION;
   if (countdown !== null && (countdown.fraction < 0 || countdown.fraction > 1 || countdown.remainingMs < 0))
     throw new Error(`倒计时取值越界：fraction ${countdown.fraction}，remainingMs ${countdown.remainingMs}`);

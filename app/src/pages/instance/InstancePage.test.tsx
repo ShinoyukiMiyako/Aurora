@@ -22,7 +22,7 @@ import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, useLauncherSelector, type LauncherApi } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
-import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { drainFrames, keydown, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { emulateFocusFixup } from "../../test/focus-fixup";
 import { CORE_EVENT } from "../../ipc/tasks";
@@ -345,9 +345,11 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => {
+// 每个用例都重装一次假时钟：不先排空帧循环，后面的用例 framer-motion 一帧都推不动（见 test/dom 的 drainFrames）
+afterEach(async () => {
   view?.unmount();
   view = undefined;
+  await drainFrames();
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -1123,8 +1125,9 @@ describe("实例详情：新建与导入还没装好", () => {
     act(() => emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 40, finished: 20, bytes: 20_480, total_bytes: 40_960, speed: 1_048_576 }));
     await flush();
     expect(byRole("progressbar", TITLE).getAttribute("aria-valuenow")).toBe("50");
-    // 首批快照从空开始，百分数与进度条沿弹簧走上去、不一帧到位：这里不读平滑中的百分数，速度与总量照事件写出
-    expect(text()).toContain("% · 1.0 MB/s · 共 40.0 KB");
+    // 首批快照从空开始，百分数与进度条沿弹簧走上去，不一帧到位
+    await stepFrames(30);
+    expect(text()).toContain("50% · 1.0 MB/s · 共 40.0 KB");
   });
 
   it("头图的安装标签：排队时就是「等待安装」本身的宽度，不为百分比留白；开始之后按「100%」占住、居中", async () => {

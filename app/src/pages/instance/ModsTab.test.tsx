@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { hueOf } from "../../art/illustrations/seed";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
 import { formatDate } from "../../domain/format";
 import { IpcError } from "../../ipc/errors";
@@ -37,6 +38,48 @@ vi.mock("../../ui/Table", async (orig) => {
     Table: (props: Parameters<typeof mod.Table>[0]) => {
       tableRenders.count += 1;
       return table(props);
+    },
+  };
+});
+// 行里各格画了几遍：勾选框、开关与更多菜单记下名称，缩略图记下种类、尺寸与色相（Mod 列每行一个 40 号的，色相按行而异）。同样直接调原组件函数
+const cellRenders = vi.hoisted((): string[] => []);
+vi.mock("../../ui/Checkbox", async (orig) => {
+  const mod = await orig<typeof import("../../ui/Checkbox")>();
+  return {
+    ...mod,
+    Checkbox: (props: Parameters<typeof mod.Checkbox>[0]) => {
+      cellRenders.push(`勾选框:${props.ariaLabel}`);
+      return mod.Checkbox(props);
+    },
+  };
+});
+vi.mock("../../ui/Toggle", async (orig) => {
+  const mod = await orig<typeof import("../../ui/Toggle")>();
+  return {
+    ...mod,
+    Toggle: (props: Parameters<typeof mod.Toggle>[0]) => {
+      cellRenders.push(`开关:${props.ariaLabel}`);
+      return mod.Toggle(props);
+    },
+  };
+});
+vi.mock("../../ui/MoreMenu", async (orig) => {
+  const mod = await orig<typeof import("../../ui/MoreMenu")>();
+  return {
+    ...mod,
+    MoreMenu: (props: Parameters<typeof mod.MoreMenu>[0]) => {
+      cellRenders.push(`更多菜单:${props.label}`);
+      return mod.MoreMenu(props);
+    },
+  };
+});
+vi.mock("../../ui/Thumb", async (orig) => {
+  const mod = await orig<typeof import("../../ui/Thumb")>();
+  return {
+    ...mod,
+    Thumb: (props: Parameters<typeof mod.Thumb>[0]) => {
+      cellRenders.push(`缩略图:${props.kind}/${props.size}/${props.hue}`);
+      return mod.Thumb(props);
     },
   };
 });
@@ -2129,5 +2172,75 @@ describe("切到 Mod 页与回到前台时重读 mods 目录", () => {
     await flush();
     expect(gridNames()).toEqual(OLD_NAMES);
     expect(textOf(document.body)).toContain("已选 2 个");
+  });
+
+  /** 行里各格的渲染记录：只留指名某一行的勾选框、开关、更多菜单与 Mod 列的缩略图；表头的全选框、页头的菜单不算。 */
+  const rowRenders = () => cellRenders.filter((e) => e.startsWith("缩略图:mod/40/") || /^(勾选框:选择 |开关:(停用|启用) |更多菜单:.+ 的更多操作$)/.test(e)).sort();
+  /** 某一行 Mod 列的缩略图：色相取自 mod_id，与 modDto 同一推法。 */
+  const thumbOf = (name: string) => `缩略图:mod/40/${hueOf(name.toLowerCase().replace(/\s+/g, "_"))}`;
+  /** names 里的每一行各格画一遍。 */
+  const eachRowOnce = (names: readonly string[]) => names.flatMap((n) => [`勾选框:选择 ${n}`, `开关:停用 ${n}`, `更多菜单:${n} 的更多操作`, thumbOf(n)]).sort();
+  /** 远长于重读结束后让位的停留时长（一个 settle 弹簧）。 */
+  const pastHold = () =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+  it("切过来后的重读内容没变：整张表只画挂载的那一遍，重读开始、读回来、让位摘下都不再重画任何一行", async () => {
+    await open("overview");
+    const before = lists();
+    tableRenders.count = 0;
+    cellRenders.length = 0;
+    switchTo("mods");
+    await pastFirstFrame();
+    expect(lists()).toBe(before + 1);
+    await pastHold();
+    expect(gridNames()).toEqual(OLD_NAMES);
+    expect(tableRenders.count).toBe(1);
+    expect(rowRenders()).toEqual(eachRowOnce(OLD_NAMES));
+  });
+
+  it("紧凑档的重读：第二行的让位照样在重读期间挂上、过后摘下，开关翻转时不重画任何一行", async () => {
+    vi.stubGlobal("innerWidth", 1024);
+    stubSpanAnimations();
+    const observers = stubResizeObserver();
+    await open();
+    await pastHold();
+    const subs = () => [...grid().querySelectorAll<HTMLElement>('[class*="modSub"]')];
+    const watched = () => subs().filter((el) => observers.observed().includes(el));
+    expect(subs()).toHaveLength(4);
+    expect(watched()).toEqual([]);
+
+    const rescan = deferred<InstalledMod[]>();
+    ipc.overrides.set("list_mods", () => rescan.promise);
+    tableRenders.count = 0;
+    cellRenders.length = 0;
+    focusWindow();
+    await flush();
+    // 重读期间挂着：读回来的状态标签可能换字、变宽，挂上的那一趟只记位置，要在变化之前就挂好
+    expect(watched()).toHaveLength(4);
+    rescan.resolve(structuredClone(mods));
+    await flush();
+    expect(watched()).toHaveLength(4);
+    await pastHold();
+    expect(watched()).toEqual([]);
+    expect(tableRenders.count).toBe(0);
+    expect(rowRenders()).toEqual([]);
+  });
+
+  it("重读回来只有一个 Mod 变了：只重画那一行里随它变的格，别的行一格不动", async () => {
+    await open();
+    await pastHold();
+    mods = mods.map((m) => (m.file_name === "sodium.jar" && m.metadata !== null ? { ...m, metadata: { ...m.metadata, version: "2.0" } } : m));
+    cellRenders.length = 0;
+    focusWindow();
+    await flush();
+    await pastHold();
+    const sodium = [...grid().querySelectorAll<HTMLElement>('[role="row"][data-row-index]')].find((r) => r.querySelector('[class*="modName"]')?.textContent === "Sodium");
+    if (sodium === undefined) throw new Error("没有 Sodium 这一行");
+    expect([...sodium.querySelectorAll('[class*="modVersion"]')].map(textOf)).toEqual(["2.0"]);
+    // 画过的只有这一行；行勾选框只认名称与勾选状态，版本变了不用重画。看的是哪些行画过，不数遍数：
+    // 缩略图在父格重画之后会因自己的状态再空转一遍（渲染了发现没变就收手）
+    expect([...new Set(rowRenders())]).toEqual(["开关:停用 Sodium", "更多菜单:Sodium 的更多操作", thumbOf("Sodium")].sort());
   });
 });

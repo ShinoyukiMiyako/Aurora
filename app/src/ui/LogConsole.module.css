@@ -63,11 +63,20 @@
   gap: var(--sk-space-8);
 }
 
-/* 省略说明条外面那层出现动画的包裹，才是这一列 flex 里的项 */
+/*
+ * 省略说明条外面那层出现动画的包裹，排在滚动区内容的最前面：粘在滚动区顶上（不换行时横向滚动也不走），叠在滚过去的行上面。
+ * 自身高 0、条从它下沿溢出来：出现、收起都不挪动后面的画布（挪了就是一次布局位移），行让出的那一截由组件经虚拟列表的上内边距给。
+ * 高 0 时退场不被抽出布局，原地淡出。宽度是滚动区的内容宽，不盖住滚动条槽，滚动条全长可见
+ */
 .omittedSlot {
-  flex: none;
+  position: sticky;
+  top: 0;
+  left: 0;
+  z-index: 1;
+  height: 0;
 }
 
+/* 底色不透明：盖住从下面滚过去的行。字体回到界面字体，不随滚动区用等宽字 */
 .omitted {
   display: flex;
   flex: none;
@@ -76,9 +85,21 @@
   min-height: 30px;
   padding: var(--sk-space-4) var(--sk-space-16);
   border-bottom: 1px solid var(--sk-line);
+  background: var(--sk-surface);
+  font-family: var(--sk-font);
   font-size: var(--sk-fs-caption);
+  font-weight: var(--sk-w-body);
+  font-variant-ligatures: normal;
   line-height: var(--sk-lh-caption);
   color: var(--sk-text-2);
+}
+
+/* 不折行、放不下时省略号截断：条高只有一种，组件量一次就够，不随宽度变化重新让位 */
+.omittedText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .area {
@@ -127,8 +148,12 @@
   );
 }
 
-/* 筛选后一行不剩：日志区顶端一行弱色说明，与日志行同样的左右内边距（右边扣掉常驻的滚动条槽） */
+/*
+ * 筛选后一行不剩：日志区顶端一行弱色说明，与日志行同样的左右内边距（右边扣掉常驻的滚动条槽）。
+ * 上面让出省略说明条的高度（--log-omitted-pad 由组件写在滚动区上），不被条盖住
+ */
 .filteredEmpty {
+  margin-top: var(--log-omitted-pad);
   padding: var(--sk-space-8) calc(var(--sk-space-16) - var(--sk-scrollbar-size)) 0 var(--sk-space-16);
   color: var(--sk-text-2);
   font-family: var(--sk-font);

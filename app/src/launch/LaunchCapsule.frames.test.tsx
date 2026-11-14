@@ -10,6 +10,7 @@ import { stubCanvas } from "../art/illustrations/test-canvas";
 import { LAUNCH_COPY } from "../copy/flows";
 import { percent } from "../domain/format";
 import { LAUNCH_PHASE_EVENT } from "../ipc/launch";
+import { CORE_EVENT } from "../ipc/tasks";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { render, stubMatchMedia, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
@@ -143,4 +144,25 @@ it("补全完成、落地重扫还没回来：安装中面走到 100% 时进度�
   await waitForFrames(() => expect(title()).toEqual([LAUNCH_COPY.installingTitle(percent(1))]));
   expect(document.querySelector('[data-fill="info"]')).toBe(fill);
   expect(fill.style.opacity).toBe("1");
+});
+
+// 最少显示长度要是加在逐帧平滑之后，弹簧离开 0 的第一帧就一下冒出 2% 那一截
+it("安装从 0 起步：胶囊的进度填充从空一帧帧长到最少显示的 2%，不一下冒出那一截", async () => {
+  ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+  await act(() => launcher.actions.repairInstance("生存"));
+  await flush();
+  const [task] = launcher.state.tasks;
+  expect([task.status, task.progress]).toEqual(["running", 0]);
+  const fill = document.querySelector<HTMLElement>('[data-fill="info"] > span');
+  if (fill === null) throw new Error("安装中面应有进度填充");
+  const offset = () => Number.parseFloat(fill.style.transform.replace("translateX(", ""));
+  expect(offset()).toBe(-100);
+  const offsets: number[] = [];
+  const observer = new MutationObserver(() => offsets.push(offset()));
+  observer.observe(fill, { attributes: true, attributeFilter: ["style"] });
+  act(() => emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 200, finished: 1, bytes: 5, total_bytes: 1000, speed: 5 }));
+  expect(launcher.state.tasks[0].progress).toBe(0.005);
+  await waitForFrames(() => expect(offset()).toBeCloseTo(-98, 3));
+  observer.disconnect();
+  expect(offsets.filter((o) => o > -100 && o < -98.01).length).toBeGreaterThan(2);
 });

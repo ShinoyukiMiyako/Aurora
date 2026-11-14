@@ -144,6 +144,14 @@ export function pinnedInstances(state: LauncherState): InstanceSummary[] {
   });
 }
 
+/**
+ * 导入中的整合包占位项：实例目录建好之前后端不认这个名字，固定只会报找不到，实例库卡片与详情页头图的固定入口据此禁用。
+ * 新建的占位项不在此列，状态层替它记着装好后要不要固定。只在占位项上才去翻任务表。
+ */
+export function importingPlaceholder(state: Pick<LauncherState, "tasks">, inst: Pick<InstanceSummary, "id" | "placeholder">): boolean {
+  return inst.placeholder && state.tasks.some((t) => t.kind === "modpack" && t.instanceId === inst.id && isActiveTask(t));
+}
+
 /** 还能再固定一个（已固定的取消固定不受此限）。 */
 export function canPinMore(state: LauncherState): boolean {
   return state.sidebarPins.length < SIDEBAR_PIN_LIMIT;

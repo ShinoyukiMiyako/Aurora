@@ -95,7 +95,7 @@ export function tweenAt(tween: { duration: number; ease: readonly [number, numbe
 const SCROLL_GLIDE_MS = { minMs: 200, maxMs: 480, pxPerMs: 10 } as const;
 
 /**
- * 组件逐帧写滚动位置的补间（日志控制台的「跳到最新」），交给 tweenAt 用；时长按起步时要滚的距离给。
+ * 组件逐帧写滚动位置的补间（日志控制台的「跳到最新」与 Home），交给 tweenAt 用；时长按起步时要滚的距离给。
  * 不交给浏览器的平滑滚动：途中终点一直在变（新行进来、折行的行第一次量出高度），对进行中的平滑滚动再发 scrollTo，
  * 浏览器从当前位置以零速重起一段，终点改得比起步还勤就一直停在起步段。时长封顶：几万像素的日志一屏屏飞过去本来就看不清，
  * 拖长只是让人等。曲线沿用淡入那条，起步快、落点前收住。

@@ -720,6 +720,71 @@ describe("下载任务页：进行中", () => {
     expectLeavingAsFinishing(id);
   });
 
+  it("减少动画时任务完成：通道立即让给排队的任务，换下的那份按完成画满格淡出，不停在完成前的进度；淡出途中清除已结束也不倒回", async () => {
+    const ids = await fourJavaTasks({ reduced: true });
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: `${ids[0]}#1`, total: 10, finished: 6, bytes: 60 * MB, total_bytes: 100 * MB, speed: 5 * MB }));
+    const lane = () => page().querySelectorAll("ol > li")[0];
+    expect(progressOf(lane())).toBe("60");
+    javaRuns.get(`${ids[0]}#1`)?.resolve(JAVA_8);
+    await flush();
+    const t25 = launcher.state.tasks.find((t) => t.id === ids[3])?.title;
+    expect([...lane().querySelectorAll("[title]")].filter(live).map((el) => el.getAttribute("title"))).toEqual([t25]);
+    const leavingFace = () => {
+      const faces = [...lane().querySelectorAll("[inert]")];
+      expect(faces).toHaveLength(1);
+      return faces[0];
+    };
+    expect(leavingFace().querySelector("[title]")?.getAttribute("title")).toBe(launcher.state.tasks.find((t) => t.id === ids[0])?.title);
+    expect(progressOf(leavingFace())).toBe("100");
+
+    act(() => buttonIn(header(), "清除已结束（1）").click());
+    await flush();
+    expect(launcher.state.tasks.map((t) => t.id)).toEqual(ids.slice(1));
+    expect(progressOf(leavingFace())).toBe("100");
+  });
+
+  it("减少动画时任务完成、进行中那份还在淡出就点清除已结束：那份停在收尾的满格淡完，页面照常", async () => {
+    const ids = await fourJavaTasks({ reduced: true });
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: `${ids[0]}#1`, total: 10, finished: 6, bytes: 60 * MB, total_bytes: 100 * MB, speed: 5 * MB }));
+    javaRuns.get(`${ids[0]}#1`)?.resolve(JAVA_8);
+    await flush();
+    expectLeavingAsFinishing(ids[0]);
+
+    act(() => buttonIn(header(), "清除已结束（1）").click());
+    await flush();
+    expect(launcher.state.tasks.map((t) => t.id)).toEqual(ids.slice(1));
+    expect(headings()).toEqual(["进行中 · 3"]);
+    // 已结束组里那一行也被清掉、在原处淡出；进行中组里先前那份仍是收尾的样子，不倒回完成前的进度
+    const { present, leaving } = taskRows(ids[0]);
+    expect(present).toEqual([]);
+    const bars = leaving.map((li) => li.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow"));
+    expect(bars.sort()).toEqual(["100", undefined]);
+    const fading = leaving.find((li) => li.querySelector('[role="progressbar"]') !== null);
+    expect(fading?.querySelector('button[aria-label="取消任务"]')?.getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("运行中的任务被取消、进行中那份还在淡出就点清除已结束：那份停在取消后的样子淡完，页面照常", async () => {
+    const ids = await fourJavaTasks();
+    act(() => row("Java 8").querySelector<HTMLButtonElement>('button[aria-label="取消任务"]')?.click());
+    await flush();
+    expect(callsOf(ipc, "cancel_task")).toEqual([{ taskId: `${ids[0]}#1` }]);
+    javaRuns.get(`${ids[0]}#1`)?.reject(cancelledError());
+    await flush();
+    expect(headings()).toEqual(["进行中 · 3", "已结束 · 1"]);
+    expect(taskRows(ids[0]).leaving).toHaveLength(1);
+
+    act(() => buttonIn(header(), "清除已结束（1）").click());
+    await flush();
+    expect(launcher.state.tasks.map((t) => t.id)).toEqual(ids.slice(1));
+    const { present, leaving } = taskRows(ids[0]);
+    expect(present).toEqual([]);
+    expect(leaving).toHaveLength(2);
+    for (const li of leaving) {
+      expect(li.textContent).toContain("取消于 0%");
+      expect(li.querySelector('[role="progressbar"]')).toBeNull();
+    }
+  });
+
   it("补全完成行：进度按有效字节走满，说明只写实际下载的量；一个字节没传写文件已就绪", async () => {
     const ids = await fourJavaTasks();
     const repaired = `${ids[0]}#1`;

@@ -5,13 +5,13 @@
 // 把 .jar 拖进这一页就是添加本地 Mod：锁定规则与上面的文件操作同一条，只在这一页收。
 
 import { motion } from "framer-motion";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type ReactNode, type RefCallback } from "react";
 import { hueOf } from "../../art/illustrations/seed";
 import { ACTION_ERROR, TOAST_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatDate } from "../../domain/format";
 import { fade, SPRING_PARAMS } from "../../lib/motion";
-import { useReflow } from "../../lib/reflow";
+import { observeReflow, useReflow } from "../../lib/reflow";
 import { useMounted } from "../../lib/useMounted";
 import { cssVars } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
@@ -265,24 +265,41 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   // 组合任务跑完之前入队的几项都算在更新中，否则玩家能对同一个文件另起一个单个更新，后跑的那个按旧文件名只会失败。
   // 只订阅文件名单：更新任务的进度约 100 ms 一次，名单不变，整张表不跟着重渲染；摘要行的进度条自己订阅
   const updatingNames = useLauncherSelector((s) => [...modFilesBeingUpdated(s.tasks, id)].sort(), shallowArrayEqual);
-  const updatingFiles = new Set(updatingNames);
-  const rows = modsData === null ? [] : modRows(modsData, updates.status === "ready" ? updates.data : null).map((r) => {
-    const override = overrides.get(r.fileName);
-    return override === undefined ? r : { ...r, enabled: override };
-  });
+  const updatingFiles = useMemo(() => new Set(updatingNames), [updatingNames]);
+  // 行对象只在列表、可更新项或乐观开关值变了时重算，重算后内容没变的行沿用上一份：行里的单元格按引用比对，
+  // 重读（快照只翻 refreshing）不动任何一行，重扫出一份新列表时也只有真正变了的行重画。
+  // 上一份取自上一次提交（committedRows 在 layout effect 里更新）：渲染被丢弃时沿用到的也只是内容相同的对象
+  const updatesData = updates.status === "ready" ? updates.data : null;
+  const committedRows = useRef<readonly ModRow[]>([]);
+  const rows: readonly ModRow[] = useMemo(
+    () =>
+      shareRows(
+        committedRows.current,
+        modsData === null
+          ? []
+          : modRows(modsData, updatesData).map((r) => {
+              const override = overrides.get(r.fileName);
+              return override === undefined ? r : { ...r, enabled: override };
+            }),
+      ),
+    [modsData, updatesData, overrides],
+  );
+  useLayoutEffect(() => {
+    committedRows.current = rows;
+  }, [rows]);
   const counts = modCounts(rows);
   // 列表还没读到时各项计数未知，可更新数还要等更新检查：先占住计数槽，数字到了原位填上，分段不变宽
   const listedCount = (n: number): number | null => (modsData === null ? null : n);
   const outdatedCount = modsData === null || updates.status === "loading" ? null : counts.outdated;
-  const shown = sortRows(filterMods(rows, query, filter), sort);
+  const shown = useMemo(() => sortRows(filterMods(rows, query, filter), sort), [rows, query, filter, sort]);
   // 选择只作用于当前列出的行：筛选、搜索变了或列表重扫后不再列出的行从选择里剔除。重读失败时列表整个读不出来，不算这些行没了
   const selectedRows = shown.filter((r) => selected.has(r.fileName));
   if (modsData !== null && selectedRows.length !== selected.size) setSelected(new Set(selectedRows.map((r) => r.fileName)));
   const { total, partial } = modTotals(inst, rows.length);
   const shownTotal = mods.status === "ready" ? total : inst.modCount;
-  const isUpdating = (r: ModRow) => pending.has(r.fileName) || updatingFiles.has(enabledFileName(r.fileName));
+  const isUpdating = useCallback((r: ModRow) => pending.has(r.fileName) || updatingFiles.has(enabledFileName(r.fileName)), [pending, updatingFiles]);
   const batchToggling = batchBusy === "enable" || batchBusy === "disable";
-  const isToggling = (r: ModRow) => toggling.has(r.fileName) || (batchToggling && selected.has(r.fileName));
+  const isToggling = useCallback((r: ModRow) => toggling.has(r.fileName) || (batchToggling && selected.has(r.fileName)), [toggling, batchToggling, selected]);
   const diskName = (r: ModRow): string => {
     if (renamed.base !== modsData) return r.fileName;
     const name = renamed.names.get(r.fileName);
@@ -387,6 +404,25 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
     void run(() => actions.setModUpdateHold(id, r.fileName, r.name, hold), ACTION_ERROR.updateHold).then(() => setHoldsInFlight((n) => n - 1));
   };
 
+  // 行内操作经一份引用不变的转发调到这一次渲染的实现：列定义与行的单元格不因换了一份回调而重画。
+  // 事件都发生在提交之后，转发时 latest 已是最新的那一份
+  const latest = useRef({ toggle, update, remove, setHold });
+  useLayoutEffect(() => {
+    latest.current = { toggle, update, remove, setHold };
+  });
+  const [rowActions] = useState<RowActions>(() => ({
+    toggle: (r) => latest.current.toggle(r),
+    update: (r) => latest.current.update(r),
+    remove: (r) => latest.current.remove(r),
+    setHold: (r, hold) => latest.current.setHold(r, hold),
+    select: (fileName) =>
+      setSelected((prev) => {
+        const next = new Set(prev);
+        if (!next.delete(fileName)) next.add(fileName);
+        return next;
+      }),
+  }));
+
   /** 批量动作跑完（成功与否）都清空选择：结果已由通知说明，留着选择容易对着已经变了的行再点一次。 */
   const runBatch = (action: BatchAction, work: () => Promise<void>, errorTitle: string) => {
     setBatchBusy(action);
@@ -454,10 +490,10 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
     })();
   };
 
-  const clearFilters = () => {
+  const clearFilters = useCallback(() => {
     setQuery("");
     setFilter("all");
-  };
+  }, []);
 
   const checkLoading = checking || updates.status === "loading" || updates.refreshing;
   // 紧凑档第二行的让位只在它会变的这一段挂：更新检查进行中与结果刚到时（插拔状态标签、挤掉标注），忽略、恢复更新
@@ -471,7 +507,31 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   // 表格卡的加载门：错误与列表都算到了，卡里按查询结果画
   const tableView = loadableView(load.view);
   const compact = tier === "compact";
-  const columns = modColumns({ compact, rowReflow, lock, holdLock, now, isUpdating, isToggling, toggle, update, remove, setHold });
+  // 让位的开关不进列定义：一次重读它要翻两回，进了列定义每回都换一份列、整表重画
+  const bindSub = useRowReflow(compact && rowReflow);
+  const columns = useMemo(
+    () => modColumns({ compact, lock, holdLock, now, isUpdating, isToggling, actions: rowActions, bindSub }),
+    [compact, lock, holdLock, now, isUpdating, isToggling, rowActions, bindSub],
+  );
+  // 表格的其余属性也在重读时保持原样：重读没改任何一行时整张表不重渲染
+  const selection = useMemo(() => ({ selected, onChange: setSelected }), [selected]);
+  const onSortChange = useCallback((next: TableSort) => setSort((prev) => adjustModSort(prev, next)), []);
+  const noMatch = useMemo(
+    () => (
+      <EmptyState
+        compact
+        icon="search"
+        title={MODS_COPY.noMatchTitle}
+        body={query.trim() !== "" ? MODS_COPY.noMatchQuery(query.trim(), partial) : MODS_COPY.noMatchFilter}
+        action={
+          <Button variant="ghost" size="sm" onClick={clearFilters}>
+            {MODS_COPY.clearFilters}
+          </Button>
+        }
+      />
+    ),
+    [query, partial, clearFilters],
+  );
   // 选中的行有启停还没回来时盘上是哪个名字未知，批量动作和开关一样带原因等它
   const batchLock = lock === undefined && selectedRows.some((r) => toggling.has(r.fileName)) ? MODS_COPY.togglePending : lock;
   const batch = selectedRows.length > 0 ? batchAvailability(selectedRows, batchLock, isUpdating) : null;
@@ -631,31 +691,19 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
                   />
                 </div>
               ) : (
-                <Table
+                <ModTable
                   key="table"
                   label={MODS_COPY.tableLabel}
                   columns={columns}
                   rows={shown}
-                  rowKey={(r) => r.fileName}
+                  rowKey={modRowKey}
                   density={compact ? "compact" : "regular"}
-                  selection={{ selected, onChange: setSelected }}
+                  selection={selection}
                   sort={sort}
-                  onSortChange={(next) => setSort((prev) => adjustModSort(prev, next))}
-                  isInactive={(r) => !r.enabled}
+                  onSortChange={onSortChange}
+                  isInactive={isInactiveRow}
                   className={styles.modTable}
-                  empty={
-                    <EmptyState
-                      compact
-                      icon="search"
-                      title={MODS_COPY.noMatchTitle}
-                      body={query.trim() !== "" ? MODS_COPY.noMatchQuery(query.trim(), partial) : MODS_COPY.noMatchFilter}
-                      action={
-                        <Button variant="ghost" size="sm" onClick={clearFilters}>
-                          {MODS_COPY.clearFilters}
-                        </Button>
-                      }
-                    />
-                  }
+                  empty={noMatch}
                 />
               )}
             </Appear>
@@ -757,23 +805,102 @@ function skeletonCell(key: string): ReactNode {
   }
 }
 
+/** 行内操作。引用在页面的整个生命周期里不变（见 ModdedMods 的 rowActions）。 */
+interface RowActions {
+  toggle(r: ModRow): void;
+  update(r: ModRow): void;
+  remove(r: ModRow): void;
+  setHold(r: ModRow, hold: UpdateHold | null): void;
+  /** 勾选或取消勾选这一行。 */
+  select(fileName: string): void;
+}
+
 interface ColumnDeps {
   compact: boolean;
-  /** 紧凑档第二行此刻挂不挂让位。 */
-  rowReflow: boolean;
   lock: string | undefined;
   /** 更新检查设置的锁：安装、补全、改名、删除进行中才有。 */
   holdLock: string | undefined;
   now: number;
   isUpdating(r: ModRow): boolean;
   isToggling(r: ModRow): boolean;
-  toggle(r: ModRow): void;
-  update(r: ModRow): void;
-  remove(r: ModRow): void;
-  setHold(r: ModRow, hold: UpdateHold | null): void;
+  actions: RowActions;
+  /** 紧凑档第二行登记让位的 ref（useRowReflow），引用不变。 */
+  bindSub: RefCallback<HTMLSpanElement>;
 }
 
-function SourceTag({ row }: { row: ModRow }) {
+/**
+ * 表格只在属性变了时重渲染：页面为重读、让位开关这类与行无关的原因重渲染时，整张表连同每一行的外框都不动。
+ * 属性里的列定义、行、选择与回调都按此保持引用（见 ModdedMods）。
+ */
+const ModTable = memo(Table<ModRow>);
+const modRowKey = (r: ModRow): string => r.fileName;
+const isInactiveRow = (r: ModRow): boolean => !r.enabled;
+
+/**
+ * 新算出的行里内容与上一份相同的沿用上一份的对象；一行都没变、顺序也没变时沿用上一份数组。
+ * 行里的单元格按引用比对：重扫出一份新列表（每一项都是新对象）时，只有真正变了的行重画。
+ */
+function shareRows(prev: readonly ModRow[], next: readonly ModRow[]): readonly ModRow[] {
+  const byName = new Map(prev.map((r) => [r.fileName, r]));
+  let unchanged = prev.length === next.length;
+  const shared = next.map((r, i) => {
+    const old = byName.get(r.fileName);
+    if (old === undefined || !sameRow(old, r)) {
+      unchanged = false;
+      return r;
+    }
+    if (prev[i] !== old) unchanged = false;
+    return old;
+  });
+  return unchanged ? prev : shared;
+}
+
+/** 两行画出来是否一样。hold 与 update 是每次读回来的新对象，按内容比。 */
+function sameRow(a: ModRow, b: ModRow): boolean {
+  for (const key of Object.keys(a) as (keyof ModRow)[]) {
+    const x = a[key];
+    const y = b[key];
+    if (x === y) continue;
+    if (typeof x !== "object" || typeof y !== "object" || x === null || y === null || JSON.stringify(x) !== JSON.stringify(y)) return false;
+  }
+  return true;
+}
+
+/**
+ * 紧凑档第二行的让位由页面一处开关：各行把第二行登记进来，ref 的引用始终不变；开关翻转时只给登记过的挂上或摘下观察者，
+ * 行不为此重渲染（以前开关经每一行的属性传下去，一次重读翻两回，每回都整表重画）。
+ * 之后才挂上的行（新增的行、虚拟化后滚进来的行）登记时按此刻的开关挂。行的 ref 先于页面的 layout effect 执行，
+ * 与开关同一次提交里挂上的行也由 set 一并挂好。
+ */
+function useRowReflow(active: boolean): RefCallback<HTMLSpanElement> {
+  const [registry] = useState(() => {
+    const stops = new Map<HTMLSpanElement, (() => void) | null>();
+    let on = false;
+    return {
+      set(next: boolean) {
+        if (next === on) return;
+        on = next;
+        for (const [el, stop] of stops) {
+          if (stop !== null) stop();
+          stops.set(el, on ? observeReflow(el) : null);
+        }
+      },
+      bind(el: HTMLSpanElement | null) {
+        if (el === null) return;
+        stops.set(el, on ? observeReflow(el) : null);
+        return () => {
+          const stop = stops.get(el);
+          if (stop !== undefined && stop !== null) stop();
+          stops.delete(el);
+        };
+      },
+    };
+  });
+  useLayoutEffect(() => registry.set(active), [registry, active]);
+  return registry.bind;
+}
+
+const SourceTag = memo(function SourceTag({ row }: { row: ModRow }) {
   if (row.platform === null)
     return (
       <Tag size="sm" icon="folder">
@@ -785,7 +912,7 @@ function SourceTag({ row }: { row: ModRow }) {
       {SOURCE_LABEL[row.platform]}
     </Tag>
   );
-}
+});
 
 /**
  * 更新状态那一格：设了更新检查（不检查更新、已锁定版本）时顶替「可更新到」，玩家先要知道这行的更新被自己管着；
@@ -849,12 +976,11 @@ function modSubTags(row: ModRow, compact: boolean, now: number): ReactElement[] 
 }
 
 /**
- * Mod 列：缩略图、名称与第二行的标注。紧凑档的第二行在 reflow 为真时挂让位：更新状态晚到插在来源后面时，同一行的其余标注滑过去而不是跳过去。
- * 什么时候为真由页面按「第二行此刻会不会变」决定，挂上的那一趟只记位置，所以要在变化之前就挂好，不能等这一行有了更新状态再挂。
+ * Mod 列：缩略图、名称与第二行的标注。紧凑档的第二行登记进页面的让位开关（bindSub）：更新状态晚到插在来源后面时，同一行的其余标注滑过去而不是跳过去。
+ * 什么时候挂由页面按「第二行此刻会不会变」决定，挂上的那一趟只记位置，所以要在变化之前就挂好，不能等这一行有了更新状态再挂。
  * 本地文件一样挂：更新检查会先按哈希反查给它补上身份，同一次就为它查更新，这一行在下次重扫之前一直显示「本地文件」却带着更新状态。
  */
-function ModCell({ row, compact, reflow, now }: { row: ModRow; compact: boolean; reflow: boolean; now: number }) {
-  const subReflow = useReflow<HTMLSpanElement>();
+const ModCell = memo(function ModCell({ row, compact, now, bindSub }: { row: ModRow; compact: boolean; now: number; bindSub: RefCallback<HTMLSpanElement> }) {
   return (
     <div className={styles.modCell}>
       <Thumb url={row.iconUrl} kind="mod" hue={hueOf(row.seed)} size={40} inactive={!row.enabled} />
@@ -863,7 +989,7 @@ function ModCell({ row, compact, reflow, now }: { row: ModRow; compact: boolean;
           <span className={styles.modName}>{row.name}</span>
           {compact && row.version !== null && <span className={styles.modVersion}>{row.version}</span>}
         </span>
-        <span ref={compact && reflow ? subReflow : undefined} className={styles.modSub}>
+        <span ref={compact ? bindSub : undefined} className={styles.modSub}>
           {row.summary !== null && <span className={styles.ellipsis}>{row.summary}</span>}
           {modSubTags(row, compact, now)}
           {!compact && row.summary === null && <span className={styles.modFile}>{row.fileName}</span>}
@@ -871,17 +997,88 @@ function ModCell({ row, compact, reflow, now }: { row: ModRow; compact: boolean;
       </div>
     </div>
   );
+});
+
+/** 行勾选框：只认名称与勾选状态，行里别的内容变了不重画。 */
+const SelectCell = memo(function SelectCell({ fileName, name, selected, onSelect }: { fileName: string; name: string; selected: boolean; onSelect: RowActions["select"] }) {
+  return <Checkbox checked={selected} onChange={() => onSelect(fileName)} ariaLabel={MODS_COPY.selectRow(name)} />;
+});
+
+const VersionCell = memo(function VersionCell({ row }: { row: ModRow }) {
+  return (
+    <div className={styles.versionCell}>
+      {/* 真实版本号又长又没有断点（1.14.2+kotlin.2.4.21）：压成一行截断，悬停看全文。「版本未知」没有更多可看 */}
+      <Tooltip content={row.version} disabled={row.version === null}>
+        <span className={styles.modVersion}>{row.version === null ? MODS_COPY.versionUnknown : row.version}</span>
+      </Tooltip>
+      {/* 状态标签随更新检查晚到：格高按版本号一行加单行标签固定，标签出现时版本号不动；标签自己淡入淡出 */}
+      <Appear itemClassName={styles.appearInline}>{statusTag(row)}</Appear>
+    </div>
+  );
+});
+
+const ToggleCell = memo(function ToggleCell({ row, reason, onToggle }: { row: ModRow; reason: string | undefined; onToggle: RowActions["toggle"] }) {
+  return (
+    <Tooltip content={MODS_COPY.toggleTip(row.enabled)} disabled={reason !== undefined}>
+      <Toggle checked={row.enabled} onChange={() => onToggle(row)} ariaLabel={MODS_COPY.toggleLabel(row.name, row.enabled)} disabledReason={reason} />
+    </Tooltip>
+  );
+});
+
+interface ActionsCellProps {
+  row: ModRow;
+  compact: boolean;
+  updating: boolean;
+  lock: string | undefined;
+  holdLock: string | undefined;
+  /** 移除键的禁用原因，与开关同一条：锁住，或启停还没回来。 */
+  removeReason: string | undefined;
+  actions: RowActions;
 }
 
+const ActionsCell = memo(function ActionsCell({ row, compact, updating, lock, holdLock, removeReason, actions }: ActionsCellProps) {
+  return (
+    <div className={styles.rowActions}>
+      {/* 更新按钮随更新检查晚到时淡入、更新完成后淡出；操作列右对齐，后面的两个按钮不动 */}
+      <Appear itemClassName={styles.appearInline}>
+        {row.update !== null &&
+          (compact ? (
+            <IconButton
+              key="update"
+              icon="download"
+              label={MODS_COPY.updateLabel(row.name)}
+              size="sm"
+              variant="secondary"
+              disabled={updating}
+              focusableWhenDisabled
+              disabledReason={lock}
+              onClick={() => actions.update(row)}
+            />
+          ) : (
+            <Button key="update" size="sm" disabledReason={lock} loading={updating} onClick={() => actions.update(row)} aria-label={MODS_COPY.updateLabel(row.name)}>
+              {MODS_COPY.update}
+            </Button>
+          ))}
+      </Appear>
+      <MoreMenu items={holdMenu(row, holdLock, actions.setHold)} size="sm" label={MODS_COPY.more(row.name)} />
+      {/* 启停还没回来时盘上是哪个名字未知：这时开确认框，确认时拿的是改名前的旧名字 */}
+      <IconButton icon="trash" label={MODS_COPY.remove(row.name)} size="sm" variant="danger" disabledReason={removeReason} onClick={() => actions.remove(row)} />
+    </div>
+  );
+});
+
 /** 行的更多菜单：有来源且没设置时可以忽略更新，忽略或锁定过的恢复检查；本地文件没有来源，忽略项禁用并写原因。 */
-function holdMenu(r: ModRow, holdLock: string | undefined, setHold: ColumnDeps["setHold"]): MenuEntry[] {
+function holdMenu(r: ModRow, holdLock: string | undefined, setHold: RowActions["setHold"]): MenuEntry[] {
   const lockProps = holdLock === undefined ? {} : { disabled: true, disabledReason: holdLock };
   if (r.platform === null) return [{ label: MODS_COPY.ignoreUpdates, disabled: true, disabledReason: MODS_COPY.localNoUpdates, onSelect: () => setHold(r, { kind: "ignored" }) }];
   if (r.hold !== null) return [{ label: MODS_COPY.restoreUpdates, ...lockProps, onSelect: () => setHold(r, null) }];
   return [{ label: MODS_COPY.ignoreUpdates, ...lockProps, onSelect: () => setHold(r, { kind: "ignored" }) }];
 }
 
-function modColumns({ compact, rowReflow, lock, holdLock, now, isUpdating, isToggling, toggle, update, remove, setHold }: ColumnDeps): TableColumn<ModRow>[] {
+/**
+ * 列定义。每一格都是按值比对的组件，拿到的是行对象、单个状态值与引用不变的回调：表格重渲染时只有值变了的格重画。
+ */
+function modColumns({ compact, lock, holdLock, now, isUpdating, isToggling, actions, bindSub }: ColumnDeps): TableColumn<ModRow>[] {
   const toggleReason = (r: ModRow): string | undefined => (lock !== undefined ? lock : isToggling(r) ? MODS_COPY.togglePending : undefined);
   return [
     {
@@ -891,30 +1088,22 @@ function modColumns({ compact, rowReflow, lock, holdLock, now, isUpdating, isTog
       ),
       width: 40,
       keepOpaque: true,
-      cell: (r, ctx) => <Checkbox checked={ctx.selected} onChange={() => ctx.toggleSelected()} ariaLabel={MODS_COPY.selectRow(r.name)} />,
+      // 勾选直接改页面持有的选择（与表格给的 toggleSelected 是同一件事）：表格每次重渲染都给一份新的 toggleSelected，接了它勾选框就每次都重画
+      cell: (r, ctx) => <SelectCell fileName={r.fileName} name={r.name} selected={ctx.selected} onSelect={actions.select} />,
     },
     {
       key: "mod",
       header: MODS_COPY.colMod,
       minWidth: 260,
       sortable: true,
-      cell: (r) => <ModCell row={r} compact={compact} reflow={rowReflow} now={now} />,
+      cell: (r) => <ModCell row={r} compact={compact} now={now} bindSub={bindSub} />,
     },
     {
       key: "version",
       header: MODS_COPY.colVersion,
       width: 150,
       tiers: ["regular", "wide"],
-      cell: (r) => (
-        <div className={styles.versionCell}>
-          {/* 真实版本号又长又没有断点（1.14.2+kotlin.2.4.21）：压成一行截断，悬停看全文。「版本未知」没有更多可看 */}
-          <Tooltip content={r.version} disabled={r.version === null}>
-            <span className={styles.modVersion}>{r.version === null ? MODS_COPY.versionUnknown : r.version}</span>
-          </Tooltip>
-          {/* 状态标签随更新检查晚到：格高按版本号一行加单行标签固定，标签出现时版本号不动；标签自己淡入淡出 */}
-          <Appear itemClassName={styles.appearInline}>{statusTag(r)}</Appear>
-        </div>
-      ),
+      cell: (r) => <VersionCell row={r} />,
     },
     { key: "source", header: MODS_COPY.colSource, width: 120, tiers: ["regular", "wide"], sortable: true, cell: (r) => <SourceTag row={r} /> },
     {
@@ -935,14 +1124,7 @@ function modColumns({ compact, rowReflow, lock, holdLock, now, isUpdating, isTog
       sortable: true,
       keepOpaque: true,
       // 锁住时开关自己用提示气泡写禁用原因；可用时悬停说明点了是停用还是启用。外层常驻：原因来去时开关不重挂，焦点不掉回 body
-      cell: (r) => {
-        const reason = toggleReason(r);
-        return (
-          <Tooltip content={MODS_COPY.toggleTip(r.enabled)} disabled={reason !== undefined}>
-            <Toggle checked={r.enabled} onChange={() => toggle(r)} ariaLabel={MODS_COPY.toggleLabel(r.name, r.enabled)} disabledReason={reason} />
-          </Tooltip>
-        );
-      },
+      cell: (r) => <ToggleCell row={r} reason={toggleReason(r)} onToggle={actions.toggle} />,
     },
     {
       key: "actions",
@@ -951,34 +1133,7 @@ function modColumns({ compact, rowReflow, lock, holdLock, now, isUpdating, isTog
       width: compact ? 128 : 152,
       align: "end",
       keepOpaque: true,
-      cell: (r) => (
-        <div className={styles.rowActions}>
-          {/* 更新按钮随更新检查晚到时淡入、更新完成后淡出；操作列右对齐，后面的两个按钮不动 */}
-          <Appear itemClassName={styles.appearInline}>
-            {r.update !== null &&
-              (compact ? (
-                <IconButton
-                  key="update"
-                  icon="download"
-                  label={MODS_COPY.updateLabel(r.name)}
-                  size="sm"
-                  variant="secondary"
-                  disabled={isUpdating(r)}
-                  focusableWhenDisabled
-                  disabledReason={lock}
-                  onClick={() => update(r)}
-                />
-              ) : (
-                <Button key="update" size="sm" disabledReason={lock} loading={isUpdating(r)} onClick={() => update(r)} aria-label={MODS_COPY.updateLabel(r.name)}>
-                  {MODS_COPY.update}
-                </Button>
-              ))}
-          </Appear>
-          <MoreMenu items={holdMenu(r, holdLock, setHold)} size="sm" label={MODS_COPY.more(r.name)} />
-          {/* 启停还没回来时盘上是哪个名字未知：这时开确认框，确认时拿的是改名前的旧名字 */}
-          <IconButton icon="trash" label={MODS_COPY.remove(r.name)} size="sm" variant="danger" disabledReason={toggleReason(r)} onClick={() => remove(r)} />
-        </div>
-      ),
+      cell: (r) => <ActionsCell row={r} compact={compact} updating={isUpdating(r)} lock={lock} holdLock={holdLock} removeReason={toggleReason(r)} actions={actions} />,
     },
   ];
 }

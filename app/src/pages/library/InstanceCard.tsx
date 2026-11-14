@@ -21,8 +21,7 @@ import { popMark } from "../../lib/motion";
 import { useNav } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
-import { busyInstanceId, canPinMore, findInstance } from "../../state/selectors";
-import { isActiveTask } from "../../state/tasks";
+import { busyInstanceId, canPinMore, findInstance, importingPlaceholder } from "../../state/selectors";
 import { Appear } from "../../ui/Appear";
 import { Card, CardTitleButton } from "../../ui/Card";
 import { Cover } from "../../ui/Cover";
@@ -60,9 +59,7 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
   const currentTag = useReducedMotionConfig() === true ? popMark.reduced : popMark.tag;
   const busy = useLauncherSelector((s) => busyInstanceId(s) === id);
   const canPin = useLauncherSelector(canPinMore);
-  // 导入中的整合包占位项：实例目录建好之前后端不认这个名字，固定只会报找不到。新建的占位项不在此列，
-  // 状态层替它记着装好后要不要固定。只在占位项上才去翻任务表
-  const importing = useLauncherSelector((s) => inst.placeholder && s.tasks.some((t) => t.kind === "modpack" && t.instanceId === id && isActiveTask(t)));
+  const importing = useLauncherSelector((s) => importingPlaceholder(s, inst));
   // 崩溃报告不会被之后的正常启动清空：菜单项按「崩溃过」出现，提示只在之后没再正常玩过时给出；
   // 刚崩溃、列表还没重扫到崩溃时刻时，以会话的崩溃态为准
   const viewKind = useLauncherSelector((s) => (findInstance(s, id) === undefined ? null : launchView(s, inst).kind));

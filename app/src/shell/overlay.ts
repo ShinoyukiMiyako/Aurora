@@ -59,6 +59,7 @@ class OverlayRegistry {
   };
 
   getSnapshot = (): OverlaySnapshot => this.snapshot;
+  getScrimOpen = (): boolean => this.snapshot.scrimOpen;
   getRoot = (): HTMLElement | null => this.root;
 
   private notify(): void {
@@ -165,6 +166,15 @@ export function useOverlayRoot(): HTMLElement | null {
 export function useOverlayState(): OverlaySnapshot {
   const registry = useRegistry();
   return useSyncExternalStore(registry.subscribe, registry.getSnapshot, registry.getSnapshot);
+}
+
+/**
+ * 只订阅有没有带遮罩的浮层。Popover、Menu、Select 开合只改深度，只看遮罩的组件取整份快照会随这些开合各重渲染一遍，
+ * 它们用这个。
+ */
+export function useScrimOpen(): boolean {
+  const registry = useRegistry();
+  return useSyncExternalStore(registry.subscribe, registry.getScrimOpen, registry.getScrimOpen);
 }
 
 export interface OverlayControls {

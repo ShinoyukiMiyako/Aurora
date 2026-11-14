@@ -33,7 +33,7 @@ export interface ProgressRingProps {
   value: number | null;
   size?: ProgressRingSize;
   tone?: ProgressTone;
-  /** 会话或任务的标识：标识不变时只增不减，换标识直接跳到新值。 */
+  /** 会话或任务的标识：标识不变时只增不减；换标识时直接跳到新值，从空开始的除外（见 nextProgressTarget）。 */
   track?: string;
   /** 启动进度只有进入运行才算 100%：圆心百分数封顶 99。 */
   capAt99?: boolean;

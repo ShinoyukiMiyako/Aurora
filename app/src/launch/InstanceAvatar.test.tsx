@@ -108,4 +108,26 @@ describe("头像状态层", () => {
     await waitForFrames(() => expect(offsetOf(ok)).toBeCloseTo(0, 3));
     expect(offsetOf(failed)).toBeCloseTo(length * 0.6, 3);
   });
+
+  // 最少显示长度要是加在逐帧平滑之后，弹簧离开 0 的第一帧就一下冒出 2% 的弧
+  it("进度从 0 起步：填充弧从空一帧帧长到最少显示的 2%，不一下冒出那一截", async () => {
+    const at = (progress: number) => (
+      <MotionConfig reducedMotion="never">
+        <AvatarIndicatorLayer indicator={{ type: "ring", tone: "accent", progress, track: "launch-1" }} size={40} />
+      </MotionConfig>
+    );
+    const { length } = ringGeometry(40);
+    view = render(at(0));
+    expect(view.container.querySelectorAll("path")).toHaveLength(1);
+    view.rerender(at(0.005));
+    const fill = view.container.querySelectorAll("path")[1];
+    if (fill === undefined) throw new Error("进度大于 0 时应画出填充弧");
+    const offsetOf = () => Number(fill.getAttribute("stroke-dashoffset"));
+    const offsets: number[] = [];
+    const observer = new MutationObserver(() => offsets.push(offsetOf()));
+    observer.observe(fill, { attributes: true, attributeFilter: ["stroke-dashoffset"] });
+    await waitForFrames(() => expect(offsetOf()).toBeCloseTo(length * 0.98, 3));
+    observer.disconnect();
+    expect(offsets.filter((o) => o < length && o > length * 0.98 + 0.01).length).toBeGreaterThan(2);
+  });
 });

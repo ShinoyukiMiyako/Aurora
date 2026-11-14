@@ -19,9 +19,14 @@ export interface ToggleProps {
   /** 禁用原因不显而易见时传它：保持可聚焦，悬停与聚焦显示原因，点击无效。 */
   disabledReason?: string;
   className?: string;
+  /**
+   * 外面再包一层 Tooltip（Mod 列表的开关）时它经 cloneElement 写进来。根节点是内层的提示包裹，不往下交给开关按钮的话，
+   * 外层气泡在无障碍树里与开关没有关联；交给按钮后由内层 Tooltip 与禁用原因的气泡 id 合并。
+   */
+  "aria-describedby"?: string;
 }
 
-export function Toggle({ checked, onChange, label, description, ariaLabel, disabled = false, disabledReason, className }: ToggleProps) {
+export function Toggle({ checked, onChange, label, description, ariaLabel, disabled = false, disabledReason, className, "aria-describedby": describedBy }: ToggleProps) {
   const field = useFieldControl();
   if (label === undefined && ariaLabel === undefined && field === null) throw new Error("Toggle 没有可见标签时必须传 ariaLabel");
   const softDisabled = disabledReason !== undefined && !disabled;
@@ -33,6 +38,7 @@ export function Toggle({ checked, onChange, label, description, ariaLabel, disab
       id={field?.controlId}
       aria-checked={checked}
       aria-label={ariaLabel}
+      aria-describedby={describedBy}
       aria-disabled={softDisabled || undefined}
       disabled={disabled}
       className={cx(styles.root, className)}

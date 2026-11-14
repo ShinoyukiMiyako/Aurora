@@ -6,7 +6,7 @@ import { MotionGlobalConfig } from "framer-motion";
 import type { ReactNode } from "react";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { render, stubResizeObserver, type Rendered } from "../test/dom";
+import { fakeAnimate, render, stubResizeObserver, type Rendered } from "../test/dom";
 import { COPY } from "./copy";
 import { FrameChromeProvider, FrameShell, type FrameChrome } from "./Frame";
 import type { StepDirection } from "./model";
@@ -62,10 +62,7 @@ beforeEach(() => {
   Object.defineProperty(HTMLElement.prototype, "animate", {
     configurable: true,
     writable: true,
-    value: function (this: HTMLElement, frames: Keyframe[], options: KeyframeAnimationOptions) {
-      played.push({ el: this, frames, options });
-      return {} as Animation;
-    },
+    value: fakeAnimate<HTMLElement>((el, frames, options) => played.push({ el, frames, options })),
   });
 });
 

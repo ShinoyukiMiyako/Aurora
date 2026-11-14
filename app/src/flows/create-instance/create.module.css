@@ -69,8 +69,8 @@
 }
 
 /*
- * 隐形按钮整层透明（带 inert，点不到也聚焦不到），不用 visibility: hidden：按钮里的定宽文案槽把当前那条显式设成
- * visible，祖先的 hidden 继承不到它，「创建并开始安装」会压在「下一步」上露出来
+ * 隐形按钮整层透明（带 inert，点不到也聚焦不到）：透明度作用于整个子树，后代怎么写都改不回来。visibility: hidden
+ * 要靠后代一路继承，按钮里哪一处显式写了 visible，那一块就会压在「下一步」上露出来
  */
 .primaryGhost {
   display: flex;

@@ -8,7 +8,7 @@ import { REFLOW_PAUSED_ATTR } from "../lib/reflow";
 import { DEFAULT_APPEARANCE, AppearanceProvider } from "../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { activeAccount } from "../state/selectors";
-import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
+import { fakeAnimate, keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { accountDto, bootOverrides, callsOf, configDto, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { ChromeProvider, type ChromeApi } from "./chrome";
@@ -370,10 +370,7 @@ describe("命令面板的结果列表：后台变化让位，键入过滤整批�
     Object.defineProperty(HTMLDivElement.prototype, "animate", {
       configurable: true,
       writable: true,
-      value(this: HTMLDivElement, frames: Keyframe[], options: KeyframeAnimationOptions) {
-        played.push({ el: this, frames, options });
-        return {} as Animation;
-      },
+      value: fakeAnimate((el, frames, options) => played.push({ el, frames, options })),
     });
     onTestFinished(() => {
       Reflect.deleteProperty(HTMLDivElement.prototype, "animate");

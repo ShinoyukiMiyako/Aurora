@@ -9,6 +9,7 @@ import { Icon } from "../../art/Icon";
 import type { Task } from "../../domain/types";
 import { lineSwap, lineSwapFade } from "../../lib/motion";
 import { useMounted } from "../../lib/useMounted";
+import { useLauncherSelector } from "../../state/launcher";
 import { progressTrack } from "../../state/tasks";
 import { Card } from "../../ui/Card";
 import { CardHeader } from "../../ui/CardHeader";
@@ -33,6 +34,35 @@ function LaneFace({ variants, enter, children }: { variants: Variants; enter: bo
     <motion.div className={styles.laneFace} inert={!present} variants={variants} initial={enter ? "enter" : false} animate="show" exit="leave">
       {children}
     </motion.div>
+  );
+}
+
+/**
+ * 通道里的一个任务。退场中的那份 props 停在离开前的那次渲染（AnimatePresence 冻结）。减少动画时没有收尾这一拍
+ * （useCompletionHold 为 0），任务完成的那一刻就让出通道，冻结下来的是完成前最后一次上报的进度，淡出时停在不满的格上。
+ * 所以退场中按任务 id 读实时任务，已完成就按 1 画，与有收尾这一拍时让出前的样子相同。在场的不读：页面每次都给最新的任务。
+ */
+function LaneTask({ task: placed }: { task: Task }) {
+  const leaving = !useIsPresent();
+  // 读不到时沿用上一次读到的：淡出途中任务被「清除已结束」拿掉，照拿掉前的样子淡完，不倒回完成前的进度
+  const live = useLauncherSelector(
+    (s) => (leaving ? s.tasks.find((t) => t.id === placed.id) : undefined),
+    (prev, next) => next === undefined || prev === next,
+  );
+  const landed = leaving && live !== undefined && live.status === "done";
+  const task = landed ? live : placed;
+  const progress = landed ? 1 : task.progress;
+  const track = progressTrack(task);
+  return (
+    <div className={styles.laneBody}>
+      <div className={styles.laneTitle}>
+        <span className={styles.laneName} title={task.title}>
+          {task.title}
+        </span>
+        <SmoothPercent className={styles.lanePct} value={progress} track={track} />
+      </div>
+      <ProgressBar value={progress} size="sm" track={track} label={TASKS_COPY.lanes.progressLabel(task.title)} />
+    </div>
   );
 }
 
@@ -63,19 +93,7 @@ export function LanesCard({ running, finishing, queued }: LanesCardProps) {
             <div className={styles.laneSlot}>
               <AnimatePresence>
                 <LaneFace key={task === null ? "idle" : task.id} variants={swap} enter={mounted.current}>
-                  {task === null ? (
-                    <span className={styles.laneIdle}>{TASKS_COPY.lanes.idle}</span>
-                  ) : (
-                    <div className={styles.laneBody}>
-                      <div className={styles.laneTitle}>
-                        <span className={styles.laneName} title={task.title}>
-                          {task.title}
-                        </span>
-                        <SmoothPercent className={styles.lanePct} value={task.progress} track={progressTrack(task)} />
-                      </div>
-                      <ProgressBar value={task.progress} size="sm" track={progressTrack(task)} label={TASKS_COPY.lanes.progressLabel(task.title)} />
-                    </div>
-                  )}
+                  {task === null ? <span className={styles.laneIdle}>{TASKS_COPY.lanes.idle}</span> : <LaneTask task={task} />}
                 </LaneFace>
               </AnimatePresence>
             </div>

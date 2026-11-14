@@ -20,8 +20,7 @@ import { useMounted } from "../../lib/useMounted";
 import { useNav, useShell } from "../../shell/shell";
 import { useLauncherSelector } from "../../state/launcher";
 import { reimportRoute } from "../../state/route";
-import { canPinMore, installTask } from "../../state/selectors";
-import { isActiveTask } from "../../state/tasks";
+import { canPinMore, importingPlaceholder, installTask } from "../../state/selectors";
 import { Card } from "../../ui/Card";
 import { Cover } from "../../ui/Cover";
 import { IconButton } from "../../ui/IconButton";
@@ -59,9 +58,7 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
   const cover = useInstanceCover(inst);
   const backdrop = useCoverBackdrop(inst);
   const pinBlocked = useLauncherSelector((s) => !inst.pinned && !canPinMore(s));
-  // 导入中的整合包占位项：实例目录建好之前后端不认这个名字，固定只会报找不到。新建的占位项不在此列，
-  // 状态层替它记着装好后要不要固定。与实例库卡片同一个判断，只在占位项上才去翻任务表
-  const importing = useLauncherSelector((s) => inst.placeholder && s.tasks.some((t) => t.kind === "modpack" && t.instanceId === inst.id && isActiveTask(t)));
+  const importing = useLauncherSelector((s) => importingPlaceholder(s, inst));
   const renameReason = lockReason(ops.locks.rename, "rename");
   const repairReason = lockReason(ops.locks.repair, "repair");
   const deleteReason = lockReason(ops.locks.delete, "delete");

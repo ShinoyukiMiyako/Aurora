@@ -30,6 +30,11 @@ describe("工具条", () => {
     expect(tools["justify-content"]).toBe("flex-end");
     expect(tools["margin-left"]).toBe("auto");
   });
+
+  it("搜索框窄档放不下占位文字时单行省略，不被快捷键提示截成半个字", () => {
+    // Chromium 的占位文字继承输入框自己的 text-overflow，写在 ::placeholder 上不生效
+    expect(declarations(".search input")["text-overflow"]).toBe("ellipsis");
+  });
 });
 
 describe("实例卡片的统计行", () => {

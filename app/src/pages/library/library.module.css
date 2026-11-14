@@ -65,6 +65,14 @@
   width: var(--lib-search-width);
 }
 
+/*
+ * compact 档的 180px 里，占位文字与快捷键提示放不下，原样会被截成半个字。Chromium 的占位文字继承输入框自己的
+ * text-overflow（写在 ::placeholder 上不生效），所以写在输入框上：没聚焦时占位文字与输入的内容都单行省略
+ */
+.search input {
+  text-overflow: ellipsis;
+}
+
 .directory {
   width: var(--lib-directory-width);
 }

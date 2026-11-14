@@ -8,6 +8,7 @@
 import { motion } from "framer-motion";
 import { useState } from "react";
 import { BOOT_SLICE_ERROR, LOADER_NAME } from "../../copy/flows";
+import type { InstanceSummary } from "../../domain/adapt";
 import { formatCount, formatPlaytime } from "../../domain/format";
 import { InstanceAvatar } from "../../launch/InstanceAvatar";
 import type { LoadingView } from "../../lib/loading-gate";
@@ -43,6 +44,7 @@ import {
   totalPlaytime,
   weekCompare,
   weekDirection,
+  type LoaderShare,
   type PlayActivity,
 } from "./activity";
 import { HOME_COPY, WEEKDAY_CHAR } from "./copy";
@@ -67,6 +69,13 @@ export interface InstancesView {
   /** 实例列表读取出错：这几块写读不到，错误本身由继续游玩大卡原位报。 */
   failed: boolean;
 }
+
+/**
+ * 实例列表由卡片这一层订阅、按 props 往下传，下面的块不自己订阅。重扫因数据格式被拒时，store 在同一次更新里清空列表并把
+ * 切片置为出错：退场中的旧层（读到列表时的那一面）若自己订阅，淡出的那一段会按空列表重算出「暂无」「0 个实例」「已被删除」；
+ * 按 props 拿的话，旧层留着的是出错前最后一次的值。
+ */
+type InstanceList = InstanceSummary[];
 
 function dayLabel(date: string): string {
   const [, m, d] = date.split("-").map(Number);
@@ -121,6 +130,7 @@ export interface CalendarCardProps {
 }
 
 export function CalendarCard({ span, play, instances, today, month, onMonthChange, selected, onSelect }: CalendarCardProps) {
+  const list = useLauncherSelector((s) => s.instances);
   const ready = play.status === "ready" ? play.activity : null;
   const minMonth = ready === null ? month : ready.minMonth;
   const maxMonth = ready === null ? month : ready.maxMonth;
@@ -170,7 +180,7 @@ export function CalendarCard({ span, play, instances, today, month, onMonthChang
             <Inset className={s.dayDetail}>
               <span className={s.dayDate}>{dayLabel(selected)}</span>
               <Loadable view={loadView(play)} skeleton={<DaySkeleton />}>
-                {() => <DayDetail activity={readyActivity(play)} date={selected} instances={instances} />}
+                {() => <DayDetail activity={readyActivity(play)} date={selected} instances={instances} list={list} />}
               </Loadable>
             </Inset>
           </div>
@@ -198,21 +208,22 @@ interface DayDetailProps {
   activity: PlayActivity;
   date: string;
   instances: InstancesView;
+  list: InstanceList;
 }
 
-function DayDetail({ activity, date, instances }: DayDetailProps) {
+function DayDetail({ activity, date, instances, list }: DayDetailProps) {
   // 改选日期时新的一天淡入，读得出换了一天；挂载时就在的那天跟着骨架换内容的淡入走，不再叠一层
   const [firstDate] = useState(date);
   const [moved, setMoved] = useState(false);
   if (!moved && date !== firstDate) setMoved(true);
   return (
     <motion.div key={date} className={s.dayBody} initial={moved ? { opacity: 0 } : false} animate={{ opacity: 1, transition: fade.in }}>
-      <DayContent activity={activity} date={date} instances={instances} />
+      <DayContent activity={activity} date={date} instances={instances} list={list} />
     </motion.div>
   );
 }
 
-function DayContent({ activity, date, instances }: DayDetailProps) {
+function DayContent({ activity, date, instances, list }: DayDetailProps) {
   if (!activity.hasRecords) return <span className={s.dayTime}>{HOME_COPY.noRecords}</span>;
   const day = activity.days.get(date);
   if (day === undefined) {
@@ -237,7 +248,7 @@ function DayContent({ activity, date, instances }: DayDetailProps) {
                 {BOOT_SLICE_ERROR.instances}
               </span>
             ) : (
-              <DayInstances key="listed" entries={day.instances} />
+              <DayInstances key="listed" alive={aliveOn(day.instances, list)} />
             )}
           </Appear>
         )}
@@ -259,13 +270,16 @@ function DayInstancesSkeleton({ count }: { count: number }) {
   );
 }
 
-function DayInstances({ entries }: { entries: PlayDayDto["instances"] }) {
-  const instances = useLauncherSelector((s) => s.instances);
-  const { go } = useNav();
-  const alive = entries.flatMap((entry) => {
+/** 当天玩过、现在还在列表里的实例。 */
+function aliveOn(entries: PlayDayDto["instances"], instances: InstanceList): InstanceSummary[] {
+  return entries.flatMap((entry) => {
     const inst = findInstance({ instances }, entry.version_id);
     return inst === undefined ? [] : [inst];
   });
+}
+
+function DayInstances({ alive }: { alive: readonly InstanceSummary[] }) {
+  const { go } = useNav();
   if (alive.length === 0) return <span className={s.dayHint}>{HOME_COPY.dayDeleted}</span>;
   return (
     <List className={s.dayList}>
@@ -297,6 +311,7 @@ export interface InsightsCardProps {
 }
 
 export function InsightsCard({ span, play, instances, today, selected, onPickDay, className }: InsightsCardProps) {
+  const list = useLauncherSelector((s) => s.instances);
   return (
     <Card span={span} className={className}>
       <CardHeader level={2} title={HOME_COPY.insightsTitle} subtitle={HOME_COPY.insightsSubtitle} icon="activity" />
@@ -305,7 +320,7 @@ export function InsightsCard({ span, play, instances, today, selected, onPickDay
         {play.status === "error" ? (
           <StatsError key="error" play={play} />
         ) : (
-          <InsightsBody key="body" play={play} instances={instances} today={today} selected={selected} onPickDay={onPickDay} />
+          <InsightsBody key="body" play={play} instances={instances} list={list} today={today} selected={selected} onPickDay={onPickDay} />
         )}
       </Appear>
     </Card>
@@ -315,16 +330,17 @@ export function InsightsCard({ span, play, instances, today, selected, onPickDay
 interface InsightsBodyProps {
   play: Exclude<PlayView, { status: "error" }>;
   instances: InstancesView;
+  list: InstanceList;
   today: string;
   selected: string;
   onPickDay: (date: string) => void;
 }
 
-function InsightsBody({ play, instances, today, selected, onPickDay }: InsightsBodyProps) {
+function InsightsBody({ play, instances, list, today, selected, onPickDay }: InsightsBodyProps) {
   return (
     <div className={s.insightsBody}>
       <Loadable view={loadView(play)} skeleton={<StatSkeletons />}>
-        {() => <InsightStats activity={readyActivity(play)} instances={instances} />}
+        {() => <InsightStats activity={readyActivity(play)} instances={instances} list={list} />}
       </Loadable>
       <WeekBars activity={play.status === "ready" ? play.activity : null} today={today} selected={selected} onPickDay={onPickDay} />
     </div>
@@ -354,7 +370,7 @@ function StatSkeletons() {
   );
 }
 
-function InsightStats({ activity, instances }: { activity: PlayActivity; instances: InstancesView }) {
+function InsightStats({ activity, instances, list }: { activity: PlayActivity; instances: InstancesView; list: InstanceList }) {
   const week = weekCompare(activity);
   const streak = streakDays(activity);
 
@@ -376,7 +392,7 @@ function InsightStats({ activity, instances }: { activity: PlayActivity; instanc
       <Loadable view={instances.view} skeleton={<StatSkeleton />}>
         {() => (
           <Appear>
-            {instances.failed ? <StatTile key="failed" label={HOME_COPY.topLoader} kind="text" value={HOME_COPY.topLoaderUnknown} /> : <TopLoaderTile key="listed" activity={activity} />}
+            {instances.failed ? <StatTile key="failed" label={HOME_COPY.topLoader} kind="text" value={HOME_COPY.topLoaderUnknown} /> : <TopLoaderTile key="listed" top={topLoader(activity, list)} />}
           </Appear>
         )}
       </Loadable>
@@ -386,7 +402,7 @@ function InsightStats({ activity, instances }: { activity: PlayActivity; instanc
             {instances.failed ? (
               <StatTile key="failed" label={HOME_COPY.total} kind="text" value={HOME_COPY.totalUnknown} delta={{ direction: "flat", text: BOOT_SLICE_ERROR.instances }} />
             ) : (
-              <TotalTile key="listed" />
+              <TotalTile key="listed" total={totalPlaytime(list)} />
             )}
           </Appear>
         )}
@@ -395,9 +411,7 @@ function InsightStats({ activity, instances }: { activity: PlayActivity; instanc
   );
 }
 
-function TopLoaderTile({ activity }: { activity: PlayActivity }) {
-  const instances = useLauncherSelector((s) => s.instances);
-  const top = topLoader(activity, instances);
+function TopLoaderTile({ top }: { top: LoaderShare | null }) {
   return (
     <StatTile
       label={HOME_COPY.topLoader}
@@ -408,9 +422,7 @@ function TopLoaderTile({ activity }: { activity: PlayActivity }) {
   );
 }
 
-function TotalTile() {
-  const instances = useLauncherSelector((s) => s.instances);
-  const total = totalPlaytime(instances);
+function TotalTile({ total }: { total: ReturnType<typeof totalPlaytime> }) {
   if (total.hours === null) {
     return <StatTile label={HOME_COPY.total} kind="text" value={HOME_COPY.totalUnknown} delta={{ direction: "flat", text: HOME_COPY.instanceCount(total.count) }} />;
   }

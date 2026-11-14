@@ -542,8 +542,10 @@ describe("主页：最近游玩", () => {
     expect(recentSection()).toBeNull();
 
     failing = false;
-    const heroError = [...document.querySelectorAll<HTMLElement>("[data-pad]")].find((card) => card.textContent?.includes("实例列表读不出来"));
-    if (heroError === undefined) throw new Error("大卡没有原位报错");
+    // 洞察的累计时长与当日详情也写「实例列表读不出来」：按大卡自己的加载区找到大卡，不按文字找
+    const heroError = document.querySelector(`.${s.heroLoadable}`)?.closest<HTMLElement>("[data-span]");
+    if (heroError === null || heroError === undefined) throw new Error("找不到继续游玩大卡");
+    expect(heroError.textContent).toContain("实例列表读不出来");
     click(buttonByText("重试", heroError));
     await flush();
     expect(launcher.state.status.instances.kind).toBe("loading");
@@ -677,6 +679,41 @@ describe("主页：游玩日历与洞察", () => {
     click(bar("10月27日"));
     expect(text()).toContain("这天没有游玩");
     expect(text()).toContain("休息也是游戏的一部分。");
+  });
+
+  it("停在主页时重扫因数据格式被拒：常玩加载器、累计时长与当日实例换成读不到，淡出中的旧层留着最后一次的值，不按清空的列表重算", async () => {
+    await mount();
+    const tiles = (prefix: string, leaving: boolean) =>
+      [...document.querySelectorAll<HTMLElement>('[role="group"][aria-label]')]
+        .filter((g) => g.getAttribute("aria-label")?.startsWith(prefix) && (g.closest("[inert]") !== null) === leaving)
+        .map((g) => g.getAttribute("aria-label"));
+    const dayDetail = document.querySelector<HTMLElement>(`.${s.dayDetail}`);
+    if (dayDetail === null) throw new Error("找不到当日详情");
+    expect(tiles("常玩加载器", false)).toEqual(["常玩加载器 Fabric，近 30 天占 80%"]);
+    expect(tiles("累计时长", false)).toEqual(["累计时长 43 小时，4 个实例"]);
+
+    // 同一次提交里实例列表清空、切片置为出错（store 的 adoptScanRefusal）
+    ipc.overrides.set("list_instances", () => {
+      throw new IpcError("game_dir_data_too_new", "游戏目录的数据格式 3 比这一版认得的 2 新", { path: "D:\\Games\\.minecraft", found: 3, supported: 2, written_by: "1.1.0-dev.57", written_by_channel: "dev" });
+    });
+    await act(async () => {
+      await expect(launcher.actions.refreshInstances()).rejects.toThrow("数据格式 3");
+    });
+    await flush();
+    expect(launcher.state.status.instances.kind).toBe("error");
+    expect(launcher.state.instances).toEqual([]);
+
+    // 在场的换成读不到；淡出中的旧层还在文档里（带 inert），写的仍是出错前的值，不是「暂无」「0 个实例」「已被删除」
+    expect(tiles("常玩加载器", false)).toEqual(["常玩加载器 读不到"]);
+    expect(tiles("常玩加载器", true)).toEqual(["常玩加载器 Fabric，近 30 天占 80%"]);
+    expect(tiles("累计时长", false)).toEqual(["累计时长 读不到，实例列表读不出来"]);
+    expect(tiles("累计时长", true)).toEqual(["累计时长 43 小时，4 个实例"]);
+    const leavingRows = [...dayDetail.querySelectorAll<HTMLElement>("[inert] [aria-label]")].map((el) => el.getAttribute("aria-label"));
+    expect(leavingRows).toEqual(["打开「生存」"]);
+    expect(dayDetail.textContent).toContain("实例列表读不出来");
+    expect(dayDetail.textContent).not.toContain("当天玩的实例已被删除");
+    expect(text()).not.toContain("暂无");
+    expect(text()).not.toContain("0 个实例");
   });
 
   it("游戏退出：游玩记录与大卡的存档重取，这一局新建的存档进信息行；单纯重扫实例列表不重取", async () => {

@@ -1,6 +1,6 @@
 // 日志控制台：实例的启动日志（进行中的会话实时输出，否则显示最近一次留底）。放在无内边距的卡片里，高度由页面给。
 //
-// 贴底：距底不足 28px 视为贴底，新行进来自动滚到底；用户上翻后停止跟随，出现「跳到最新」，点它或按 End 平滑滚回底部。
+// 贴底：距底不足 28px 视为贴底，新行进来自动滚到底；用户上翻后停止跟随，出现「跳到最新」，点它或按 End 平滑滚回底部，按 Home 平滑滚到顶。
 // 上翻阅读时内容只在两头变（尾部追加、头部截掉、顶上出现省略说明）：头部变化按高度找补滚动位置，正在读的行不被推走。
 // 换行：默认不换行，行高固定、横向滚动；开启自动换行后按内容折行并逐行测量，此时只渲染最近 2000 行。
 // 虚拟化常驻开启：游戏日志动辄几千行，不能全部挂进文档。
@@ -59,11 +59,13 @@ export const ERROR_ANNOUNCE_INTERVAL_MS = 5000;
 const LIST_PADDING_TOP = 8;
 const LIST_PADDING_BOTTOM = 14;
 
-/** 滚到底的补间途中交给虚拟列表的找补判据：一律不找补（理由见组件里的 glideToEnd）。 */
+/** 滚动补间途中交给虚拟列表的找补判据：一律不找补（理由见组件里的 glideTo）。 */
 const HOLD_SCROLL_ADJUSTMENT = () => false;
 
-/** 进行中的「跳到最新」补间。 */
+/** 进行中的滚动补间：「跳到最新」与 End 滚到底，Home 滚到顶。 */
 interface Glide {
+  /** 往哪一头走。 */
+  to: "end" | "top";
   /** 起点的滚动位置。 */
   from: number;
   /** 按起步时的距离定下的时长与曲线。 */
@@ -281,6 +283,8 @@ export function LogConsole({
   const shown = useMemo(() => (hiddenByWrap > 0 ? filtered.slice(hiddenByWrap) : filtered), [filtered, hiddenByWrap]);
   const omitted = dropped + hiddenByWrap;
   const omittedShown = omitted > 0;
+  // 省略说明条叠在滚动区顶上、不占布局：它有多高，内容顶端就给它让出多高（量出来之前为 0）
+  const [omittedPad, setOmittedPad] = useState(0);
   // 不换行时横向可滚的宽度按全部显示行里最长的正文给，不随渲染窗口里恰好有哪几行而伸缩
   const textCols = useMemo(() => (wrap ? 0 : longestTextColumns(shown)), [shown, wrap]);
 
@@ -290,7 +294,7 @@ export function LogConsole({
     estimateSize: () => LOG_ROW_HEIGHT,
     getItemKey: (index) => lineKey(shown[index]),
     overscan: 12,
-    paddingStart: LIST_PADDING_TOP,
+    paddingStart: LIST_PADDING_TOP + omittedPad,
     paddingEnd: LIST_PADDING_BOTTOM,
   });
 
@@ -299,18 +303,34 @@ export function LogConsole({
     virtualizer.measure();
   }, [virtualizer, wrap]);
 
+  // 说明条出现时量出它的高度、收起时归零。在布局副作用里改状态，绘制之前就同步重排好：这一帧画出去的行已经让开了它。
+  // 条内正文不折行，高度只随有没有「打开日志文件」按钮变
+  const hasOpenLogFile = onOpenLogFile !== undefined;
+  useLayoutEffect(() => {
+    if (!omittedShown) {
+      setOmittedPad(0);
+      return;
+    }
+    const bar = omittedRef.current;
+    if (bar === null) throw new Error("省略说明条已渲染却取不到它的元素");
+    setOmittedPad(bar.offsetHeight);
+  }, [omittedShown, hasOpenLogFile]);
+
   /**
-   * 滚到底：组件逐帧写 scrollTop 的定长补间，时长按起步时的距离给。每帧把终点取为当时元素能滚到的最大位置，
-   * 途中新行进来、换行时途经的行第一次量出高度，只是把终点推远，不重起；到时长写到当时的底部就结束，不等 scrollend。
+   * 滚到底或滚到顶：组件逐帧写 scrollTop 的定长补间，时长按起步时的距离给。滚到底时每帧把终点取为当时元素能滚到的最大位置，
+   * 途中新行进来、换行时途经的行第一次量出高度，只是把终点推远，不重起；到时长写到当时的终点就结束，不等 scrollend。
    * 不交给浏览器的平滑滚动：底部一变就得重发 scrollTo，浏览器对进行中的平滑滚动再发一次，会从当前位置以零速重起一段，
    * 实时会话每批新行、换行时每量出一行都要重起，滚动一直停在起步段，几十秒到不了底，实时会话里永远到不了。
+   * Home 也不交给浏览器的键盘平滑滚动：换行时往上途经的行第一次量出高度、起点在滚动位置之上，虚拟列表各写一次瞬时滚动找补，
+   * 浏览器把这些写入叠加到进行中的平滑滚动上，终点跟着下移，最后停在途中找补之和的位置，到不了顶。
    * 也不走虚拟列表自己的平滑滚动命令：命令途中它只测量目标附近的行，落点上方没量到的折行行会一直按估计行高排位、叠在下一行上。
    * 途中压住虚拟列表的测量找补：途经的行第一次量出高度、起点在滚动位置之上的，它默认写一次瞬时滚动把正在读的行留在原处；
-   * 跳到最新本来就要离开正在读的位置，那一下只会让这一帧的画面跳一下，下一帧又被补间写回去。
+   * 滚到哪一头都本来就要离开正在读的位置，那一下只会让这一帧的画面跳一下，下一帧又被补间写回去。
    */
-  const glideToEnd = (el: HTMLElement) => {
+  const glideTo = (el: HTMLElement, to: Glide["to"]) => {
     const from = el.scrollTop;
-    const state: Glide = { from, tween: scrollGlide(distanceFromBottom(el)), startedAt: null, frame: 0 };
+    const destination = () => (to === "end" ? el.scrollHeight - el.clientHeight : 0);
+    const state: Glide = { to, from, tween: scrollGlide(Math.abs(destination() - from)), startedAt: null, frame: 0 };
     // 写完当场派发一次 scroll：浏览器的滚动事件要到下一帧才来，虚拟列表照它换渲染的行。长距离起步时一帧滚过几千像素，
     // 等它的话这一帧画出来的还是上一帧位置的那些行，整个可视区一片空白；当场通知，这一帧就画上新位置的行。
     // 下一帧浏览器自己的滚动事件读到的是同一个位置，虚拟列表不再重渲染
@@ -322,7 +342,7 @@ export function LogConsole({
     const step = (now: number) => {
       if (state.startedAt === null) state.startedAt = now;
       const elapsed = (now - state.startedAt) / 1000;
-      const end = el.scrollHeight - el.clientHeight;
+      const end = destination();
       if (elapsed >= state.tween.duration) {
         moveTo(end);
         endGlide();
@@ -336,7 +356,7 @@ export function LogConsole({
     glide.current = state;
   };
 
-  /** 补间写到底或被用户接管：取消排着的帧，测量找补回到虚拟列表的默认判据。 */
+  /** 补间写到终点、被用户接管或改往另一头：取消排着的帧，测量找补回到虚拟列表的默认判据。 */
   const endGlide = () => {
     const running = glide.current;
     if (running === null) return;
@@ -345,13 +365,20 @@ export function LogConsole({
     virtualizer.shouldAdjustScrollPositionOnItemSizeChange = undefined;
   };
 
-  // 自动换行时逐行测量。补间途中新挂上的行当场量出高度：滚动中虚拟列表不在挂载时量，等 ResizeObserver 报上来、
-  // 再异步重渲染才按真实高度排开，这一帧已经画出去了；补间一帧滚过几屏，新挂上的行就在可视区里，按估计行高叠成一团。
-  // 挂载时量出的是提交阶段里的更新，绘制之前就同步重排好
+  // 自动换行时逐行测量。补间途中与贴底跟随时新挂上的行当场量出高度：滚动中虚拟列表不在挂载时量，等 ResizeObserver 报上来、
+  // 再异步重渲染才按真实高度排开，这一帧已经画出去了，新挂上的行在可视区里按估计行高叠在下一行上。
+  // 补间一帧滚过几屏，一直在滚动中；贴底跟随时每批新行都写一次滚动位置，虚拟列表要 150 ms 没有滚动事件才复位，
+  // 实时输出每批只隔 100 ms，它也一直认为在滚动。挂载时量出的是提交阶段里的更新，绘制之前就同步重排好。
+  // 贴底跟随时这里压住测量找补：位置由同一次提交里随后的贴底写入钉在底部，视口之上的行量出多高都不改变画面，
+  // 找补写下去只会被覆盖，还会在提交阶段里要求同步重渲染（补间途中由 glideTo 压住）
   const measureRow = useCallback(
     (node: HTMLDivElement | null) => {
       virtualizer.measureElement(node);
-      if (node !== null && glide.current !== null) virtualizer.resizeItem(Number(node.dataset.index), node.offsetHeight);
+      if (node === null || (glide.current === null && !stuckRef.current)) return;
+      const pinned = glide.current === null;
+      if (pinned) virtualizer.shouldAdjustScrollPositionOnItemSizeChange = HOLD_SCROLL_ADJUSTMENT;
+      virtualizer.resizeItem(Number(node.dataset.index), node.offsetHeight);
+      if (pinned) virtualizer.shouldAdjustScrollPositionOnItemSizeChange = undefined;
     },
     [virtualizer],
   );
@@ -367,10 +394,10 @@ export function LogConsole({
 
   const totalSize = virtualizer.getTotalSize();
   /** 上一次提交时的显示状态：判断这一次是不是只在两头增删了行。 */
-  const committed = useRef({ shown, level, source, wrap, omittedShown });
+  const committed = useRef({ shown, level, source, wrap, omittedPad });
   useLayoutEffect(() => {
     const before = committed.current;
-    committed.current = { shown, level, source, wrap, omittedShown };
+    committed.current = { shown, level, source, wrap, omittedPad };
     const el = scrollRef.current;
     if (el === null) return;
     if (stuckRef.current) {
@@ -380,7 +407,7 @@ export function LogConsole({
     }
     // 筛选、换行切换是用户自己换了内容，不找补
     if (before.level !== level || before.source !== source || before.wrap !== wrap) return;
-    // 行按下标定位：头部截掉 k 行，后面每一行都上移这 k 行的高度；顶上新出现的省略说明把日志区整体往下压。
+    // 行按下标定位：头部截掉 k 行，后面每一行都上移这 k 行的高度；内容顶端给省略说明让出的那一截变了，后面的行整体跟着移。
     // 两者都会把正在读的行推走，按同样的量找补滚动位置
     let shift = 0;
     const head = droppedHead(before.shown, shown);
@@ -389,10 +416,9 @@ export function LogConsole({
       // 没量过的行（不换行时全都如此）就是按估计行高排的
       shift -= measured === undefined ? LOG_ROW_HEIGHT : measured;
     }
-    const bar = omittedRef.current;
-    if (omittedShown && !before.omittedShown && bar !== null) shift += bar.offsetHeight;
+    shift += omittedPad - before.omittedPad;
     if (shift !== 0) el.scrollTop += shift;
-  }, [shown, totalSize, wrap, level, source, omittedShown, virtualizer]);
+  }, [shown, totalSize, wrap, level, source, omittedPad, virtualizer]);
 
   const stickToBottom = () => {
     const el = scrollRef.current;
@@ -400,13 +426,31 @@ export function LogConsole({
     stuckRef.current = true;
     setStuck(true);
     // 补间已经在往底部走（途中又按了 End）：它每帧追着当时的底部，不重起
-    if (glide.current !== null) return;
+    if (glide.current?.to === "end") return;
+    // 正在往顶部走：从当前位置改道
+    endGlide();
     // 本来就在底部时没有要补的距离：直接到位
     if (reduced || distanceFromBottom(el) < 1) {
       el.scrollTop = el.scrollHeight;
       return;
     }
-    glideToEnd(el);
+    glideTo(el, "end");
+  };
+
+  const scrollToTop = () => {
+    const el = scrollRef.current;
+    if (el === null) return;
+    // 滚到顶就离开了底部，不再跟随新行；内容不满一屏、顶部本来就在贴底范围里的除外
+    const following = el.scrollHeight - el.clientHeight < STICK_THRESHOLD;
+    stuckRef.current = following;
+    setStuck(following);
+    if (glide.current?.to === "top") return;
+    endGlide();
+    if (reduced || el.scrollTop < 1) {
+      el.scrollTop = 0;
+      return;
+    }
+    glideTo(el, "top");
   };
 
   const onScroll = () => {
@@ -421,12 +465,13 @@ export function LogConsole({
   const takeOver = endGlide;
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== "End" || event.ctrlKey || event.altKey || event.metaKey) {
+    if ((event.key !== "End" && event.key !== "Home") || event.ctrlKey || event.altKey || event.metaKey) {
       takeOver();
       return;
     }
     event.preventDefault();
-    stickToBottom();
+    if (event.key === "End") stickToBottom();
+    else scrollToTop();
   };
 
   const lastIndex = shown.length - 1;
@@ -467,19 +512,6 @@ export function LogConsole({
         />
         {filters !== undefined && <div className={styles.filters}>{filters}</div>}
       </div>
-      {/* 说明条出现时淡入；它压下来的高度由上面的滚动找补接住 */}
-      <Appear itemClassName={styles.omittedSlot}>
-        {omittedShown && (
-          <div ref={omittedRef} className={styles.omitted}>
-            <span>较早的 {omitted} 行已省略，完整日志在 latest.log</span>
-            {onOpenLogFile !== undefined && (
-              <Button variant="ghost" size="sm" icon="file-text" onClick={onOpenLogFile}>
-                打开日志文件
-              </Button>
-            )}
-          </div>
-        )}
-      </Appear>
       <div className={styles.area}>
         <div
           ref={scrollRef}
@@ -492,7 +524,22 @@ export function LogConsole({
           onWheel={takeOver}
           onPointerDown={takeOver}
           onKeyDown={onKeyDown}
+          style={cssVars({ "--log-omitted-pad": `${omittedPad}px` })}
         >
+          {/* 说明条叠在滚动区顶上、自身不占布局：出现时日志区的外框与画布都不挪位置，行经虚拟列表的上内边距让出这一截（只动 transform），
+              由上面的贴底写入或滚动找补接住，正在看的行不动；条本身淡入。放在日志区外面的话，它一出现日志区上沿就一帧下移这一截 */}
+          <Appear itemClassName={styles.omittedSlot}>
+            {omittedShown && (
+              <div ref={omittedRef} className={styles.omitted}>
+                <span className={styles.omittedText}>较早的 {omitted} 行已省略，完整日志在 latest.log</span>
+                {onOpenLogFile !== undefined && (
+                  <Button variant="ghost" size="sm" icon="file-text" onClick={onOpenLogFile}>
+                    打开日志文件
+                  </Button>
+                )}
+              </div>
+            )}
+          </Appear>
           {filteredOut && filteredEmpty !== undefined && <div className={styles.filteredEmpty}>{filteredEmpty}</div>}
           <div className={styles.canvas} style={{ height: `${totalSize}px`, ...cssVars({ "--log-text-cols": textCols }) }}>
             {virtualizer.getVirtualItems().map((item) => {

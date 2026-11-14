@@ -5,7 +5,7 @@ import { useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useReflow } from "../lib/reflow";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { keydown, render, stubResizeObserver, waitForFrames, type Rendered, type ResizeObserverStub } from "../test/dom";
+import { fakeAnimate, keydown, render, stubResizeObserver, waitForFrames, type Rendered, type ResizeObserverStub } from "../test/dom";
 import { MEMORY_WARN_COPY, MemorySlider, MemorySliderSkeleton, memoryMarks, memoryMaxMb, memoryShare, type MemorySliderProps } from "./MemorySlider";
 
 let view: Rendered | undefined;
@@ -103,7 +103,7 @@ describe("MemorySlider", () => {
 
   it("警示条出没改变的是组件根元素自己的高度：根元素是外层让位直接观察的那个盒子", () => {
     // jsdom 没有 Web Animations，让位在那里不启动；补上之后才能看到它观察了哪些元素
-    Object.defineProperty(HTMLElement.prototype, "animate", { configurable: true, value: () => undefined });
+    Object.defineProperty(HTMLElement.prototype, "animate", { configurable: true, value: fakeAnimate() });
     try {
       function CardBody() {
         const ref = useReflow<HTMLDivElement>();

@@ -21,7 +21,7 @@ import { useNow } from "../state/launcher";
 import { DOWNLOAD_STAGE, type SessionState } from "../state/session";
 import { progressTrack } from "../state/tasks";
 import { softDisabledProps } from "../ui/Button";
-import { fillOffset, useSmoothProgress } from "../ui/ProgressBar";
+import { MIN_VISIBLE_PROGRESS, rawFillOffset, useSmoothProgress } from "../ui/ProgressBar";
 import { Tooltip } from "../ui/Tooltip";
 import { useBreathPhase } from "./breath";
 import { useInstanceCover } from "./cover";
@@ -320,8 +320,9 @@ export function fillOf(face: LaunchView, seat: boolean): { value: number; track:
 
 /** appear：胶囊挂载之后才出现（排队的安装开始跑、点了启动），淡入；随胶囊一起挂载的直接显示。 */
 function Fill({ value, track, tone, appear }: { value: number; track: string; tone: "loading" | "info"; appear: boolean }) {
-  const { smooth } = useSmoothProgress(value, track);
-  const x = useTransform(smooth, fillOffset);
+  // 最少显示长度落在平滑的终点上，逐帧的位移不再加下限：从 0 起步时填充一帧帧长出来，不在第一帧冒出那一截
+  const { smooth } = useSmoothProgress(value, track, MIN_VISIBLE_PROGRESS);
+  const x = useTransform(smooth, rawFillOffset);
   return (
     <motion.span
       className={styles.clip}

@@ -17,6 +17,7 @@ import {
   useOverlayControls,
   useOverlayRoot,
   useOverlayState,
+  useScrimOpen,
   type OverlayKind,
   type OverlaySnapshot,
 } from "./overlay";
@@ -132,6 +133,53 @@ describe("Esc 栈", () => {
     });
     expect(b).toHaveBeenCalledTimes(1);
     expect(a).not.toHaveBeenCalled();
+  });
+
+  it("useScrimOpen 只随遮罩的有无重渲染：不带遮罩的浮层开合只改深度，不牵动它", () => {
+    let renders = 0;
+    let scrim: boolean | undefined;
+    function ScrimProbe() {
+      renders += 1;
+      scrim = useScrimOpen();
+      return null;
+    }
+    let setKinds: (kinds: OverlayKind[]) => void = () => {
+      throw new Error("层还没挂上");
+    };
+    // 探针由外面作为同一个元素传进来：这里换层时它不随父组件重渲染，记到的只有它自己的订阅
+    function Layers({ probe }: { probe: ReactNode }) {
+      const [kinds, set] = useState<OverlayKind[]>([]);
+      setKinds = set;
+      return (
+        <>
+          {kinds.map((kind, i) => (
+            <Layer key={i} kind={kind} onEscape={() => undefined} />
+          ))}
+          {probe}
+          <StateProbe />
+        </>
+      );
+    }
+    mount(<Layers probe={<ScrimProbe />} />);
+    expect([renders, scrim]).toEqual([1, false]);
+
+    const popovers = Array.from({ length: 1 + Math.floor(Math.random() * 4) }, (): OverlayKind => "popover");
+    for (let n = 1; n <= popovers.length; n++) act(() => setKinds(popovers.slice(0, n)));
+    expect(snapshot).toEqual({ depth: popovers.length, scrimOpen: false });
+    expect([renders, scrim]).toEqual([1, false]);
+
+    act(() => setKinds([...popovers, "modal"]));
+    expect([renders, scrim]).toEqual([2, true]);
+    // 弹窗里再开下拉：深度变了，遮罩还是那一层
+    act(() => setKinds([...popovers, "modal", "popover"]));
+    expect(snapshot).toEqual({ depth: popovers.length + 2, scrimOpen: true });
+    expect([renders, scrim]).toEqual([2, true]);
+
+    act(() => setKinds(popovers));
+    expect([renders, scrim]).toEqual([3, false]);
+    act(() => setKinds([]));
+    expect(snapshot).toEqual({ depth: 0, scrimOpen: false });
+    expect([renders, scrim]).toEqual([3, false]);
   });
 
   it("层的回调换新引用不重新入栈，active 变假出栈", () => {

@@ -12,6 +12,7 @@ import { Field } from "./Field";
 import { RadioGroup, type RadioOption } from "./RadioGroup";
 import { RadioTile } from "./RadioTile";
 import { Toggle } from "./Toggle";
+import { Tooltip } from "./Tooltip";
 
 let view: Rendered | undefined;
 
@@ -243,6 +244,33 @@ describe("Toggle", () => {
     click(hard);
     expect(onChange).not.toHaveBeenCalled();
     expect(hard.disabled).toBe(true);
+  });
+
+  it("外面再包一层 Tooltip（Mod 列表的开关）：外层气泡显示时开关经 aria-describedby 关联到它", () => {
+    const TIP = "停用后下次启动不再加载";
+    mount(
+      <Tooltip content={TIP} open>
+        <Toggle checked ariaLabel="启用 Sodium" onChange={() => undefined} />
+      </Tooltip>,
+    );
+    const sw = document.querySelector<HTMLButtonElement>('[role="switch"]');
+    const bubble = document.querySelector<HTMLElement>('[role="tooltip"]');
+    if (sw === null || bubble === null) throw new Error("开关或提示气泡没有渲染出来");
+    expect(bubble.id).not.toBe("");
+    expect(sw.getAttribute("aria-describedby")).toBe(bubble.id);
+    expect(document.getElementById(bubble.id)?.textContent).toBe(TIP);
+  });
+
+  it("调用方传的 aria-describedby 落到开关上；带原因禁用时同样保留", () => {
+    mount(
+      <>
+        <Toggle checked={false} ariaLabel="全屏启动" aria-describedby="row-note" onChange={() => undefined} />
+        <Toggle checked={false} ariaLabel="启用 Sodium" aria-describedby="row-note-2" disabledReason="游戏运行中不能修改" onChange={() => undefined} />
+      </>,
+    );
+    const [plain, soft] = [...document.querySelectorAll<HTMLButtonElement>('[role="switch"]')];
+    expect(plain.getAttribute("aria-describedby")).toBe("row-note");
+    expect(soft.getAttribute("aria-describedby")).toBe("row-note-2");
   });
 
   it("没有可见标签也没有 ariaLabel 时抛错", () => {

@@ -3,9 +3,9 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AnimatePresence, MotionConfig } from "framer-motion";
-import { act, useState, type ReactNode } from "react";
+import { act, Profiler, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { OverlayProvider, OverlayRoot } from "../shell/overlay";
+import { OverlayProvider, OverlayRoot, useEscapeLayer, type OverlayKind } from "../shell/overlay";
 import { drainFrames, render, stepFrames, stubResizeObserver, type Rendered } from "../test/dom";
 import { Modal } from "./Modal";
 import { TOAST_ACTION_BLOCKED_REASON, Toast, type ToastProps, type ToastSide } from "./Toast";
@@ -227,6 +227,60 @@ describe("Toast", () => {
     expect(onClick).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
     expect(TOAST_ACTION_BLOCKED_REASON).toBe("先完成或关闭当前弹窗");
+  });
+
+  it("Popover、Menu、Select 这类不带遮罩的浮层开合时不重渲染；带遮罩的弹窗开合才重渲染并换动作的置灰", () => {
+    let commits = 0;
+    let setKinds: (kinds: OverlayKind[]) => void = () => {
+      throw new Error("层还没挂上");
+    };
+    function EscapeLayer({ kind }: { kind: OverlayKind }) {
+      useEscapeLayer(true, () => undefined, { kind });
+      return null;
+    }
+    // 通知由外面作为同一个元素传进来：这里换层时它不随父组件重渲染，Profiler 记到的只有通知自己的订阅
+    function Layers({ toast }: { toast: ReactNode }) {
+      const [kinds, set] = useState<OverlayKind[]>([]);
+      setKinds = set;
+      return (
+        <>
+          {kinds.map((kind, i) => (
+            <EscapeLayer key={i} kind={kind} />
+          ))}
+          {toast}
+        </>
+      );
+    }
+    mount(
+      <Layers
+        toast={
+          <Profiler id="toast" onRender={() => void (commits += 1)}>
+            <Toast {...base} action={{ label: "查看", onClick: () => undefined }} />
+          </Profiler>
+        }
+      />,
+    );
+    const action = buttonByText("查看");
+    const mounted = commits;
+    expect(action.getAttribute("aria-disabled")).toBeNull();
+
+    const popovers = Array.from({ length: 1 + Math.floor(Math.random() * 4) }, (): OverlayKind => "popover");
+    for (let n = 1; n <= popovers.length; n++) act(() => setKinds(popovers.slice(0, n)));
+    act(() => setKinds([]));
+    expect(commits).toBe(mounted);
+
+    act(() => setKinds(["modal"]));
+    expect(action.getAttribute("aria-disabled")).toBe("true");
+    const blocked = commits;
+    expect(blocked).toBeGreaterThan(mounted);
+    // 弹窗里再开下拉、收起：遮罩还是那一层
+    act(() => setKinds(["modal", ...popovers]));
+    act(() => setKinds(["modal"]));
+    expect(commits).toBe(blocked);
+
+    act(() => setKinds([]));
+    expect(action.getAttribute("aria-disabled")).toBeNull();
+    expect(commits).toBeGreaterThan(blocked);
   });
 
   it("倒计时细线从剩余比例开始、用剩余时长缩到 0，暂停时停住；剩余变化时重新开始", () => {

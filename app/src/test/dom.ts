@@ -104,6 +104,59 @@ export function stubResizeObserver(): ResizeObserverStub {
   };
 }
 
+/** fakeAnimate 交给组件的 Animation：组件与让位会碰的几样都在，时间不自己走。 */
+export interface StubAnimation {
+  currentTime: number | null;
+  playState: AnimationPlayState;
+  onfinish: (() => void) | null;
+  oncancel: (() => void) | null;
+  cancel(): void;
+  finish(): void;
+  pause(): void;
+  play(): void;
+}
+
+/**
+ * 共用的 animate 替身：作为 Object.defineProperty 的 value 装到某个元素原型（或单个元素）的 animate 上，
+ * 每次调用先把元素、关键帧与时间参数交给 record，再返回一个停在起点（currentTime 0、running）的 Animation。
+ * jsdom 没有 Web Animations，装上它的元素会被让位当成能动的：从静止起步时 pause、隔几帧 play，被顶替时 cancel，
+ * 接续时读 currentTime。缺哪一样，让位一起步就抛 TypeError，所以不要再手写只有一两样的返回值。
+ * 这几样只改 playState 与 currentTime，不调 onfinish、oncancel（真实的事件也要等下一帧才派发）；
+ * 要由用例决定何时播完、断言交接过程的，用 stubSpanAnimations。
+ * 不要装到 Element.prototype：framer-motion 按它自己有没有 animate 决定走不走 Web Animations。
+ * E：装在哪类元素上，record 收到的元素就按它标注。
+ */
+export function fakeAnimate<E extends Element = Element>(record?: (el: E, frames: Keyframe[], options: KeyframeAnimationOptions) => void) {
+  return function animate(this: E, frames: Keyframe[], options: KeyframeAnimationOptions): StubAnimation {
+    record?.(this, frames, options);
+    return {
+      currentTime: 0,
+      playState: "running",
+      onfinish: null,
+      oncancel: null,
+      cancel() {
+        this.playState = "idle";
+        this.currentTime = null;
+      },
+      finish() {
+        const duration = options.duration;
+        if (typeof duration !== "number") throw new Error(`animate 替身只认数值时长，这次是 ${String(duration)}`);
+        this.playState = "finished";
+        this.currentTime = duration;
+      },
+      // 与 Web Animations 一致：暂停不挪时间；已取消的再暂停停在起点，已取消或播完的再播从头开始
+      pause() {
+        if (this.currentTime === null) this.currentTime = 0;
+        this.playState = "paused";
+      },
+      play() {
+        if (this.currentTime === null || this.playState === "finished") this.currentTime = 0;
+        this.playState = "running";
+      },
+    };
+  };
+}
+
 /** 假 Web Animations 记下的一次 animate 调用，同时充当返回给组件的 Animation。 */
 export interface FakeAnimation {
   readonly el: Element;

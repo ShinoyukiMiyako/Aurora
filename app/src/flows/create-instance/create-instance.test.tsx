@@ -19,7 +19,7 @@ import type { Appearance } from "../../domain/types";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { resources } from "../../state/resource";
-import { focusByKeyboard, keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { fakeAnimate, focusByKeyboard, keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, callsOf, configDto, deferred, resetRecorder, settle } from "../../test/launcher";
 import { CREATE_COPY } from "./copy";
@@ -245,10 +245,7 @@ function stubButtonAnimations(): { el: Element; keyframes: Keyframe[] }[] {
   const calls: { el: Element; keyframes: Keyframe[] }[] = [];
   Object.defineProperty(HTMLButtonElement.prototype, "animate", {
     configurable: true,
-    value(this: HTMLButtonElement, keyframes: Keyframe[]) {
-      calls.push({ el: this, keyframes });
-      return { cancel() {}, finish() {} };
-    },
+    value: fakeAnimate<HTMLButtonElement>((el, keyframes) => calls.push({ el, keyframes })),
   });
   return calls;
 }
