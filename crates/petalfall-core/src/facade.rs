@@ -125,7 +125,8 @@ impl Petalfall {
     /// 换得了号。
     ///
     /// 门面构造时还不知道应用版本，记号要抬号时写出的不带 `written_by`；桌面应用在这之前已经带着版本过了
-    /// 同一道关卡，走到这里时记号已是这一版的号，什么都不写。
+    /// 同一道关卡，走到这里时记号已是这一版的号，什么都不写。数据目录整个写不进去时关卡没能抬号，这里会再判一次
+    /// 不抬号放行；那条警告每个数据目录在进程里只记一次，所以只有关卡那次留下。
     async fn load_with(resolution: &DataDirResolution, own: u32) -> Result<Self> {
         check_data_root(resolution, own, None).await?;
         let data_dir = resolution.path.clone();
