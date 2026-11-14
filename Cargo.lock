@@ -3084,6 +3084,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "windows-sys 0.61.2",
  "winreg 0.56.0",
  "wiremock",

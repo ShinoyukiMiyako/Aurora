@@ -10,8 +10,10 @@
 //!
 //! 记号里的 `written_by` 可能出自别人的机器：这里只原样带出、转义后进日志，要给人看先经 [`trusted_written_by`]。
 
+use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use petalfall_base::fs::{DataDirResolution, PROBE_RETRY_DELAYS, atomic_write};
 use petalfall_instance::PETALFALL_META_DIR;
@@ -72,7 +74,8 @@ pub enum DataRootRefusal {
 /// 构造时还没有应用版本，传 `None`，写出的记号就不带这一项。
 ///
 /// 定位结果说整个数据目录写不进去（[`DataDirResolution::write_failure`] 有值）时，号低也不抬：这次启动什么都
-/// 写不下，数据仍是记号所记的形态。号高、读不懂照样拒绝。
+/// 写不下，数据仍是记号所记的形态。这时记的 warn 同一个数据目录在进程里只记一次（见 [`warn_not_raised_once`]）。
+/// 号高、读不懂照样拒绝。
 pub async fn check_data_root(
     resolution: &DataDirResolution,
     own: u32,
@@ -104,11 +107,7 @@ async fn check_data_root_with(
     let outcome = match judge_stamp(&read, own) {
         StampVerdict::Raise => match &resolution.write_failure {
             Some(failure) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    failure = %failure,
-                    "数据目录写不进去，这次不抬数据格式号"
-                );
+                warn_not_raised_once(&path, failure);
                 Ok("数据目录不可写，不抬号，放行")
             }
             None => {
@@ -158,6 +157,24 @@ async fn check_data_root_with(
         ),
     }
     outcome.map(|_| ())
+}
+
+/// 数据目录写不进去、号低不抬时记 warn，同一个记号路径在进程里只记头一回。桌面应用启动时外壳在建窗口之前核对
+/// 一次，构造门面时又对同一个数据目录核对一次；数据目录的定位进程内只做一次，两次碰上的是同一个写不进去，第二条
+/// 不带新东西。命令行没有外壳那一关，门面那次就是头一回，照记。每次核对那行诊断日志不受影响，结论里写着没抬号。
+fn warn_not_raised_once(path: &Path, failure: &str) {
+    static WARNED: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+    let first = WARNED
+        .lock()
+        .expect("记过不抬号的记号路径表的锁已中毒")
+        .insert(path.to_owned());
+    if first {
+        tracing::warn!(
+            path = %path.display(),
+            failure = %failure,
+            "数据目录写不进去，这次不抬数据格式号"
+        );
+    }
 }
 
 /// 不抬号时数据目录的结论：相等放行，更高、读不懂拒绝。号更低的记号由调用方抬号或因数据目录不可写而放行；
@@ -682,8 +699,8 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::time::Duration;
 
     use petalfall_setup_payload::{CAP_CHANNEL_SWITCH, HEADER_LEN_V2, Header, SHIPPED_CAPS};
@@ -922,6 +939,109 @@ mod tests {
             assert_eq!(attempts, 0, "原有记号 {existing:?}");
             assert_eq!(snapshot(root), before);
         }
+    }
+
+    /// 数据目录写不进去、号低不抬时记的 warn。
+    const NOT_RAISED: &str = "数据目录写不进去，这次不抬数据格式号";
+
+    /// 收下装上订阅器之后当前线程打出的日志（不带颜色）。
+    #[derive(Clone)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl Captured {
+        /// tracing-core 只登记着一个调度器时，日志点头一回被走到，按走到它的那条线程自己的默认调度器定兴趣并全局
+        /// 缓存。并行的别的用例没装订阅器，先走到同一个日志点，就把它缓存成「不启用」，这里装的订阅器就收不到那一行。
+        /// 所以先常驻登记一个级别上限为 OFF 的调度器，登记在册的总不止一个，兴趣按所有存活的调度器合起来算。
+        fn new() -> Self {
+            use tracing_subscriber::layer::SubscriberExt as _;
+            static GATE: OnceLock<tracing::Dispatch> = OnceLock::new();
+            GATE.get_or_init(|| {
+                tracing::Dispatch::new(
+                    tracing_subscriber::registry()
+                        .with(tracing_subscriber::filter::LevelFilter::OFF),
+                )
+            });
+            Self(Arc::default())
+        }
+
+        /// 在当前线程上装一个把日志写到这里的订阅器，守卫放掉时卸下。
+        fn install(&self) -> tracing::subscriber::DefaultGuard {
+            let writer = self.clone();
+            tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .with_ansi(false)
+                    .with_max_level(tracing::Level::INFO)
+                    .with_writer(move || writer.clone())
+                    .finish(),
+            )
+        }
+
+        /// 收到的日志里含 `needle` 的行。
+        fn lines_with(&self, needle: &str) -> Vec<String> {
+            String::from_utf8(self.0.lock().expect("收日志的锁已中毒").clone())
+                .expect("fmt 写进来的是格式化好的文本，应是 UTF-8")
+                .lines()
+                .filter(|line| line.contains(needle))
+                .map(str::to_owned)
+                .collect()
+        }
+    }
+
+    impl io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("收日志的锁已中毒")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// 桌面应用启动时，外壳在建窗口之前带着应用版本核对数据目录，构造门面时又不带版本核对同一个数据目录。数据目录
+    /// 写不进去时两次都号低不抬：这条 warn 只在外壳那次记，门面那次不再记；两次各自那行核对的诊断日志照记。另一个
+    /// 写不进去的数据目录头一次核对照样记。
+    #[tokio::test]
+    async fn an_unwritable_root_warns_once_across_the_shell_gate_and_the_facade() {
+        let captured = Captured::new();
+        let _installed = captured.install();
+        let failure = "拒绝访问。 (os error 5)";
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_file(&root.join("config.json"), b"{}");
+        let unwritable = resolution(root, Some(failure));
+        let stamp = root.join(STAMP_FILE).display().to_string();
+
+        check_data_root(&unwritable, 2, Some(WRITER)).await.unwrap();
+        let warned = captured.lines_with(NOT_RAISED);
+        assert_eq!(warned.len(), 1, "外壳那次应记一条：{warned:#?}");
+        assert!(warned[0].contains(" WARN "), "{warned:#?}");
+        assert!(warned[0].contains(&stamp), "{warned:#?}");
+        assert!(warned[0].contains(failure), "{warned:#?}");
+
+        check_data_root(&unwritable, 2, None).await.unwrap();
+        assert_eq!(captured.lines_with(NOT_RAISED), warned, "门面那次不该再记");
+
+        let checked = captured.lines_with("数据目录不可写，不抬号，放行");
+        assert_eq!(checked.len(), 2, "两次核对各记一行诊断日志：{checked:#?}");
+        for line in &checked {
+            assert!(line.contains(" INFO "), "{line}");
+            assert!(line.contains(&stamp), "{line}");
+        }
+
+        let other = tempfile::tempdir().unwrap();
+        check_data_root(&resolution(other.path(), Some(failure)), 2, None)
+            .await
+            .unwrap();
+        let warned = captured.lines_with(NOT_RAISED);
+        assert_eq!(warned.len(), 2, "{warned:#?}");
+        assert!(
+            warned[1].contains(&other.path().join(STAMP_FILE).display().to_string()),
+            "{warned:#?}"
+        );
     }
 
     #[tokio::test(start_paused = true)]

@@ -62,3 +62,5 @@ wiremock = "0.6"
 tempfile = "3"
 # 外置登录测试要造 Base64 编码的 textures 属性夹具。
 base64 = "0.22"
+# 数据格式关卡的测试要收日志，数某条 warn 记了几次。
+tracing-subscriber = "0.3"
