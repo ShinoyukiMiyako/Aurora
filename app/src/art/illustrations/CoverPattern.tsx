@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, type RefObject } from "react";
+import { memo, useLayoutEffect, useRef, type RefObject } from "react";
 import { springAt } from "../../lib/motion";
 import { elapsedSeconds, playTrack, springTrack } from "../../lib/slide";
 import { cssVars, cx } from "../../lib/util";
@@ -47,8 +47,11 @@ export interface CoverPatternProps {
  * 实例封面底纹：远丘、近丘两层带色相的低饱和丘陵 + 4 片像素花瓣，叠在卡面底色之上。
  * 丘陵按底边对齐、等比铺满（slice）；花瓣按同一缩放换算位置，但像素单元固定 2 px，不随卡面缩放。
  * 种子变了（新建实例的预览卡以正在键入的名称为种子）花瓣从旧位置滑到新位置，见 useScatterDrift。
+ *
+ * 包 memo：卡面挂上时量出宽度、进入视口都要整张重渲染，属性却没变，不该跟着重建丘陵与四片花瓣。
+ * 一屏常有十几张卡面同时挂上（新建实例的外观步、实例库），这几次重渲染落在同一帧里。
  */
-export function CoverPattern({ hue, seed, className }: CoverPatternProps) {
+export const CoverPattern = memo(function CoverPattern({ hue, seed, className }: CoverPatternProps) {
   const ref = useScatterDrift(seed);
   return (
     <div ref={ref} className={cx(styles.pattern, className)} style={cssVars({ "--hue": hue })} aria-hidden="true">
@@ -63,7 +66,7 @@ export function CoverPattern({ hue, seed, className }: CoverPatternProps) {
       ))}
     </div>
   );
-}
+});
 
 /** 一片花瓣这一段滑动：起点相对新位置的位移（px）与初速度（px/s）。途中再换种子时据此算出此刻的位置与速度。 */
 interface Drift {

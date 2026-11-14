@@ -28,7 +28,7 @@ import { DOWNLOAD_STAGE, isLoadingPhase, type SessionState } from "../state/sess
 import { Appear } from "../ui/Appear";
 import { Button } from "../ui/Button";
 import { Popover } from "../ui/Popover";
-import { fillOffset, useSmoothProgress } from "../ui/ProgressBar";
+import { MIN_VISIBLE_PROGRESS, rawFillOffset, useSmoothProgress } from "../ui/ProgressBar";
 import { ProgressRing } from "../ui/ProgressRing";
 import { PercentOf } from "../ui/SmoothPercent";
 import { ISLAND_COPY } from "../copy/shell";
@@ -195,7 +195,7 @@ function Island({ session }: { session: SessionState }) {
   const progressShown = loading || finishing;
   // 底边进度条的平滑放在不随阶段换行的这一层，胶囊上的百分数直接读它：字与条是同一个值，按构造同数，换行时新行不另起弹簧。
   // 换了一局时平滑直接跳到新一局的进度，字与条一起跳，不从上一局停下的位置往回走
-  const bar = useSmoothProgress(session.progress, session.taskId);
+  const bar = useIslandProgress(session.progress, session.taskId);
   // 详情在加载期间开着：加载结束（进入运行、失败、取消）后阶段清单留到浮层关闭，停在最终状态。
   // 清单连间距两百多像素，加载一结束就抽走会让日志与动作行上跳、浮层底边骤缩；关掉再打开时不在加载期就不画
   const [stagesHeld, setStagesHeld] = useState(false);
@@ -299,7 +299,7 @@ function Island({ session }: { session: SessionState }) {
               {session.phase === "crashed" && <motion.span key="danger" className={styles.dangerDot} {...(reduced ? popMark.reduced : popMark.dot)} aria-hidden="true" />}
             </AnimatePresence>
           </motion.span>
-          <AnimatePresence>{progressShown && <IslandBar key="bar" smooth={bar.smooth} />}</AnimatePresence>
+          <AnimatePresence>{progressShown && <IslandBar key="bar" fill={bar.fill} />}</AnimatePresence>
         </motion.button>
       </motion.span>
       <span className="sk-sr-only" aria-live="polite">
@@ -332,14 +332,14 @@ function Island({ session }: { session: SessionState }) {
  * 第二段一行的内容：显示的那一行与占宽的候选同一结构，候选量出来的宽度才和显示时一致。
  * 显示的那一行在加载中传 progress：底边进度条的那个平滑值本身，百分数直接读它，字与条逐帧同数，不随每次上报跳字。
  * 不各行另起一条平滑：新行的弹簧从零速起步，换行时条正带着速度走，字会一路落后几个百分点。
- * 退场中的旧行冻结在它退场那一刻的数，不跟着新一行的进度走。候选只写占位的数字。
+ * 退场中的旧行留着它最后一次渲染时的 progress，照样逐帧读这个值：交叉淡化的那一百多毫秒里两行写同一个数，只有标签不同。
+ * 旧行要是停在换行那一刻的数，条正带着速度走时同屏会有两个相差十几点的百分数。候选只写占位的数字。
  */
 function SecondText({ second, progress }: { second: IslandSecond; progress: MotionValue<number> | null }) {
-  const present = useIsPresent();
   return (
     <>
       {second.label !== null && <span>{second.label}</span>}
-      {second.value !== null && (progress === null ? <span className={styles.value}>{second.value}</span> : <PercentOf className={styles.value} value={progress} frozen={!present} />)}
+      {second.value !== null && (progress === null ? <span className={styles.value}>{second.value}</span> : <PercentOf className={styles.value} value={progress} />)}
     </>
   );
 }
@@ -372,11 +372,24 @@ export function loadingFinished(session: SessionState, loadedTask: string | null
   return [{ id: session.taskId, finishedAt: session.runningSince }];
 }
 
-function IslandBar({ smooth }: { smooth: MotionValue<number> }) {
-  const x = useTransform(smooth, fillOffset);
+/**
+ * 状态岛的进度：胶囊上的百分数读 smooth，底边进度条的填充位移读 fill。
+ * 字从 0% 起、照真实进度写，smooth 不带最少显示长度；条在进度大于 0 时不短于 MIN_VISIBLE_PROGRESS。
+ * 下限不能加在逐帧平滑之后（离开 0 的第一帧一下冒出那一截），也不能放进 smooth 的终点（字会从 2% 起跳），
+ * 所以下限自己是一条同样平滑的值：目标大于 0 时从 0 弹到 MIN_VISIBLE_PROGRESS，换一局时与 smooth 按同一规则跳，条取两者的较大者。
+ * 下限的终点就是 MIN_VISIBLE_PROGRESS，smooth 过了它之后条取的就是 smooth 本身，字与条按构造同数。
+ */
+export function useIslandProgress(progress: number, track: string): { smooth: MotionValue<number>; fill: MotionValue<string> } {
+  const bar = useSmoothProgress(progress, track);
+  const floor = useSmoothProgress(bar.target > 0 ? MIN_VISIBLE_PROGRESS : 0, track);
+  const fill = useTransform([bar.smooth, floor.smooth], ([p, min]: number[]) => rawFillOffset(Math.max(p, min)));
+  return { smooth: bar.smooth, fill };
+}
+
+function IslandBar({ fill }: { fill: MotionValue<string> }) {
   return (
     <motion.span className={styles.barTrack} aria-hidden="true" exit={{ opacity: 0, transition: fade.out }}>
-      <motion.span className={styles.barFill} style={{ x }} />
+      <motion.span className={styles.barFill} style={{ x: fill }} />
     </motion.span>
   );
 }

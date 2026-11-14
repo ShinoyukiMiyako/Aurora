@@ -102,11 +102,40 @@
   white-space: nowrap;
 }
 
+/*
+ * 省略行数的计数槽：按四位定宽、右对齐，用等宽数字（1ch 取的是字体里 0 的宽，不比一位等宽数字窄），位数在四位以内变化时后面的文字不右移。
+ * 自己会涨的只有实时会话里自动换行超出显示上限的那部分，会话至多留 5000 行、超出的至多 3000，四位够用；
+ * 留底的省略数可能更大，但它不随输出变化
+ */
+.omittedCount {
+  display: inline-block;
+  min-width: 4ch;
+  font-variant-numeric: tabular-nums;
+  text-align: end;
+}
+
+/* 自成层叠上下文：说明条的 z-index 只在日志区里比高低，焦点环那一层压得住它，它也不越出日志区去盖别的东西 */
 .area {
   position: relative;
   display: flex;
+  isolation: isolate;
   flex: 1;
   min-height: 0;
+}
+
+/*
+ * 键盘聚焦日志区的焦点环：画在滚动区外面这一层、叠在说明条之上。画在滚动区自己身上的话，粘在顶上、底色不透明的说明条
+ * 会盖住焦点环的上沿与条高范围内的左右两截。框与滚动区重合（滚动区撑满日志区），圆角同样取日志区的
+ */
+.area:has(> .scroller:focus-visible)::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  border-bottom-left-radius: inherit;
+  border-bottom-right-radius: inherit;
+  box-shadow: inset 0 0 0 2px var(--sk-accent);
+  pointer-events: none;
 }
 
 /*
@@ -131,10 +160,6 @@
   outline: none;
 }
 
-.scroller:focus-visible {
-  box-shadow: inset 0 0 0 2px var(--sk-accent);
-}
-
 /*
  * 不换行时，横向可滚的宽度按全部显示行里最长的正文算（--log-text-cols 由组件给出，单位是等宽字符位），
  * 不随渲染窗口里恰好有哪几行而伸缩：横向滚到长行末尾再纵向滚动，横向位置不会被夹回去。
@@ -150,15 +175,20 @@
 
 /*
  * 筛选后一行不剩：日志区顶端一行弱色说明，与日志行同样的左右内边距（右边扣掉常驻的滚动条槽）。
- * 上面让出省略说明条的高度（--log-omitted-pad 由组件写在滚动区上），不被条盖住
+ * 往下平移省略说明条的高度（--log-omitted-pad 由组件写在滚动区上），不被条盖住。只动 translate：说明已在屏上时条出现、收起，
+ * 它沿落定弹簧滑开、滑回（data-glide 由组件给，和条同一次出没的不给），不一帧跳过去
  */
 .filteredEmpty {
-  margin-top: var(--log-omitted-pad);
   padding: var(--sk-space-8) calc(var(--sk-space-16) - var(--sk-scrollbar-size)) 0 var(--sk-space-16);
   color: var(--sk-text-2);
   font-family: var(--sk-font);
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
+  translate: 0 var(--log-omitted-pad);
+}
+
+:global(:root:not([data-sk-reduced])) .filteredEmpty[data-glide] {
+  transition: translate var(--sk-spring-settle-dur) var(--sk-spring-settle);
 }
 
 /*

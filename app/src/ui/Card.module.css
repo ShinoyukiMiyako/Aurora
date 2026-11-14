@@ -51,6 +51,32 @@
   overflow: hidden;
 }
 
+/*
+ * 外框跟随（reflowEdge）：底色、描边与阴影改画在 .frame 上，卡片自己只留透明的同宽边框占位，排版不变。
+ * 卡片高度变了时 .frame 以上沿为原点纵向缩放，下沿从旧位置沿弹簧跟过来；缩放只动外框，不拉伸卡内的字。
+ * 底色半透明，所以外框只有一层，不拼上下两截（接缝处两层叠出一道深色）。
+ * .frame 垫在内容下面：卡片自成层叠上下文，.frame 取负层级，不会落到页面底色后面。
+ */
+.card[data-edge] {
+  isolation: isolate;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+.frame {
+  position: absolute;
+  inset: -1px;
+  z-index: -1;
+  box-sizing: border-box;
+  border: 1px solid var(--sk-line);
+  border-radius: inherit;
+  background: var(--sk-card);
+  box-shadow: var(--sk-shadow-sm);
+  transform-origin: top;
+  pointer-events: none;
+}
+
 /* 跨列与跨行按 <html data-sk-tier> 取对应档的值，组件不需要在脚本里知道当前档位 */
 .card[data-span] {
   grid-column: span var(--card-span-compact);

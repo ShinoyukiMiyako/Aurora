@@ -2,12 +2,26 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { springAt } from "../../lib/motion";
 import { springTrack } from "../../lib/slide";
 import { render, stubSpanAnimations, type Rendered } from "../../test/dom";
 import { coverPetals, CoverPattern } from "./CoverPattern";
 import type { PetalGlyphName } from "./petal-glyphs";
+
+// 每片花瓣渲染一次记一笔，用来看底纹有没有跟着外层重渲染；渲染照常交给真实现
+const petalRenders = vi.hoisted(() => ({ count: 0 }));
+vi.mock("./PixelPetal", async (orig) => {
+  const real = await orig<typeof import("./PixelPetal")>();
+  const { createElement } = await import("react");
+  return {
+    ...real,
+    PixelPetal: (props: Parameters<typeof real.PixelPetal>[0]) => {
+      petalRenders.count += 1;
+      return createElement(real.PixelPetal, props);
+    },
+  };
+});
 
 // jsdom 环境里的 URL 是 jsdom 自己的实现，node:fs 不认，按文件路径读
 const CSS = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "CoverPattern.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
@@ -124,6 +138,23 @@ describe("CoverPattern 换种子", () => {
     view = render(ui("inst-1"));
     view.rerender(ui("inst-2"));
     expect(waapi.played).toHaveLength(0);
+  });
+
+  it("外层重渲染而色相、种子、类名都没变时不重建丘陵与花瓣；任一项变了照常重画", () => {
+    // 外层每次重渲染都换一个属性值，模拟卡面量出宽度、进入视口后的那几次重渲染
+    const host = (tick: number, hue = 345) => (
+      <div data-tick={tick}>
+        <CoverPattern hue={hue} seed="memo" className="pattern" />
+      </div>
+    );
+    petalRenders.count = 0;
+    view = render(host(0));
+    expect(petalRenders.count).toBe(4);
+    view.rerender(host(1));
+    view.rerender(host(2));
+    expect(petalRenders.count).toBe(4);
+    view.rerender(host(3, 120));
+    expect(petalRenders.count).toBe(8);
   });
 
   it("定位层与底纹同大；色调随滑动只过渡填充色，时长与曲线取令牌", () => {

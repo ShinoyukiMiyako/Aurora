@@ -4,13 +4,15 @@
 import { MotionConfig } from "framer-motion";
 import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SPEED_REFRESH_MS } from "../../../lib/progress-display";
+import { UPDATE_COPY } from "../../../copy/updater";
+import { percent } from "../../../domain/format";
+import { COMPLETION_HOLD_S, SPEED_REFRESH_MS } from "../../../lib/progress-display";
 import { OverlayProvider, OverlayRoot } from "../../../shell/overlay";
-import { INITIAL_UPDATER_STATE, type DownloadSource, type UpdateInfo } from "../../../state/updater/machine";
+import { INITIAL_UPDATER_STATE, type DownloadSource, type UpdateInfo, type UpdaterChannels, type UpdaterPhase } from "../../../state/updater/machine";
 import { deferred, type Deferred } from "../../../test/launcher";
 import { drainFrames, keydown, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
 import s from "../settings.module.css";
-import { ChannelPicker, StatusLine } from "./UpdateCard";
+import { ChannelPicker, StatusLine, useDownloadHold } from "./UpdateCard";
 import { updateCardView, type CardContext, type ChannelChangeCost, type ChannelId } from "./update-view";
 
 /** 外层统一错误处理换成只记下通知的版本：选项块不需要整个状态容器，只要看写失败时报了什么。 */
@@ -72,6 +74,16 @@ function percentNode(): string | null {
   if (nodes.length > 1) throw new Error(`主句里应当至多一个百分数节点，实为 ${nodes.length} 个`);
   return nodes.length === 0 ? null : nodes[0].textContent;
 }
+
+/** 状态行右侧唯一的按钮。 */
+function statusButton(): HTMLButtonElement {
+  const found = view?.container.querySelector<HTMLButtonElement>(`.${s.updateRow} button`);
+  if (found === null || found === undefined) throw new Error("状态行里没有按钮");
+  return found;
+}
+
+/** 按钮上看得见的文案：文案槽（LabelSlot）里叠着全部候选，看得见的只有标着 data-current 的那条。 */
+const buttonLabel = () => (statusButton().querySelector("[data-align] > [data-current]") ?? statusButton()).textContent;
 
 /** settle 弹簧约 0.26 s 停稳；走 1 s 的帧足够它落到目标上。 */
 const SETTLE_FRAMES = 60;
@@ -150,6 +162,124 @@ describe("更新卡下载中的主句", () => {
     view.rerender(reduced(line(4 * MB)));
     await stepFrames(1);
     expect(title()).toBe("正在下载 0.3.0 · 40%");
+  });
+});
+
+describe("更新卡下载完成时的收尾", () => {
+  const downloading = (bytes: number, totalBytes: number | null = TOTAL, source: DownloadSource | null = null): UpdaterPhase => ({
+    kind: "downloading",
+    update: UPDATE,
+    taskId: "t",
+    bytes,
+    totalBytes,
+    source,
+  });
+  const READY: UpdaterPhase = { kind: "ready", update: UPDATE };
+  /** 收尾时长内的最后一帧（帧长 16 ms）：再走两帧就过了收尾。 */
+  const HOLD_FRAMES = Math.floor((COMPLETION_HOLD_S * 1000) / 16) - 1;
+
+  /** 卡片的状态行照卡片的接法：先过收尾，再按留住的阶段求呈现。 */
+  function HeldLine({ phase }: { phase: UpdaterPhase }) {
+    const shown = useDownloadHold(phase);
+    return <StatusLine view={updateCardView({ ...INITIAL_UPDATER_STATE, currentVersion: "0.2.0", phase: shown.phase }, CTX)} onAction={() => undefined} />;
+  }
+
+  function held(phase: UpdaterPhase, reducedMotion = false): ReactNode {
+    const node = (
+      <OverlayProvider>
+        <HeldLine phase={phase} />
+        <OverlayRoot />
+      </OverlayProvider>
+    );
+    return reducedMotion ? <MotionConfig reducedMotion="always">{node}</MotionConfig> : node;
+  }
+
+  it("下载完成：先在原处留一拍，主句的百分数推到 100%、次句换到总量，收尾时长过了才换成已下好", async () => {
+    // 最后一条进度停在五成到九成之间的任意一处：后端常在报完最后一条之后几毫秒就报完成，平滑还没追上
+    const last = Math.round(TOTAL * (0.5 + Math.random() * 0.4));
+    const lastPct = percent(last / TOTAL);
+    view = render(held(downloading(0)));
+    view.rerender(held(downloading(last)));
+    await stepFrames(SETTLE_FRAMES);
+    expect(title()).toBe(`正在下载 0.3.0 · ${lastPct}`);
+    view.rerender(held(READY));
+    // 完成的那一次提交仍是下载中的样子；次句到了总量，立即换上满数
+    expect([title(), sub(), buttonLabel()]).toEqual([`正在下载 0.3.0 · ${lastPct}`, "10.0 MB / 10.0 MB", UPDATE_COPY.viewProgress]);
+    await stepFrames(HOLD_FRAMES);
+    expect([title(), sub(), buttonLabel()]).toEqual(["正在下载 0.3.0 · 100%", "10.0 MB / 10.0 MB", UPDATE_COPY.viewProgress]);
+    await stepFrames(2);
+    expect([title(), sub(), buttonLabel()]).toEqual([UPDATE_COPY.ready("0.3.0"), UPDATE_COPY.readySub, UPDATE_COPY.restartInstall]);
+    // 收尾只留一次：改为退出时安装再改回来，已下好不再被留住
+    view.rerender(held({ kind: "install_on_exit", update: UPDATE }));
+    view.rerender(held(READY));
+    expect(title()).toBe(UPDATE_COPY.ready("0.3.0"));
+  });
+
+  it("换过源的下载完成：留住的次句带着换源说明，百分数接着这个源的平滑推满", async () => {
+    const hk: DownloadSource = { index: 1, count: 4, name: "hk" };
+    view = render(held(downloading(0, null, hk)));
+    view.rerender(held(downloading((TOTAL * 3) / 4, TOTAL, hk)));
+    await stepFrames(SETTLE_FRAMES);
+    view.rerender(held(READY));
+    expect([title(), sub()]).toEqual(["正在下载 0.3.0 · 75%", "10.0 MB / 10.0 MB · 已换用备用下载源（2/4）"]);
+    await stepFrames(HOLD_FRAMES);
+    expect(title()).toBe("正在下载 0.3.0 · 100%");
+  });
+
+  it("减少动画：收尾时长为 0，完成的那一次提交就换成已下好", () => {
+    view = render(held(downloading(TOTAL / 2), true));
+    view.rerender(held(READY, true));
+    expect([title(), buttonLabel()]).toEqual([UPDATE_COPY.ready("0.3.0"), UPDATE_COPY.restartInstall]);
+  });
+
+  it("总量未知时没有满格可推：完成就换成已下好", () => {
+    view = render(held(downloading(3 * MB, null)));
+    view.rerender(held(READY));
+    expect(title()).toBe(UPDATE_COPY.ready("0.3.0"));
+  });
+
+  it("下载失败不留：失败的那一次提交就换成失败的说法", () => {
+    view = render(held(downloading(TOTAL / 2)));
+    view.rerender(held({ kind: "download_failed", update: UPDATE, reason: "连接被重置", signature: false, network: null, sourcesTried: 1, refusal: null }));
+    expect(title()).toBe(UPDATE_COPY.available("0.3.0"));
+  });
+});
+
+describe("状态行的按钮", () => {
+  const channels: UpdaterChannels = { package_channel: "stable", preference: "stable", relation: "same", channel_heads: [], refused: [] };
+  const statusOf = (phase: UpdaterPhase): ReactNode => (
+    <OverlayProvider>
+      <StatusLine view={updateCardView({ ...INITIAL_UPDATER_STATE, currentVersion: "0.2.0", channels, phase }, CTX)} onAction={() => undefined} />
+      <OverlayRoot />
+    </OverlayProvider>
+  );
+  /** 按钮文案槽里叠着的全部候选；按钮直接写字、没有文案槽时为 null。 */
+  const slotOptions = () => {
+    const slot = statusButton().querySelector("[data-align]");
+    return slot === null ? null : [...slot.children].map((el) => el.textContent);
+  };
+  const PANEL_GROUP = [UPDATE_COPY.view, UPDATE_COPY.viewProgress, UPDATE_COPY.restartInstall, UPDATE_COPY.installNow];
+
+  it("有新版本、下载中、已下好、退出时安装、安装中之间换阶段：按钮里叠着同一组候选、按最宽的定宽，下载完成换成「重启并安装」时左缘不跳", () => {
+    const steps: [UpdaterPhase, string][] = [
+      [{ kind: "available", update: UPDATE }, UPDATE_COPY.view],
+      [{ kind: "downloading", update: UPDATE, taskId: "t", bytes: MB, totalBytes: TOTAL, source: null }, UPDATE_COPY.viewProgress],
+      [{ kind: "ready", update: UPDATE }, UPDATE_COPY.restartInstall],
+      [{ kind: "install_on_exit", update: UPDATE }, UPDATE_COPY.installNow],
+      [{ kind: "installing", update: UPDATE }, UPDATE_COPY.restartInstall],
+    ];
+    view = render(statusOf(steps[0][0]));
+    const button = statusButton();
+    for (const [phase, label] of steps) {
+      view.rerender(statusOf(phase));
+      // 同一颗按钮原地换字，不重挂
+      expect([statusButton() === button, buttonLabel(), slotOptions()]).toEqual([true, label, PANEL_GROUP]);
+    }
+  });
+
+  it("检查一组（检查更新、重试）带刷新图标，不进这组文案槽", () => {
+    view = render(statusOf({ kind: "idle" }));
+    expect([buttonLabel(), slotOptions()]).toEqual([UPDATE_COPY.check, null]);
   });
 });
 

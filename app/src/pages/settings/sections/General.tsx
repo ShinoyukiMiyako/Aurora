@@ -208,7 +208,7 @@ function ClientIdRow() {
 export function GeneralSection() {
   return (
     <>
-      <Card>
+      <Card reflowEdge>
         <CardHeader title={GENERAL_COPY.launchTitle} subtitle={GENERAL_COPY.launchSubtitle} icon="play" />
         {/* 「游戏启动后」的说明随选项换行、提醒行出没时，下面一行滑过去 */}
         <RowFlow>

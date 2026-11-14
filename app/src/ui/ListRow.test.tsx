@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { fade } from "../lib/motion";
 import { REFLOW_PAUSED_ATTR } from "../lib/reflow";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { keydown, render, setRect, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
+import { fakeAnimate, keydown, render, setRect, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
 import { IconButton } from "./IconButton";
 import { appendsOnly, EVERY_ROW, List, ListRow, measuredRowWindow, ROW_MOTION_LIMIT, ROW_WINDOW_MARGIN, rowsInWindow, rowWindow } from "./ListRow";
 
@@ -314,27 +314,7 @@ describe("行的增删", () => {
       Object.defineProperty(proto, "animate", {
         configurable: true,
         writable: true,
-        value(this: Element, frames: Keyframe[]) {
-          played.push({ el: this, frames });
-          // 与 Web Animations 一致：建好就在播；从静止起步的让位先暂停、隔几帧再播，暂停不挪时间；取消之后回到 idle
-          const animation = {
-            currentTime: 0 as number | null,
-            playState: "running" as AnimationPlayState,
-            cancel: () => {
-              animation.playState = "idle";
-              animation.currentTime = null;
-            },
-            pause: () => {
-              animation.playState = "paused";
-            },
-            play: () => {
-              animation.playState = "running";
-            },
-            onfinish: null,
-            oncancel: null,
-          };
-          return animation;
-        },
+        value: fakeAnimate((el, frames) => played.push({ el, frames })),
       });
       onTestFinished(() => {
         Reflect.deleteProperty(proto, "animate");
@@ -396,10 +376,7 @@ describe("行的增删", () => {
     Object.defineProperty(HTMLUListElement.prototype, "animate", {
       configurable: true,
       writable: true,
-      value(frames: Keyframe[], options: KeyframeAnimationOptions) {
-        played.push({ frames, options });
-        return { currentTime: 0, cancel: () => undefined, onfinish: null };
-      },
+      value: fakeAnimate((_el, frames, options) => played.push({ frames, options })),
     });
     onTestFinished(() => {
       Reflect.deleteProperty(HTMLUListElement.prototype, "animate");

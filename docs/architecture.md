@@ -836,7 +836,9 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 | `lib/slide` | 不经 framer-motion 的弹簧位移与一次性进出场，由 Web Animations 在合成线程上播 |
 | `lib/scroll-hold` | 外壳在换标签、换分区之后托住页面高度，新内容较短时滚动不被夹回 |
 
-三件事只有一种写法：视觉隐藏（只给读屏、不占位）只用全局类 `sk-sr-only`，不在模块样式里各写一份；按候选文案留宽只用 `LabelSlot`，不自写隐形的整颗按钮或伪元素；加载说明的读屏播报只用 `Loadable` 的 `busyLabel`，不在旁边另挂 `role="status"` 节点。
+两件事只有一种写法：视觉隐藏（只给读屏、不占位）只用全局类 `sk-sr-only`，不在模块样式里各写一份；加载说明的读屏播报只用 `Loadable` 的 `busyLabel`，不在旁边另挂 `role="status"` 节点。
+
+按候选文案留宽：按钮文案、状态词这类单行短文案用 `LabelSlot`，不垫隐形的整颗按钮。换文案时图标也跟着换的按钮（新建实例的主按钮）让前置图标位常驻，在样式表里按图标位的 `data-glyph` 控制显隐，宽度由图标位加 LabelSlot 撑出。LabelSlot 的候选是不可见的真实文字，按最宽的一条撑开、不收缩，只收字符串，换文案时只切显隐；用不上它的几处各自叠了不可见的占宽层：`Select` 的 `reserveWidth` 把候选画在伪元素上，因为触发器给了宽度时当前文字要能缩短出省略号，候选也不该进触发器的文字内容；实例设置页补全、重装加载器按钮的文案（`SwapLabel`）同样画在伪元素上，不进按钮的文字内容；启动胶囊与状态岛换行时新旧两行要上下交接，下载浮窗的状态列带着逐帧走的百分数，这几处把候选文字叠在同一格。隐形的整颗按钮只剩首次启动向导（`flows/onboarding`）的主按钮：「下一步」与「开始使用」差一枚后置箭头，宽度差在图标上，LabelSlot 只管文字。
 
 让位的几条边界：
 
@@ -1031,6 +1033,7 @@ versions/<实例名>/
   - 等 framer-motion 的动画用 `test/dom.ts` 的 `waitForFrames(assertion)`：按条件等真实帧（3 秒上限），不睡固定时长，在假定时器下调用直接抛错。假定时器下要逐帧采样一段动画用 `stepFrames(count)`（假定时器必须连 `setInterval` 一起假掉）。换计时器之前旧计时器上可能还排着一帧，会把同文件后面的用例带歪：用例收尾固定为先卸载，再 `drainFrames()`，再换回真实计时器。
   - 断言「退场播完、节点移除」的用例放进单独的测试文件、全程真实计时器；其余用例断言挂载那一刻的初始样式与 `inert`、`data-*` 标记。不要先等一轮宏任务再去断言一个 120 ms 就结束的过渡状态：`act` 里的事件是同步提交的，在提交那一刻断言。
   - jsdom 没有 Web Animations。按钮的图标位在这种环境下换内容时直接到位；要断言换图标的交接过程，在用例里装 `stubSpanAnimations()`（只装在 `span` 上，不能装到 `Element.prototype`：framer-motion 按它决定走不走 Web Animations）。让位在 jsdom 里是空操作，测它要像 `lib/reflow.test.ts` 那样桩上布局与动画。
+  - 只需要记下 `animate` 的调用、元素又可能碰上让位时（让位只在容器有 `animate`、环境有 `ResizeObserver` 时启动），用 `test/dom.ts` 的 `fakeAnimate(record?)`：作为 `Object.defineProperty` 的 `value` 装到某类元素的原型或单个元素上，每次调用先把元素、关键帧与时间参数交给 `record`，再返回一个停在起点、正在播、时间不自己走的 Animation，`currentTime`、`playState`、`onfinish`、`oncancel` 与 `cancel`、`finish`、`pause`、`play` 都在。让位从静止起步时先 `pause`、隔几帧再 `play`，被顶替时 `cancel`，接续时读 `currentTime`，缺哪一样一起步就抛 `TypeError`，所以不要再手写只有一两样的返回值。它不触发 `onfinish`，要由用例决定何时播完、断言交接过程的仍用 `stubSpanAnimations()`；同样不要装到 `Element.prototype` 上。
   - 外观偏好的 `AppearanceProvider` 自己包着根部的 `MotionConfig`：整页或外壳级的用例要测减少动画，用初始外观打开它，在外面再包一层 `MotionConfig` 会被内层盖掉。
   - jsdom 缺的只有「聚焦着的元素被禁用时焦点落回 body」：元素被移除时 `activeElement` 本来就回到 body，不用补。测焦点留在禁用按钮上的用例用 `test/focus-fixup.ts` 的 `emulateFocusFixup()` 补上禁用这一种，并以原生禁用作对照确认替身生效。
 - **守卫**：`pnpm lint:tokens` 运行 `app/scripts/check-tokens.mjs`，规则 T0 到 T12 依次检查：豁免缺少理由、字面色值、页面写死样式、Tailwind 任意值与数字间距、颜色透明度修饰、视口断点、依赖方向、原版材质、动效参数、Emoji、产品名字面量、富文本注入、令牌覆盖。确有必要豁免时，在违规行或它的上一行写 `sk-guard-allow <规则>: <理由>`，理由必须填写。每条规则在 `app/scripts/guard-fixtures/` 下都有正反例，由 `check-tokens.test.ts` 验证。

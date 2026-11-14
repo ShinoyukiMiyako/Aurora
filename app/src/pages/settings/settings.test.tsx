@@ -15,6 +15,7 @@ import {
   setMockUpdaterVersion,
   setMockUpdateSourceFailures,
 } from "../../ipc/mock/handlers/system";
+import { COMPLETION_HOLD_S } from "../../lib/progress-display";
 import { REFLOW_SKIP_ATTR } from "../../lib/reflow";
 import { catalogFromDto, setBlockCatalog } from "../../mc/catalog";
 import { OverlayRoot } from "../../shell/overlay";
@@ -129,9 +130,12 @@ function live<E extends Element = HTMLElement>(selector: string): E[] {
   return all<E>(selector).filter((el) => el.closest("[inert]") === null);
 }
 
+/** 按钮上看得见的文字：文案槽（LabelSlot）里叠着全部候选，看得见的只有标着 data-current 的那条。 */
+const shownText = (b: Element) => (b.querySelector("[data-align] > [data-current]") ?? b).textContent?.trim();
+
 /** 按可见文字或无障碍名称找按钮（含 role=radio / switch / combobox 的按钮）。 */
 function button(name: string): HTMLButtonElement {
-  const found = all<HTMLButtonElement>("button").find((b) => b.getAttribute("aria-label") === name || b.textContent?.trim() === name);
+  const found = all<HTMLButtonElement>("button").find((b) => b.getAttribute("aria-label") === name || shownText(b) === name);
   if (found === undefined) throw new Error(`找不到按钮「${name}」`);
   return found;
 }
@@ -236,6 +240,19 @@ describe("设置页：骨架与分区导航", () => {
     await mount();
     const items = all<HTMLButtonElement>('nav[aria-label="设置分区"] button').slice(0, 5);
     expect(items.map((b) => b.textContent)).toEqual(["常规启动后行为、语言", "下载下载源与速度", "Java运行时与自动选择", "游戏内存、隔离与目录", "外观明暗、强调色、花瓣、动画"]);
+  });
+
+  it("卡头下挂着让位列、行会变高变矮的卡片，外框下沿跟着让位走：常规「启动」、外观「背景与动效」、关于「更新」；别的卡片不开", async () => {
+    vi.stubGlobal("__PETALFALL_BUILD__", BUILD);
+    onTestFinished(() => void vi.unstubAllGlobals());
+    const edged: Record<string, (string | null | undefined)[]> = {};
+    for (const section of ["general", "download", "java", "game", "appearance", "about"] as const) {
+      await mount(section);
+      edged[section] = live("[data-edge]").map((card) => card.querySelector("h3")?.textContent);
+      view?.unmount();
+      view = undefined;
+    }
+    expect(edged).toEqual({ general: ["启动"], download: [], java: [], game: [], appearance: ["背景与动效"], about: [`${APP_NAME}更新`] });
   });
 
   it("分区布局标为导航锚点：导航与分区面板都在这一行里，一页只有这一个", async () => {
@@ -1558,7 +1575,16 @@ describe("设置页：关于与启动器更新", () => {
       await vi.advanceTimersByTimeAsync(300);
     });
     await flush();
+    // 假后端 600 ms 时报完。完成后卡片与面板都先按下载中留一拍：已下大小立即到总量，百分数与进度条推满，再换成已下好
+    expect(text()).toContain("12.0 MB / 12.0 MB");
+    expect(text()).toContain("正在下载 0.2.0 · ");
+    expect(text()).not.toContain("新版本已经下好了。");
+    expect(text()).not.toContain("0.2.0 已下好，等待安装");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(COMPLETION_HOLD_S * 1000);
+    });
     expect(text()).toContain("新版本已经下好了。");
+    expect(text()).toContain("0.2.0 已下好，等待安装");
     expect(callsOf(ipc, "save_task_journal")).toHaveLength(0);
 
     const install = all<HTMLButtonElement>(OPEN_DIALOG + ' button').find((b) => b.textContent === "重启并安装");
@@ -1789,6 +1815,11 @@ describe("设置页：关于与启动器更新", () => {
       await vi.advanceTimersByTimeAsync(150);
     });
     await flush();
+    // 下完后留住的那一拍里换源说明还在，与推满的进度同处一句
+    expect(text()).toContain("12.0 MB / 12.0 MB · 已换用备用下载源（2/4）");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(COMPLETION_HOLD_S * 1000);
+    });
     expect(text()).toContain("新版本已经下好了。");
     expect(text()).not.toContain("已换用备用下载源");
   });

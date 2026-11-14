@@ -45,7 +45,7 @@ import {
   renameInHistory,
   type NavHistory,
 } from "./nav";
-import { OverlayProvider, useOverlayControls, useOverlayState } from "./overlay";
+import { OverlayProvider, useOverlayControls, useScrimOpen } from "./overlay";
 import { pickFile as pickNativeFile, pickSaveFile as saveNativeFile, SAVE_FILE_KINDS, withExtension, type SaveFileDialog, type SaveFileKind } from "./platform";
 import { useTier, type Tier } from "./tier";
 import { useUpdaterAutoCheck } from "./update-check";
@@ -181,7 +181,7 @@ export function useShell(): ShellApi {
 export function usePetalsPaused(): boolean {
   const active = useContext(WindowActiveContext);
   if (active === null) throw new Error("usePetalsPaused 必须在 ShellProvider 之内使用");
-  const { scrimOpen } = useOverlayState();
+  const scrimOpen = useScrimOpen();
   return !active || scrimOpen;
 }
 

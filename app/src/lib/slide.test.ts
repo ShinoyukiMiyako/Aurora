@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { springAt, type SpringName } from "./motion";
-import { playTrack, playTween, scaleTrack, Slide, springTrack } from "./slide";
+import { elapsedSeconds, playTrack, playTween, scaleTrack, Slide, springTrack } from "./slide";
 
 const SAMPLE_S = 1 / 120;
 const r2 = (value: number) => Math.round(value * 100) / 100;
@@ -164,6 +164,21 @@ describe("playTween", () => {
     const { el, calls } = animatable();
     playTween(el, [{ opacity: 0 }, { opacity: 1 }], { duration: 0, ease: [0, 0, 1, 1] });
     expect(calls[0].options).toEqual({ duration: 0, easing: "cubic-bezier(0, 0, 1, 1)" });
+  });
+});
+
+describe("elapsedSeconds", () => {
+  const at = (currentTime: number | null) => elapsedSeconds({ currentTime } as unknown as Animation);
+
+  it("播了多少毫秒就是多少秒；还没开始计时（没有当前时间）按 0", () => {
+    expect(at(250)).toBe(0.25);
+    expect(at(16.5)).toBe(0.0165);
+    expect(at(0)).toBe(0);
+    expect(at(null)).toBe(0);
+  });
+
+  it("起步时刻钉在此刻之后、还没走到（当前时间为负）：按 0，不拿负的时间去外推", () => {
+    for (const ms of [-0.2, -16.7, -44, -(1 + Math.random() * 200)]) expect(at(ms)).toBe(0);
   });
 });
 

@@ -21,7 +21,16 @@ export interface CardButton {
   disabled: boolean;
   /** 带原因的禁用：悬停与聚焦显示原因。 */
   disabledReason: string | undefined;
+  /** 文案槽的候选（LabelSlot）：同一组里换阶段时按钮按最宽的那条定宽；检查一组带图标，不进槽，为 null。 */
+  slot: readonly string[] | null;
 }
+
+/**
+ * 打开面板与安装这一组按钮可能写的文案。按钮在状态行里靠右，「查看进度」在下载完成时换成「重启并安装」、已下好与退出时安装
+ * 之间来回换时，按钮不定宽的话左缘一帧跳开一个字宽，主句一栏跟着变窄。检查一组（检查更新、重试）前面带刷新图标，与这一组
+ * 宽度本来就对不齐，不放进来。
+ */
+const PANEL_BUTTON_LABELS: readonly string[] = [UPDATE_COPY.view, UPDATE_COPY.viewProgress, UPDATE_COPY.restartInstall, UPDATE_COPY.installNow];
 
 /**
  * 下载中主句里的百分数。进度事件约 100 ms 一条，照原样拼进主句一秒跳十次字，所以状态行不直接画 view.title，
@@ -70,8 +79,8 @@ export interface CardContext {
   gameRunning: boolean;
 }
 
-function button(label: string, variant: CardButton["variant"], action: CardAction, extra: Partial<Omit<CardButton, "label" | "variant" | "action">> = {}): CardButton {
-  return { label, variant, action, loading: false, disabled: false, disabledReason: undefined, ...extra };
+function button(label: string, variant: CardButton["variant"], action: CardAction, extra: Partial<Omit<CardButton, "label" | "variant" | "action" | "slot">> = {}): CardButton {
+  return { label, variant, action, loading: false, disabled: false, disabledReason: undefined, slot: action === "check" ? null : PANEL_BUTTON_LABELS, ...extra };
 }
 
 /** 支持自更新时更新卡要的通道信息：核对过的包的通道、偏好与关系，加上各通道最近一次的结果与被拒的版本。 */

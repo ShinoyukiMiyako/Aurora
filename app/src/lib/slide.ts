@@ -67,10 +67,13 @@ export function playTween(el: HTMLElement, frames: Keyframe[], tween: { duration
   return el.animate(frames, { duration: tween.duration * 1000, easing: `cubic-bezier(${tween.ease.join(", ")})` });
 }
 
-/** 动画已经播了多少秒；还没开始计时的按 0。 */
+/**
+ * 动画已经播了多少秒；还没开始计时的按 0。起步时刻钉在此刻之后、还没走到的（当前时间为负）也按 0：
+ * 弹簧的解析解往负的时间外推会算出起点之外的位置与一个凭空的速度。
+ */
 export function elapsedSeconds(animation: Animation): number {
   const time = animation.currentTime;
-  return typeof time === "number" ? time / 1000 : 0;
+  return typeof time === "number" && time > 0 ? time / 1000 : 0;
 }
 
 interface Flight {

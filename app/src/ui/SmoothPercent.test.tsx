@@ -71,16 +71,4 @@ describe("读现成平滑的百分数", () => {
     act(() => smooth.set(0.427));
     expect(text()).toBe("43%");
   });
-
-  it("冻结后停在冻结那一刻的数，不跟着平滑值走；解冻时先对齐到此刻的值，再接着跟", () => {
-    const smooth = motionValue(0.2);
-    view = render(<PercentOf value={smooth} />);
-    view.rerender(<PercentOf value={smooth} frozen />);
-    act(() => smooth.set(0.6));
-    expect(text()).toBe("20%");
-    view.rerender(<PercentOf value={smooth} />);
-    expect(text()).toBe("60%");
-    act(() => smooth.set(0.7));
-    expect(text()).toBe("70%");
-  });
 });

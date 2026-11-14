@@ -1204,11 +1204,31 @@ class StateDeriver {
       const meta = raw.taskMeta[t.id];
       if (meta !== undefined && (meta.type === "create" || meta.type === "modpack")) creating.set(meta.name.toLowerCase(), meta);
     }
+    // 新建与导入从入队起到结束触发的重扫落定（RawState.landing，不论成败）；同名的只认排在前面的那个任务
+    const sidebarPins = [...raw.pins];
+    const unsavedPins: string[] = [];
+    const landing = new Set(raw.landing);
+    const creations: { task: Task; meta: CreationMeta }[] = [];
+    const named = new Set<string>();
+    for (const task of raw.tasks) {
+      if (!isActiveTask(task) && !landing.has(task.id)) continue;
+      const meta = raw.taskMeta[task.id];
+      if (meta === undefined || (meta.type !== "create" && meta.type !== "modpack")) continue;
+      if (named.has(meta.name.toLowerCase())) continue;
+      named.add(meta.name.toLowerCase());
+      creations.push({ task, meta });
+      // 自动固定跟着任务走、不跟着占位项走：装到一半的目录被别的重扫扫到时扫描项接替了占位项，新实例照样排在侧栏末尾
+      if (meta.type === "create" && meta.autoPin && sidebarPins.length < SIDEBAR_PIN_LIMIT && !sidebarPins.includes(meta.name)) {
+        sidebarPins.push(meta.name);
+        unsavedPins.push(meta.name);
+      }
+    }
+
     const scannedCache = new Map<string, { base: InstanceSummary; pinned: boolean; effect: TaskEffect; creation: CreationMeta | null; value: InstanceSummary }>();
     const instances: InstanceSummary[] = raw.scanned.map((base) => {
       const key = base.id.toLowerCase();
       const effect: TaskEffect = installing.has(key) ? "installing" : moving.has(key) ? "moving" : backingUp.has(key) ? "backing_up" : modifying.has(key) ? "modifying" : null;
-      const pinned = raw.pins.includes(base.id);
+      const pinned = sidebarPins.includes(base.id);
       const found = creating.get(key);
       const creation = found === undefined ? null : found;
       const cached = this.scannedCache.get(base.id);
@@ -1222,20 +1242,9 @@ class StateDeriver {
     this.scannedCache = scannedCache;
 
     const known = new Set(instances.map((i) => i.id.toLowerCase()));
-    const sidebarPins = [...raw.pins];
-    const unsavedPins: string[] = [];
     const placeholderCache = new Map<string, { meta: TaskMeta; createdAt: number; pinned: boolean; value: InstanceSummary }>();
-    const landing = new Set(raw.landing);
-    for (const task of raw.tasks) {
-      if (!isActiveTask(task) && !landing.has(task.id)) continue;
-      const meta = raw.taskMeta[task.id];
-      if (meta === undefined || (meta.type !== "create" && meta.type !== "modpack")) continue;
+    for (const { task, meta } of creations) {
       if (known.has(meta.name.toLowerCase())) continue;
-      known.add(meta.name.toLowerCase());
-      if (meta.type === "create" && meta.autoPin && sidebarPins.length < SIDEBAR_PIN_LIMIT && !sidebarPins.includes(meta.name)) {
-        sidebarPins.push(meta.name);
-        unsavedPins.push(meta.name);
-      }
       const pinned = sidebarPins.includes(meta.name);
       const cached = this.placeholderCache.get(task.id);
       const value =
@@ -2421,9 +2430,12 @@ export class LauncherStore {
     return this.renames.slice(mark).reduce((cur, r) => (r.from === cur ? r.to : cur), id);
   }
 
-  /** 还在安装、实例目录还没装好的新建实例：它的任务与入队上下文；不是这种实例为 null。 */
+  /**
+   * 还在安装、还没写进固定列表的新建实例：它的任务与入队上下文；不是这种实例为 null。装到一半被重扫扫到的半成品目录也算，
+   * 与派生里的自动固定一致：取消固定、拖动排序只改装好后的打算，不把半成品写进固定列表。已在固定列表里的照常经后端改。
+   */
   private pendingCreate(id: string): { taskId: string; meta: Extract<TaskMeta, { type: "create" }> } | null {
-    if (this.raw.scanned.some((i) => i.id === id)) return null;
+    if (this.raw.pins.includes(id)) return null;
     for (const task of this.raw.tasks) {
       if (!isActiveTask(task)) continue;
       const meta = this.raw.taskMeta[task.id];

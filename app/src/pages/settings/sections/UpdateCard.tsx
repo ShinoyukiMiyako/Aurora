@@ -4,7 +4,7 @@
 
 import { memo, useCallback, useState } from "react";
 import { useLoadingGate } from "../../../lib/loading-gate";
-import { useDisplayCount } from "../../../lib/progress-display";
+import { useCompletionHold, useDisplayCount, useFinishing } from "../../../lib/progress-display";
 import { useLauncherActions, useLauncherSelector, useNow } from "../../../state/launcher";
 import { busyInstanceId } from "../../../state/selectors";
 import { useShell } from "../../../shell/shell";
@@ -14,6 +14,7 @@ import { Callout } from "../../../ui/Callout";
 import { Card } from "../../../ui/Card";
 import { CardHeader } from "../../../ui/CardHeader";
 import { ConfirmDialog } from "../../../ui/ConfirmDialog";
+import { LabelSlot } from "../../../ui/LabelSlot";
 import { Loadable } from "../../../ui/Loadable";
 import { RadioTile, type RadioTileOption } from "../../../ui/RadioTile";
 import { SettingRow } from "../../../ui/SettingRow";
@@ -22,6 +23,7 @@ import { SmoothPercent } from "../../../ui/SmoothPercent";
 import { Tag } from "../../../ui/Tag";
 import { Toggle } from "../../../ui/Toggle";
 import { UPDATE_COPY, updateChannelLabel } from "../../../copy/updater";
+import type { UpdaterPhase } from "../../../state/updater/machine";
 import { useUpdater } from "../../../state/updater/useUpdater";
 import { ABOUT_COPY, LOAD_COPY } from "../copy";
 import { useOnline } from "../../../state/online";
@@ -43,6 +45,46 @@ import {
 
 /** 相对时间「x 分钟前检查过」的刷新间隔。 */
 const RELATIVE_REFRESH_MS = 30_000;
+
+type Downloading = Extract<UpdaterPhase, { kind: "downloading" }>;
+
+/** 收尾要用的那一份下载阶段，与它换成已下好的时刻（还在下载时为 null）。 */
+interface DownloadEnd {
+  last: Downloading;
+  finishedAt: number | null;
+}
+
+/**
+ * 下载完成后在原处留住下载中的样子一拍（lib/progress-display 的收尾时长）再换成已下好：主句的百分数沿平滑推到 100%，
+ * 次句的已下大小到了总量、立即换成「总量 / 总量」。下载完成常与最后一条进度落在同一帧，不留这一拍的话，
+ * 百分数停在平滑追到的位置（常差两三成）、次句停在节流挂着的旧值上，就被整句换掉了。
+ * 只留从下载中直接换到已下好的那一次；总量未知时没有满格可推、减少动画时收尾时长为 0，都不留。
+ * holding 为 true 时实际阶段已是已下好，留住的下载中只是画法：按它去取消下载会被状态机拒绝。
+ */
+export function useDownloadHold(phase: UpdaterPhase): { phase: UpdaterPhase; holding: boolean } {
+  const holdS = useCompletionHold();
+  const [end, setEnd] = useState<DownloadEnd | null>(null);
+  let next = end;
+  if (phase.kind === "downloading") {
+    // 只在任务、源与总量变了时记下：已下大小约 100 ms 一变，记它就要每条进度多渲染一次。留住时已下大小按总量画，用不着它
+    if (next === null || next.finishedAt !== null || next.last.taskId !== phase.taskId || next.last.source !== phase.source || next.last.totalBytes !== phase.totalBytes) {
+      next = { last: phase, finishedAt: null };
+    }
+  } else if (phase.kind === "ready") {
+    if (next !== null && next.finishedAt === null) {
+      const fills = holdS > 0 && next.last.totalBytes !== null && next.last.update.version === phase.update.version;
+      next = fills ? { last: next.last, finishedAt: Date.now() } : null;
+    }
+  } else {
+    next = null;
+  }
+  if (next !== end) setEnd(next);
+  const finishing = useFinishing(next === null || next.finishedAt === null ? [] : [{ id: next.last.taskId, finishedAt: next.finishedAt }], holdS);
+  if (phase.kind !== "ready" || next === null || !finishing.has(next.last.taskId)) return { phase, holding: false };
+  const { last } = next;
+  if (last.totalBytes === null) throw new Error("下载完成的收尾只留总量已知的下载");
+  return { phase: { ...last, bytes: last.totalBytes }, holding: true };
+}
 
 /**
  * 下载中的次句。已下大小随进度事件约 100 ms 一涨，照原样换字一秒跳十次、读不清，与更新面板按同一个节拍换。
@@ -89,7 +131,7 @@ export function StatusLine({ view, onAction }: { view: CardView; onAction: () =>
         disabledReason={button.disabledReason}
         onClick={onAction}
       >
-        {button.label}
+        {button.slot === null ? button.label : <LabelSlot current={button.label} options={button.slot} />}
       </Button>
     </div>
   );
@@ -224,6 +266,7 @@ export function UpdateCard() {
   const autoCheck = useSettingWrite(settings.checkUpdates, UPDATE_COPY.autoCheck, (checkUpdates: boolean) => actions.updateSettings({ checkUpdates }));
   const { snapshot } = updater;
   const changeCost = useCallback(() => channelChangeCost(snapshot().phase), [snapshot]);
+  const shown = useDownloadHold(updater.state.phase);
 
   // 更新信息读失败不算加载中：那时换成带重试的说明块
   const gate = useLoadingGate(updater.state.currentVersion === null && updater.info.status !== "error");
@@ -247,7 +290,7 @@ export function UpdateCard() {
   } else {
     // 只在加载门放行内容时求值：那时更新信息已经到了
     const status = () => {
-      const view = updateCardView(updater.state, {
+      const view = updateCardView({ ...updater.state, phase: shown.phase }, {
         checkUpdates: autoCheck.value,
         skippedVersion: settings.skippedUpdateVersion,
         now,
@@ -286,7 +329,7 @@ export function UpdateCard() {
   }
 
   return (
-    <Card>
+    <Card reflowEdge>
       <CardHeader title={UPDATE_COPY.cardTitle} icon="refresh" />
       {/* 状态行换成多行的错误原文、说明块与状态行互换、骨架换成少了选项块的内容时，下面的「自动检查更新」一行滑过去 */}
       <RowFlow>

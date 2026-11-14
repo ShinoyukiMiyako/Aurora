@@ -57,35 +57,76 @@
   flex: none;
 }
 
-/* 主按钮与隐形的「创建并开始安装」叠在同一格：格宽取后者，真按钮撑满，换文案、换加载态都不改宽度 */
-.primarySlot {
-  display: inline-grid;
-  flex: none;
+/*
+ * 主按钮的前置图标位常驻，「下一步」时透明并缩小；进确认步淡入并弹到原大，与按钮图标位换图标的 pop 同一口径。
+ * 过渡只挂在当前那层：创建中图标位换成加载指示时，换下的那层由按钮自己的脚本淡出，不能被这里的过渡接走
+ */
+.primaryButton [data-glyph]:not([data-leaving]) {
+  transition:
+    opacity var(--sk-dur-in) var(--sk-ease-out),
+    scale var(--sk-spring-pop-dur) var(--sk-spring-pop);
 }
 
-.primaryButton,
-.primaryGhost {
-  grid-area: 1 / 1;
+.primaryButton[data-face="next"] [data-glyph] {
+  opacity: 0;
+  scale: 0.6;
+  transition:
+    opacity var(--sk-dur-out) var(--sk-ease-in),
+    scale var(--sk-dur-out) var(--sk-ease-in);
+}
+
+/* 减少动画：不缩放，只淡入淡出 */
+:global([data-sk-reduced]) .primaryButton [data-glyph] {
+  scale: none;
+}
+
+/* 主按钮的文案各一层：只有当前那层不透明，换文案时旧的原地淡出、新的原地淡入 */
+.primaryFace {
+  opacity: 0;
+  transition: opacity var(--sk-dur-out) var(--sk-ease-in);
+}
+
+.primaryFace[data-current] {
+  opacity: 1;
+  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
 }
 
 /*
- * 隐形按钮整层透明（带 inert，点不到也聚焦不到）：透明度作用于整个子树，后代怎么写都改不回来。visibility: hidden
- * 要靠后代一路继承，按钮里哪一处显式写了 visible，那一块就会压在「下一步」上露出来
+ * 「下一步」连同后置箭头铺满按钮（定位基准是按钮自己），按不带前置图标的按钮那样居中：
+ * 左右内边距与文字、箭头的间距取按钮 md 档的同一组令牌，文字与箭头停在原来后置箭头的按钮上的位置
  */
-.primaryGhost {
+.primaryNext {
+  position: absolute;
+  inset: 0;
   display: flex;
-  opacity: 0;
+  align-items: center;
+  justify-content: center;
+  gap: calc(var(--sk-space-8) - 1px);
+  padding-inline: var(--sk-space-14);
+}
+
+/* 「创建并开始安装」「正在创建…」两层叠在同一格，接在图标位后面 */
+.primaryLabels {
+  display: inline-grid;
+}
+
+.primaryLabel {
+  grid-area: 1 / 1;
 }
 
 /* ---------------------------------------------------------------- 左栏 */
 
+/*
+ * 竖向正好放满主体的 440：上下内边距 16 + 预览卡 130（卡面 128 加上下 1px 描边）+ 间距 16 + 六行步骤 6 × 42 加行距 5 × 2。
+ * 多 1px 就会常驻一条滚动条，还把内容挤窄一个滚动条宽
+ */
 .rail {
   display: flex;
   flex-direction: column;
   gap: var(--sk-space-16);
   min-width: 0;
   min-height: 0;
-  padding: var(--sk-space-16) var(--sk-space-16) var(--sk-space-18) var(--sk-space-22);
+  padding: var(--sk-space-16) var(--sk-space-16) var(--sk-space-16) var(--sk-space-22);
   border-right: 1px solid var(--sk-line);
   overflow-y: auto;
 }
@@ -817,7 +858,7 @@
   flex: none;
 }
 
-/* 换步画完第一帧才补上的卡面：铺满画面格、垫在方块下面淡入（只动透明度，减少动画下照样淡入） */
+/* 这一步入场播完才补上的卡面：铺满画面格、垫在方块下面淡入（只动透明度，减少动画下照样淡入） */
 .swatchCover {
   position: absolute;
   inset: 0;

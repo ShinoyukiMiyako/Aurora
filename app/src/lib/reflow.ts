@@ -13,7 +13,7 @@
 // - 位移交给 Web Animations，关键帧由 settle 弹簧的解析解采样而来：整段在合成线程上播，数据到达时主线程正忙着渲染也不掉帧。
 // - 途中又被挤一次：按解析解算出此刻的位置与速度，带着速度接着走，不从零速重新起步。
 // - 从静止起步的先暂停在起点，等新排布画出来的下一帧才开始计时：画一整片新内容的那一帧很长，从提交就计时的话第一步跳一大截。
-//   跟着 framer-motion 形变走的（传 morph）不等，与形变同一刻起步。
+//   跟着 framer-motion 形变走的（传 morph）不等：形变从提交那一刻计时，这里把起步时刻钉在建好的那一刻，与它用同一个时钟。
 // - 新插入的项自己不动、就地淡入。例外是传 morph 的容器长高、新项开了新的一行：它跟着外框下沿从 -Δh 滑下来。
 // - 测量只发生在观察者报了变化的那一帧，先读完再写，不来回触发布局。
 //
@@ -149,9 +149,12 @@ export function closestScroller(el: HTMLElement): HTMLElement | null {
 /**
  * 开始观察 container 的直接子项，返回停止函数。
  * spring：让位走哪条弹簧。默认 settle；容器里有自己按 morph 变宽的子项（启动胶囊）时传 morph，兄弟与它的边缘同步。
- * 传 morph 即表示让位与 framer-motion 的布局形变（浮层与弹窗的外框、启动胶囊）同拍：形变的时钟从提交那一刻走，
- * 这里从静止起步也就当场计时，不等新排布画出来；容器长高、新插入的项落在原有各项之下时，它们沿 morph 从 -Δh 起步，
- * 跟着外框下沿下来。
+ * 传 morph 即表示让位与 framer-motion 的布局形变（浮层与弹窗的外框、启动胶囊）同拍。形变在提交后的微任务里冲刷，
+ * 起步时刻取那一刻的 performance.now()；新建的 Web Animations 却要等带着它的那一帧画出来才定起步时刻，一次长提交之后
+ * 晚几十毫秒，整段跟着落后。所以这里不等新排布画出来，起步时刻直接钉在建好的那一刻（文档时间轴与 performance.now()
+ * 同一原点）。增删观察就报在提交后的微任务里，与形变的起点只差这一趟自己的耗时；尺寸观察报在下一帧的渲染步骤里，
+ * 形变已经走了从提交到这一帧的那一段，这条路上仍晚这么多。
+ * 容器长高、新插入的项落在原有各项之下时，它们沿 morph 从 -Δh 起步，跟着外框下沿下来。
  * 运行环境没有 ResizeObserver 或 Web Animations 时什么也不做：组件测试用的 jsdom 既不做布局也没有这两个接口，
  * 让位在那里无从谈起；真机的 WebView2 两者都有。
  */
@@ -177,7 +180,7 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
     if (Math.abs(tx) < MOVE_EPSILON_PX && Math.abs(ty) < MOVE_EPSILON_PX) return null;
     const flying = flights.get(el);
     if (flying !== undefined) {
-      // 时间还没走（暂停在起点等新排布画出来、或刚建好）：此刻就是起步时记下的位置与速度，不经解析解换算。
+      // 时间还没走（暂停在起点等新排布画出来、刚建好、或钉下的起步时刻还没到）：此刻就是起步时记下的位置与速度，不经解析解换算。
       // 欠阻尼弹簧在 t=0 算出的速度带舍入误差（±1e-13），从静止起步的会被当成在动，launch 就不再先暂停
       const t = elapsedSeconds(flying.animation);
       const x = t === 0 ? { x: flying.x0, v: flying.vx } : springAt(flying.spring, flying.x0, flying.vx, t);
@@ -209,11 +212,16 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
     if (ticking) view.requestAnimationFrame(tick);
   };
 
-  /** wait：从静止起步时要等的动画帧回调数（HOLD_AFTER_MUTATION / HOLD_AFTER_RESIZE）。 */
-  const launch = ({ el, x0, vx, y0, vy, additive, replaces }: Launch, wait: number) => {
+  /**
+   * wait：从静止起步时要等的动画帧回调数（HOLD_AFTER_MUTATION / HOLD_AFTER_RESIZE）。
+   * at：这一趟读到的 performance.now()，走 morph 的起步时刻钉在这里。
+   */
+  const launch = ({ el, x0, vx, y0, vy, additive, replaces }: Launch, wait: number, at: number) => {
     replaces?.cancel();
     const { frames, duration } = springTrack(spring, x0, vx, y0, vy);
-    const animation = el.animate(frames, { duration, easing: "linear", composite: additive ? "add" : "replace" });
+    // 钉了起步时刻的，接下来那一帧的帧时间可能早于它（尺寸观察报在这一帧的渲染步骤里，帧时间是这一帧开始时定的；
+    // 长提交之后的第一帧，帧时间是长任务之前排下的）：不留住首帧，那一帧会画成终点
+    const animation = el.animate(frames, { duration, easing: "linear", composite: additive ? "add" : "replace", fill: morphSynced ? "backwards" : "auto" });
     const flight: Flight = { animation, spring, x0, vx, y0, vy, additive };
     flights.set(el, flight);
     const clear = () => {
@@ -221,10 +229,15 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
     };
     animation.onfinish = clear;
     animation.oncancel = clear;
+    // 跟着 framer 形变走的与形变同一个时钟，见 observeReflow
+    if (morphSynced) {
+      animation.startTime = at;
+      return;
+    }
     // 时钟从这一刻走，新排布却要等这一帧渲染完才上屏：一次提交要画一整片新内容时这一帧要几十毫秒，
     // 弹簧开头那一截没上屏就过去了，第一步跳一大截。先停在起点（首帧当场生效，时钟不走），等新排布画出来的下一帧再播。
-    // 途中再被挤的带着速度当场接着走：停两帧就是在动的东西顿一下。跟着 framer 形变走的不等，见 observeReflow
-    if (morphSynced || vx !== 0 || vy !== 0) return;
+    // 途中再被挤的带着速度当场接着走：停两帧就是在动的东西顿一下
+    if (vx !== 0 || vy !== 0) return;
     animation.pause();
     holds.push({ el, flight, frames: wait });
     if (ticking) return;
@@ -401,7 +414,9 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
       const planned = plan(s.el, s.tx, s.ty);
       if (planned !== null) launches.push(planned);
     }
-    for (const item of launches) launch(item, wait);
+    // 同一趟的几段钉在同一刻：逐个建动画要花时间，各读各的会让它们错开起步
+    const at = view.performance.now();
+    for (const item of launches) launch(item, wait, at);
   };
 
   const sizes = new ResizeObserver(() => pass(false, HOLD_AFTER_RESIZE));

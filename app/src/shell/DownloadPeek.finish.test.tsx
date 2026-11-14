@@ -363,6 +363,32 @@ describe("减少动画下完成的行退场", () => {
       state: PEEK_COPY.progress("100%", formatSpeed(2_000_000)),
     });
   });
+
+  it.each([
+    ["还有别的行在", true],
+    ["最后一行", false],
+  ])("%s：淡出途中点「清除已结束」，任务从表里拿掉，行照拿掉前的完成样子淡完，不退回完成前运行中的样子", async (_, withOther) => {
+    view?.rerender(tree(true));
+    await flush();
+    const java = await startJava(21);
+    if (withOther) await startJava(17);
+    await openPeek();
+
+    const done = await finishAt95(21, java.id, java.title);
+    await stepFrames(2);
+    const clearKeys = [...panel().querySelectorAll("button")].filter((b) => b.closest("[inert]") === null && b.textContent === PEEK_COPY.clearFinished(1));
+    expect(clearKeys).toHaveLength(1);
+    act(() => clearKeys[0].click());
+    await flush();
+    expect(launcher.state.tasks.map((t) => t.id)).not.toContain(java.id);
+    // 淡出还没播完（减少动画的退场 120 ms，到这里走了两帧）
+    expect(partsOf(row(java.title, "leaving"))).toEqual({
+      valueNow: "100",
+      cancelDisabled: "true",
+      detail: done.detail,
+      state: PEEK_COPY.progress("100%", formatSpeed(2_000_000)),
+    });
+  });
 });
 
 describe("快览的「清除已结束」", () => {

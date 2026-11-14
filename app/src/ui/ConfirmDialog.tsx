@@ -7,11 +7,11 @@
 // 同一个请求开着时换内容（外壳 openConfirm 的 update：先开框、内容晚到）：不重做聚焦，标题与正文不再淡入，正文换内容的过渡
 // 由正文自己接住（加载容器）。两个按钮换了文案时新旧文案交叉淡化（顶替时也一样）。内容还没到时确认键可以先不可按（confirmDisabled）。
 
-import { AnimatePresence, LayoutGroup, motion, useIsPresent, type Transition } from "framer-motion";
-import { useEffect, useState, type ReactNode, type Ref } from "react";
+import { AnimatePresence, LayoutGroup, addScaleCorrector, motion, pixelsToPercent, useIsPresent, useMotionValue, type MotionStyle, type Transition } from "framer-motion";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type Ref } from "react";
 import { Icon } from "../art/Icon";
 import { fade, springs } from "../lib/motion";
-import { Button } from "./Button";
+import { Button, type ButtonProps } from "./Button";
 import styles from "./ConfirmDialog.module.css";
 import { AUTOFOCUS_ATTR, Modal } from "./Modal";
 
@@ -59,6 +59,29 @@ const SWAP_OUT = { opacity: 0, transition: fade.out };
 
 /** 两个按钮的形变与位移、按钮文字的位移都与弹窗面板同一条弹簧。 */
 const MORPH: Transition = { layout: springs.morph };
+
+/**
+ * 确认键的圆角经这个变量交给形变节点。确认键的形变是包着按钮那一层的 transform 缩放，圆角却画在里面的按钮上：framer-motion
+ * 只按缩放反向校正布局节点自己样式里的值，按钮的四角跟着被压成横 10 × scaleX、纵 10 的椭圆角。圆角以像素放进形变节点的这个变量、
+ * 登记成要校正的值，按钮的圆角改读它，形变途中拿到的就是校正过的圆角。
+ * 不让按钮自己当布局节点：按钮样式表里 transform 带着按下缩放用的过渡，framer 逐帧写进行内的形变会被它重新补间；
+ * 形变播完留在行内的 transform: none 还会盖住按下的缩放。
+ * 辉光（box-shadow）不校正：模糊与扩展各只有一个值，横纵缩放不同时怎么校正都不准，framer 按两轴平均去校正反而改了按钮下沿那片看得见的辉光，
+ * 还要逐帧重绘。形变只改宽度，下沿的辉光原样不动，只有两端很淡的外沿在形变开头几帧窄一些
+ */
+const KEY_RADIUS_VAR = "--confirm-key-radius";
+
+// 与 framer 校正单个角的算法相同：横纵各按形变节点此刻画出来的尺寸折成百分比，乘上缩放正好是原来的像素。
+// 变量用在 border-radius 简写里，横纵之间要隔一道斜线，写成两个值会落到两对对角上。不是像素值（还没量到）时原样交回
+addScaleCorrector({
+  [KEY_RADIUS_VAR]: {
+    correct: (latest, { target }) => {
+      if (target === undefined || typeof latest !== "string" || !latest.endsWith("px")) return latest;
+      const radius = parseFloat(latest);
+      return `${pixelsToPercent(radius, target.x)}% / ${pixelsToPercent(radius, target.y)}%`;
+    },
+  },
+});
 
 /**
  * 补读的话在状态区里留多久。读屏要在文字写进去之后才拾取 aria-live 的变化，下一帧就清空的话有的读屏来不及读；
@@ -140,20 +163,19 @@ export function ConfirmDialog({
                 <ButtonLabel label={cancelLabel} layerKey={`${String(requestKey)}:${cancelLabel}`} entering={labelEnters(cancelLabel, opened.cancelLabel)} />
               </Button>
             </motion.div>
-            <motion.div className={styles.confirm} layout layoutDependency={confirmLabel} transition={MORPH}>
-              <Button
-                variant={danger ? "danger" : "primary"}
-                disabled={confirmDisabled}
-                focusableWhenDisabled
-                onClick={() => {
-                  onConfirm();
-                  onClose();
-                }}
-                {...focusConfirm}
-              >
-                <ButtonLabel label={confirmLabel} layerKey={`${String(requestKey)}:${confirmLabel}`} entering={labelEnters(confirmLabel, opened.confirmLabel)} />
-              </Button>
-            </motion.div>
+            <ConfirmKey
+              label={confirmLabel}
+              variant={danger ? "danger" : "primary"}
+              disabled={confirmDisabled}
+              focusableWhenDisabled
+              onClick={() => {
+                onConfirm();
+                onClose();
+              }}
+              {...focusConfirm}
+            >
+              <ButtonLabel label={confirmLabel} layerKey={`${String(requestKey)}:${confirmLabel}`} entering={labelEnters(confirmLabel, opened.confirmLabel)} />
+            </ConfirmKey>
           </div>
         }
       >
@@ -167,6 +189,37 @@ export function ConfirmDialog({
         </span>
       </Modal>
     </LayoutGroup>
+  );
+}
+
+interface ConfirmKeyProps extends Omit<ButtonProps, "style"> {
+  /** 确认键的文案：只在它变的那次量布局、播形变。 */
+  label: string;
+}
+
+/** 确认键与外面那层随文案形变的布局节点；按钮的圆角经节点上的变量交给 framer 按缩放校正（见 KEY_RADIUS_VAR）。 */
+function ConfirmKey({ label, ...button }: ConfirmKeyProps) {
+  const ref = useRef<HTMLDivElement>(null);
+  // 量到之前是空串：节点上不写变量
+  const radius = useMotionValue("");
+  // 量到的圆角；量到之前按钮读样式表里自己的圆角
+  const [measured, setMeasured] = useState<string | null>(null);
+  // framer 只能按缩放校正像素值，按钮的圆角在样式表里是令牌：打开时从按钮算好的样式读一次，之后按钮才改读节点上的变量。
+  // 改读之前读，读到的才是按钮自己的圆角
+  useLayoutEffect(() => {
+    const el = ref.current?.querySelector("button");
+    if (el === null || el === undefined) throw new Error("确认键没有挂上");
+    const value = getComputedStyle(el).borderTopLeftRadius;
+    if (value === "") throw new Error("确认键没有算出圆角");
+    radius.set(value);
+    setMeasured(value);
+  }, [radius]);
+  // 节点上的变量要等 framer 下一次渲染才写上，按钮先改读的话这中间按量到的像素画，不会有一帧没有圆角
+  const keyStyle: CSSProperties | undefined = measured === null ? undefined : { borderRadius: `var(${KEY_RADIUS_VAR}, ${measured})` };
+  return (
+    <motion.div ref={ref} className={styles.confirm} layout layoutDependency={label} transition={MORPH} style={{ [KEY_RADIUS_VAR]: radius } as MotionStyle}>
+      <Button {...button} style={keyStyle} />
+    </motion.div>
   );
 }
 

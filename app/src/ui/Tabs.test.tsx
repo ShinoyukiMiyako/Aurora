@@ -5,7 +5,7 @@ import { AnimatePresence, motion, MotionConfig } from "framer-motion";
 import { act, useId, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { pageItem, popMark } from "../lib/motion";
-import { drainFrames, keydown, render, stepFrames, stubResizeObserver, waitForFrames, type Rendered, type ResizeObserverStub } from "../test/dom";
+import { drainFrames, fakeAnimate, keydown, render, stepFrames, stubResizeObserver, waitForFrames, type Rendered, type ResizeObserverStub } from "../test/dom";
 import { Badge } from "./Badge";
 import { Card } from "./Card";
 import { Page, PageArrivalProvider } from "./Page";
@@ -143,30 +143,8 @@ describe("Tabs", () => {
   });
 
   it("各标签是让位的直接子项：徽标晚到撑宽某个标签时，后面的标签滑过去", () => {
-    // jsdom 没有 Web Animations，让位在那里不启动；补上之后才能看到它观察了哪些元素。
-    // 替身照真的 Animation 的形状：建好就在播，能暂停、再播、取消（让位从静止起步时先暂停在起点）
-    Object.defineProperty(HTMLElement.prototype, "animate", {
-      configurable: true,
-      value: () => {
-        const animation = {
-          currentTime: 0 as number | null,
-          playState: "running" as AnimationPlayState,
-          onfinish: null,
-          oncancel: null,
-          cancel() {
-            animation.playState = "idle";
-            animation.currentTime = null;
-          },
-          pause() {
-            animation.playState = "paused";
-          },
-          play() {
-            animation.playState = "running";
-          },
-        };
-        return animation;
-      },
-    });
+    // jsdom 没有 Web Animations，让位在那里不启动；补上之后才能看到它观察了哪些元素
+    Object.defineProperty(HTMLElement.prototype, "animate", { configurable: true, value: fakeAnimate() });
     try {
       view = render(<Tabs id="r" value="overview" items={SECTIONS} ariaLabel="实例详情" onChange={() => undefined} />);
       const list = document.querySelector('[role="tablist"]') as HTMLElement;

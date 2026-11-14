@@ -10,7 +10,7 @@ import { formatBytes } from "../domain/format";
 import { IpcError } from "../ipc/errors";
 import type { UpdateDto, UpdaterInfoDto } from "../ipc/system";
 import { CORE_EVENT } from "../ipc/tasks";
-import { SPEED_REFRESH_MS } from "../lib/progress-display";
+import { COMPLETION_HOLD_S, SPEED_REFRESH_MS } from "../lib/progress-display";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import type { DownloadSource, UpdaterPhase } from "../state/updater/machine";
@@ -210,10 +210,10 @@ describe("安装前写任务记录", () => {
 describe("下载进度的文字", () => {
   const TOTAL = 10 * 1024 * 1024;
 
-  /** 点「下载」并拿到下载任务的 id：下载命令一直挂着，进度只由测试发的事件推动。 */
-  async function startDownload(): Promise<string> {
+  /** 点「下载」并拿到下载任务的 id：下载命令挂到 pending 落定为止，进度只由测试发的事件推动。 */
+  async function startDownload(pending: Deferred<UpdateDto> = deferred<UpdateDto>()): Promise<string> {
     info = { ...info, downloaded_version: null };
-    ipc.overrides.set("download_update", () => deferred<UpdateDto>().promise);
+    ipc.overrides.set("download_update", () => pending.promise);
     await openReady();
     act(() => button(UPDATE_COPY.download).click());
     await flush();
@@ -288,6 +288,31 @@ describe("下载进度的文字", () => {
     expect(barValue()).toBe("10");
     await stepFrames(1);
     expect(offset()).toBeCloseTo(-90, 6);
+  });
+
+  it("下载完成：进度块先留一拍，进度条推满、已下大小换到总量，「取消下载」不可用；收尾时长过了才换成已下好", async () => {
+    const pending = deferred<UpdateDto>();
+    const taskId = await startDownload(pending);
+    // 最后一条进度停在五成到九成之间的任意一处，紧接着就报完成
+    const last = Math.round(TOTAL * (0.5 + Math.random() * 0.4));
+    progress(taskId, last);
+    await flush();
+    act(() => pending.resolve(UPDATE));
+    await flush();
+    expect(statusBlocks().map((el) => el.textContent)).toEqual([UPDATE_COPY.progress(formatBytes(TOTAL), formatBytes(TOTAL))]);
+    expect(barValue()).toBe("100");
+    const cancel = button(UPDATE_COPY.cancelDownload);
+    expect(cancel.getAttribute("aria-disabled")).toBe("true");
+    // 实际阶段已是已下好：按下去不发取消命令，也不报阶段不对
+    act(() => cancel.click());
+    await flush();
+    expect([callsOf(ipc, "cancel_task"), errorToasts()]).toEqual([[], []]);
+    await act(() => vi.advanceTimersByTimeAsync(COMPLETION_HOLD_S * 1000 - 50));
+    expect(dialog().textContent).not.toContain(UPDATE_COPY.readyNote);
+    await act(() => vi.advanceTimersByTimeAsync(50));
+    await flush();
+    expect(statusBlocks().map((el) => el.textContent)).toEqual([UPDATE_COPY.readyNote]);
+    expect(button(UPDATE_COPY.restartInstall).getAttribute("aria-disabled")).toBe(null);
   });
 });
 

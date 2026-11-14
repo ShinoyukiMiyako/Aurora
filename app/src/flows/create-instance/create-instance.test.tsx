@@ -9,6 +9,7 @@ import { SLOW_HINT_MS } from "../../domain/limits";
 // 版本清单、加载器版本、Java 这几条查询落到假后端。静态引入让假后端在首个查询之前就加载完：
 // 几条查询同时触发桥里的动态引入时，后到的会拿到还没执行完的模块。
 import { IpcError } from "../../ipc/errors";
+import { fade } from "../../lib/motion";
 import type { JavaInstallationDto } from "../../ipc/java";
 import type { ManifestDto } from "../../state/queries/catalog";
 import { mockInvoke, resetMocks } from "../../ipc/mock";
@@ -136,10 +137,17 @@ function setInput(input: HTMLInputElement, value: string) {
   });
 }
 
-/** 按钮上看得见的那条文案：定宽文案槽里叠着全部候选，只认当前那条。 */
+/**
+ * 按钮上看得见的那条文案：定宽文案槽里叠着全部候选，主按钮还把每条文案各放一层交叉淡化。
+ * 只认没对读屏隐藏的当前项，层层套着时取最里面那一个。
+ */
 function visibleText(el: Element): string | null {
-  const current = el.querySelector("[data-current]");
-  return current === null ? el.textContent : current.textContent;
+  const shown = (node: Element) => {
+    for (let n: Element | null = node; n !== null && n !== el; n = n.parentElement) if (n.getAttribute("aria-hidden") === "true") return false;
+    return true;
+  };
+  const current = [...el.querySelectorAll("[data-current]")].filter(shown).at(-1);
+  return current === undefined ? el.textContent : current.textContent;
 }
 
 /** 在场的按钮：退场中（inert）的「上一步」与撑宽度的隐形主按钮都不算。 */
@@ -1083,16 +1091,12 @@ describe("新建实例：确认步的开局选项", () => {
 describe("新建实例：占位与换态", () => {
   const live = (selector: string) => [...dialog().querySelectorAll<HTMLElement>(selector)].filter((el) => el.closest("[inert]") === null);
 
-  it("底栏：「上一步」第 2 步起才在；主按钮从头到尾是同一个按钮，隐形的创建按钮垫着定宽", async () => {
+  it("底栏：「上一步」第 2 步起才在；主按钮从头到尾是同一个按钮，底栏里不垫隐形的按钮", async () => {
     await mount();
     expect(() => button(CREATE_COPY.back)).toThrow();
     const primary = button(CREATE_COPY.next);
-    const slot = primary.closest('[class*="_primarySlot_"]');
-    if (slot === null) throw new Error("主按钮不在定宽格里");
-    const ghost = slot.querySelector("[inert] button");
-    if (ghost === null) throw new Error("定宽格里没有隐形的创建按钮");
-    expect(visibleText(ghost)).toBe(CREATE_COPY.create);
-    expect(slot.querySelector("[inert]")?.getAttribute("aria-hidden")).toBe("true");
+    expect(dialog().querySelectorAll('[class*="_footActions_"] button[data-variant="primary"]')).toHaveLength(1);
+    expect(dialog().querySelector('[class*="_footActions_"] [inert]')).toBeNull();
 
     await fillName("周末生存");
     expect(button(CREATE_COPY.back).closest('[class*="_footActions_"]')).not.toBeNull();
@@ -1107,6 +1111,72 @@ describe("新建实例：占位与换态", () => {
     expect(subtitle()).toBe("第 1 步，共 5 步 · 名称");
     expect(() => button(CREATE_COPY.back)).toThrow();
     expect(button(CREATE_COPY.next)).toBe(primary);
+  });
+
+  it("主按钮的三条文案各一层叠着，换步、创建中只换当前层；前置图标位常驻，进出确认步只换它的显隐", async () => {
+    await mount();
+    const primary = button(CREATE_COPY.next);
+    // 每层：[看得见的文字, 是否当前, aria-hidden, 层里有没有图标]
+    const faces = () =>
+      [...primary.querySelectorAll<HTMLElement>('[class*="_primaryFace_"]')].map((face) => [
+        (face.querySelector("[data-current]") ?? face).textContent,
+        face.hasAttribute("data-current"),
+        face.getAttribute("aria-hidden"),
+        face.querySelector("svg") !== null,
+      ]);
+    const glyphs = () => [...primary.querySelectorAll("[data-glyph]:not([data-leaving])")].map((g) => g.getAttribute("data-glyph"));
+    const onNext = [
+      [CREATE_COPY.next, true, null, true],
+      [CREATE_COPY.create, false, "true", false],
+      [CREATE_COPY.creating, false, "true", false],
+    ];
+    const onCreate = [
+      [CREATE_COPY.next, false, "true", true],
+      [CREATE_COPY.create, true, null, false],
+      [CREATE_COPY.creating, false, "true", false],
+    ];
+    expect(primary.dataset.face).toBe("next");
+    expect(faces()).toEqual(onNext);
+    // 下载图标在「下一步」时也挂着（样式表让它透明）：进出确认步按钮不变宽，图标淡入淡出而不是一帧出没
+    expect(glyphs()).toEqual(["download"]);
+
+    await fillName("周末生存");
+    await next();
+    await next();
+    await next();
+    expect(subtitle()).toBe("第 5 步，共 5 步 · 确认");
+    expect(primary.dataset.face).toBe("create");
+    expect(faces()).toEqual(onCreate);
+    expect(glyphs()).toEqual(["download"]);
+
+    const attempt = deferred<string>();
+    vi.spyOn(launcher.actions, "createInstance").mockReturnValueOnce(attempt.promise);
+    click(primary);
+    await flush();
+    expect(primary.getAttribute("aria-busy")).toBe("true");
+    expect(visibleText(primary)).toBe(CREATE_COPY.creating);
+    expect(faces()).toEqual([
+      [CREATE_COPY.next, false, "true", true],
+      [CREATE_COPY.create, false, "true", false],
+      [CREATE_COPY.creating, true, null, false],
+    ]);
+    expect(glyphs()).toEqual(["spinner"]);
+
+    await act(async () => {
+      attempt.reject(new Error("磁盘空间不足"));
+      await settle();
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(primary.getAttribute("aria-busy")).toBeNull();
+    expect(faces()).toEqual(onCreate);
+    expect(glyphs()).toEqual(["download"]);
+
+    click(stepButton("名称"));
+    await flush();
+    expect(button(CREATE_COPY.next)).toBe(primary);
+    expect(primary.dataset.face).toBe("next");
+    expect(faces()).toEqual(onNext);
+    expect(glyphs()).toEqual(["download"]);
   });
 
   it("底栏按钮行的让位与弹窗外框走同一条 morph：换步时「上一步」出没，「取消」的横滑与底栏随外框的位移同拍到位", async () => {
@@ -1353,6 +1423,94 @@ describe("新建实例：占位与换态", () => {
     expect(dialog().querySelector("aside [data-sk-hover-host]")).toBeNull();
   });
 
+  describe("左栏：当前步底色的滑块换行", () => {
+    interface MarkCall {
+      el: Element;
+      frames: Keyframe[];
+      options: KeyframeAnimationOptions;
+      animation: Animation;
+    }
+    /** 滑块是 li：jsdom 没有 animate，只在 li 上装记录用的替身（装到 Element 上会让 framer-motion 改走 Web Animations），afterEach 里拆掉。 */
+    function stubMarkAnimations(): MarkCall[] {
+      const calls: MarkCall[] = [];
+      const animate = fakeAnimate<HTMLLIElement>();
+      Object.defineProperty(HTMLLIElement.prototype, "animate", {
+        configurable: true,
+        value(this: HTMLLIElement, frames: Keyframe[], options: KeyframeAnimationOptions) {
+          const animation = animate.call(this, frames, options) as unknown as Animation;
+          calls.push({ el: this, frames, options, animation });
+          return animation;
+        },
+      });
+      return calls;
+    }
+    const mark = () => {
+      const el = dialog().querySelector<HTMLElement>('ol > [class*="_stepMark_"]');
+      if (el === null) throw new Error("步骤导航里没有当前步的滑块");
+      return el;
+    };
+    /** 给这一步的那一行一个随机的位置（jsdom 不做布局），返回它。 */
+    const placeRow = (label: string) => {
+      const top = 50 + Math.floor(Math.random() * 300);
+      const item = stepButton(label).closest("li");
+      if (item === null) throw new Error(`「${label}」不在列表项里`);
+      Object.defineProperty(item, "offsetTop", { configurable: true, value: top });
+      return top;
+    };
+    const fadesOf = (calls: MarkCall[]) => calls.filter((c) => c.el === mark() && "opacity" in c.frames[0]);
+    const slidesOf = (calls: MarkCall[]) => calls.filter((c) => c.el === mark() && "translate" in c.frames[0]);
+
+    afterEach(() => {
+      Reflect.deleteProperty(HTMLLIElement.prototype, "animate");
+    });
+
+    it("减少动画：换步时一步换到新的一行，在那里从透明淡入，不滑；打开时直接摆好、不淡", async () => {
+      const calls = stubMarkAnimations();
+      await mount(null, { ...DEFAULT_APPEARANCE, reduceMotion: true });
+      expect(fadesOf(calls)).toEqual([]);
+      const top = placeRow("游戏版本");
+      await fillName("减少动画");
+      expect(mark().style.translate).toBe(`0px ${top}px`);
+      expect(slidesOf(calls)).toEqual([]);
+      const fades = fadesOf(calls);
+      expect(fades).toHaveLength(1);
+      expect(fades[0].frames).toEqual([{ opacity: 0 }, { opacity: 1 }]);
+      // 时长与曲线照搬 fade.in
+      expect(fades[0].options.duration).toBe(fade.in.duration * 1000);
+      expect(fades[0].options.easing).toContain(`(${fade.in.ease.join(", ")})`);
+    });
+
+    it("减少动画下淡入还没播完又换步：上一段停掉，新的一段从透明起，滑块落在最后那一步上", async () => {
+      const calls = stubMarkAnimations();
+      await mount(null, { ...DEFAULT_APPEARANCE, reduceMotion: true });
+      setInput(nameInput(), "连换两步");
+      keydown(nameInput(), "Enter");
+      const first = fadesOf(calls);
+      expect(first).toHaveLength(1);
+      const top = placeRow("名称");
+      click(stepButton("名称"));
+      const fades = fadesOf(calls);
+      expect(fades).toHaveLength(2);
+      expect(first[0].animation.playState).toBe("idle");
+      expect(fades[1].animation.playState).toBe("running");
+      expect(mark().style.translate).toBe(`0px ${top}px`);
+      await flush();
+    });
+
+    it("不减少动画：沿弹簧滑到新的一行，不淡", async () => {
+      const calls = stubMarkAnimations();
+      await mount();
+      const top = placeRow("游戏版本");
+      await fillName("滑过去");
+      expect(mark().style.translate).toBe(`0px ${top}px`);
+      const slides = slidesOf(calls);
+      expect(slides).toHaveLength(1);
+      expect(slides[0].frames.at(0)).toEqual({ translate: "0px 0px" });
+      expect(slides[0].frames.at(-1)).toEqual({ translate: `0px ${top}px` });
+      expect(fadesOf(calls)).toEqual([]);
+    });
+  });
+
   it("左栏：步骤有了值才多出的那一行淡入；每一行挂着让位，值行出没时标签的上下移由它接住", async () => {
     await mount();
     for (const label of ["名称", "游戏版本", "加载器", "加载器版本", "外观", "确认"]) expect(reflowSprings.get(stepButton(label))).toBe("settle");
@@ -1387,6 +1545,31 @@ describe("新建实例：占位与换态", () => {
       expect(art.querySelector('[data-source="art"]')).not.toBeNull();
       expect(art.querySelector('[data-sk-art="iso"]')).not.toBeNull();
     }
+  });
+
+  it.each([
+    ["常规动效", false],
+    ["减少动画", true],
+  ])("外观步（%s）：卡面底纹等这一步入场播完才补上，补卡面那次提交不落在入场途中", async (_, reduceMotion) => {
+    await mount(null, { ...DEFAULT_APPEARANCE, reduceMotion });
+    await fillName("外观");
+    await next();
+    click(button(CREATE_COPY.next));
+    // 入场（滑入加淡入、减少动画时只有淡入）都要 200 ms 以上：100 ms 时还在途中
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(subtitle()).toBe("第 4 步，共 5 步 · 外观");
+    const pane = heading().closest<HTMLElement>('[class*="_pane_"]');
+    if (pane === null) throw new Error("外观步不在步骤容器里");
+    expect(Number(pane.style.opacity)).toBeLessThan(1);
+    expect(presentAll('[role="radio"][class*="_swatch_"]')).toHaveLength(16);
+    expect(swatchCoverRenders).toEqual([]);
+    expect(presentAll('[class*="_swatchCover_"]')).toEqual([]);
+    await flush();
+    expect(pane.style.opacity).toBe("1");
+    expect(swatchCoverRenders.length).toBeGreaterThan(0);
+    expect(presentAll('[class*="_swatchCover_"]')).toHaveLength(16);
   });
 
   it("预览卡的版本行常驻：清单没到时空着占一行，到了填上版本", async () => {

@@ -13,6 +13,7 @@
 
 import { AnimatePresence, motion, useComposedRefs, useIsPresent, useReducedMotionConfig, type AnimationDefinition } from "framer-motion";
 import { useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type Ref } from "react";
+import { Icon } from "../../art/Icon";
 import { DEFAULT_COVER, type InstanceCover } from "../../art/iso/covers";
 import { InstanceAvatarBase } from "../../art/iso/InstanceAvatarBase";
 import { ACTION_ERROR, coverLabel, LOADER_NAME } from "../../copy/flows";
@@ -21,7 +22,7 @@ import type { LoaderKind } from "../../domain/types";
 import { stepPane, stepPaneFade } from "../../lib/motion";
 import { useReflow } from "../../lib/reflow";
 import { useMounted } from "../../lib/useMounted";
-import { isImeComposing } from "../../lib/util";
+import { cx, isImeComposing } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import type { FlowProps } from "../../state/flows";
@@ -30,7 +31,7 @@ import { useLoaderVersions, useManifest, useVersionRequirements } from "../../st
 import { useStarterMods, useTemplateInfo } from "../../state/queries/starter";
 import { canPinMore } from "../../state/selectors";
 import { Appear } from "../../ui/Appear";
-import { Button } from "../../ui/Button";
+import { Button, CONTROL_ICON_SIZE } from "../../ui/Button";
 import { KeyHint } from "../../ui/KeyHint";
 import { LabelSlot } from "../../ui/LabelSlot";
 import { AUTOFOCUS_ATTR, Modal } from "../../ui/Modal";
@@ -62,7 +63,10 @@ import {
   type VersionFilter,
 } from "./model";
 import { Preview, StepNav } from "./Rail";
-import { ConfirmStep, CoverStep, LoaderStep, LoaderVersionStep, NameStep, VersionStep, type CreateFailure } from "./Steps";
+import { ConfirmStep, CoverStep, LoaderStep, LoaderVersionStep, NameStep, StepEnteredContext, VersionStep, type CreateFailure } from "./Steps";
+
+/** 确认步主按钮的两条文案：各占一层交叉淡化，每层的 LabelSlot 都列着这两条，层宽取较宽的「创建并开始安装」。 */
+const CREATE_LABELS = [CREATE_COPY.create, CREATE_COPY.creating] as const;
 
 interface StepPaneProps {
   /**
@@ -107,12 +111,15 @@ function stepFocusTarget(pane: HTMLElement): HTMLElement {
  * 入场播完时焦点若又没了着落，再兜一次：点左栏跳步时被点的那一行成了当前步而禁用，浏览器稍后才把焦点挪走，挂载时还判不出。
  * 点「下一步」时焦点在不动的主按钮上，入场期间用户自己聚焦了别处，都不抢。
  * 弹窗打开时的第一步不播入场，两处都不接管，由弹窗按 data-autofocus 初始聚焦。
+ *
+ * 入场播完时经 StepEnteredContext 告诉这一步，挂上之后才补的重活等到这时再做；只有读它的组件随之重渲染。
  */
 function StepPane({ ref, direction, enter, onKeyDown, children }: StepPaneProps) {
   const present = useIsPresent();
   const reduced = useReducedMotionConfig() === true;
   const self = useRef<HTMLDivElement | null>(null);
   const attach = useComposedRefs(ref, self);
+  const [entered, setEntered] = useState(!enter);
   // 不让浏览器为露出焦点去滚：.main 是 overflow: hidden，被程序滚动后没有滚动条可以滚回来
   const takeFocus = (pane: HTMLElement) => stepFocusTarget(pane).focus({ preventScroll: true });
   // 提交之后、绘制之前：新一步的 DOM 已经挂好，单选组的停靠点在，名称框的 autoFocus 也已生效
@@ -123,9 +130,12 @@ function StepPane({ ref, direction, enter, onKeyDown, children }: StepPaneProps)
     if (enter && focusLost()) takeFocus(pane);
   }, []);
   const onAnimationComplete = (definition: AnimationDefinition) => {
+    // 只认入场（退场播完也回调，标签是 exit）
+    if (definition !== "center") return;
+    setEntered(true);
     const pane = self.current;
-    // 只认入场（退场播完也回调，标签是 exit）；已经开始退场的这一步带 inert，不再接管
-    if (definition !== "center" || pane === null || pane.closest("[inert]") !== null || !focusLost()) return;
+    // 已经开始退场的这一步带 inert，不再接管
+    if (pane === null || pane.closest("[inert]") !== null || !focusLost()) return;
     takeFocus(pane);
   };
   return (
@@ -141,7 +151,7 @@ function StepPane({ ref, direction, enter, onKeyDown, children }: StepPaneProps)
       onKeyDown={onKeyDown}
       onAnimationComplete={onAnimationComplete}
     >
-      {children}
+      <StepEnteredContext.Provider value={entered}>{children}</StepEnteredContext.Provider>
     </motion.div>
   );
 }
@@ -418,7 +428,7 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
 
   const isLast = index === visible.length - 1;
   const onName = step === "name";
-  const createLabel = <LabelSlot current={creating ? CREATE_COPY.creating : CREATE_COPY.create} options={[CREATE_COPY.create, CREATE_COPY.creating]} />;
+  const primaryLabel = !isLast ? CREATE_COPY.next : creating ? CREATE_COPY.creating : CREATE_COPY.create;
 
   return (
     <Modal
@@ -461,24 +471,34 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
             )}
           </Appear>
           {/*
-           * 主按钮在「下一步」与「创建并开始安装」之间换的是同一个按钮（聚焦着的按钮不丢焦点），宽度按最宽的那种定死：
-           * 隐形的创建按钮垫在同一格里撑出宽度，真按钮撑满这一格。换文案、换成加载态时同一行的按钮都不被挤动
+           * 主按钮从头到尾是同一个按钮（聚焦着的按钮不丢焦点），每一步都一样宽，换文案、换成加载态时同一行的按钮都不被挤动：
+           * - 前置图标位常驻（下载，创建中换成加载指示），「下一步」时样式表让它透明。宽度由它加「创建并开始安装」撑出；
+           *   进出确认步时它淡入淡出，不随按钮的 icon 属性来去而一帧出没。
+           * - 三条文案各一层叠着交叉淡化。「下一步」连同后置箭头铺满按钮、按不带前置图标的按钮居中；
+           *   「创建并开始安装」「正在创建…」接在图标位后面，宽度由 LabelSlot 按两条里较宽的定
            */}
-          <div className={styles.primarySlot}>
-            {isLast ? (
-              <Button variant="primary" icon="download" block className={styles.primaryButton} loading={creating} disabled={!canCreate} onClick={() => void create()}>
-                {createLabel}
-              </Button>
-            ) : (
-              <Button variant="primary" iconRight="arrow-right" block className={styles.primaryButton} disabled={!valid[step]} onClick={next}>
+          <div className={styles.footItem}>
+            <Button
+              variant="primary"
+              icon="download"
+              className={styles.primaryButton}
+              data-face={isLast ? "create" : "next"}
+              loading={isLast && creating}
+              disabled={isLast ? !canCreate : !valid[step]}
+              onClick={isLast ? () => void create() : next}
+            >
+              <span className={cx(styles.primaryFace, styles.primaryNext)} data-current={!isLast || undefined} aria-hidden={isLast || undefined}>
                 {CREATE_COPY.next}
-              </Button>
-            )}
-            <span className={styles.primaryGhost} aria-hidden="true" inert>
-              <Button variant="primary" icon="download">
-                {createLabel}
-              </Button>
-            </span>
+                <Icon name="arrow-right" size={CONTROL_ICON_SIZE.md} />
+              </span>
+              <span className={styles.primaryLabels}>
+                {CREATE_LABELS.map((label) => (
+                  <span key={label} className={cx(styles.primaryFace, styles.primaryLabel)} data-current={label === primaryLabel || undefined} aria-hidden={label !== primaryLabel || undefined}>
+                    <LabelSlot current={label} options={CREATE_LABELS} />
+                  </span>
+                ))}
+              </span>
+            </Button>
           </div>
         </div>
       }

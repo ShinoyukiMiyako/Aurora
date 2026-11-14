@@ -10,7 +10,7 @@ import { PetalMark } from "../art/PetalMark";
 import { downloadFailureCopy, sourceSwitchedCopy, UPDATE_COPY, updateChannelNote } from "../copy/updater";
 import { formatBytes, formatDate } from "../domain/format";
 import { insertItem } from "../lib/motion";
-import { useDisplayCount } from "../lib/progress-display";
+import { useCompletionHold, useDisplayCount, useFinishing } from "../lib/progress-display";
 import { useMounted } from "../lib/useMounted";
 import { cx } from "../lib/util";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
@@ -95,6 +95,46 @@ function channelNoteOf(update: UpdateInfo, channels: UpdaterChannels | null): st
   return updateChannelNote({ channel: update.channel, preference, packageChannel });
 }
 
+type Downloading = Extract<UpdaterPhase, { kind: "downloading" }>;
+
+/** 收尾要用的那一份下载阶段，与它换成已下好的时刻（还在下载时为 null）。 */
+interface DownloadEnd {
+  last: Downloading;
+  finishedAt: number | null;
+}
+
+/**
+ * 下载完成后在原处留住下载中的样子一拍（lib/progress-display 的收尾时长）再换成已下好：进度条推满，已下大小到了总量、
+ * 立即换成「总量 / 总量」。下载完成常与最后一条进度落在同一帧，不留这一拍的话，进度条停在平滑追到的位置（常差两三成）、
+ * 已下大小停在节流挂着的旧值上，就被整块换掉了。关于页更新卡的 useDownloadHold 是同一套规则（外壳不能引用页面，各留一份）。
+ * 只留从下载中直接换到已下好的那一次；总量未知时没有满格可推、减少动画时收尾时长为 0，都不留。
+ * holding 为 true 时实际阶段已是已下好，留住的下载中只是画法：按它去取消下载会被状态机拒绝。
+ */
+function useDownloadHold(phase: UpdaterPhase): { phase: UpdaterPhase; holding: boolean } {
+  const holdS = useCompletionHold();
+  const [end, setEnd] = useState<DownloadEnd | null>(null);
+  let next = end;
+  if (phase.kind === "downloading") {
+    // 只在任务、源与总量变了时记下：已下大小约 100 ms 一变，记它就要每条进度多渲染一次。留住时已下大小按总量画，用不着它
+    if (next === null || next.finishedAt !== null || next.last.taskId !== phase.taskId || next.last.source !== phase.source || next.last.totalBytes !== phase.totalBytes) {
+      next = { last: phase, finishedAt: null };
+    }
+  } else if (phase.kind === "ready") {
+    if (next !== null && next.finishedAt === null) {
+      const fills = holdS > 0 && next.last.totalBytes !== null && next.last.update.version === phase.update.version;
+      next = fills ? { last: next.last, finishedAt: Date.now() } : null;
+    }
+  } else {
+    next = null;
+  }
+  if (next !== end) setEnd(next);
+  const finishing = useFinishing(next === null || next.finishedAt === null ? [] : [{ id: next.last.taskId, finishedAt: next.finishedAt }], holdS);
+  if (phase.kind !== "ready" || next === null || !finishing.has(next.last.taskId)) return { phase, holding: false };
+  const { last } = next;
+  if (last.totalBytes === null) throw new Error("下载完成的收尾只留总量已知的下载");
+  return { phase: { ...last, bytes: last.totalBytes }, holding: true };
+}
+
 /** 下好、验过签却不能装时的说明块。下载本身是成功的，不沿用「下载失败：……」的说法。 */
 const REFUSAL_NOTE: Readonly<Record<DownloadRefusal, string>> = { data_too_new: UPDATE_COPY.dataTooNew };
 
@@ -125,7 +165,8 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
   const run = useRunner();
   const online = useOnline();
   const updater = useUpdater();
-  const { phase } = updater.state;
+  // 下载完成后先按下载中画一拍，进度条推满、已下大小到总量，再换成已下好
+  const { phase, holding } = useDownloadHold(updater.state.phase);
   const current = phaseUpdate(phase);
   // 版本不在了（装完、被新一轮检查替换）时面板还开着：留着最后一版继续挂着弹窗、只把 open 置假，退场才播得出来
   const [last, setLast] = useState<UpdateInfo | null>(current);
@@ -178,7 +219,10 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
           <Button variant="ghost" onClick={onClose}>
             {UPDATE_COPY.background}
           </Button>
-          <Button onClick={() => void run(() => updater.cancelDownload(), UPDATE_COPY.cancelFailed)}>{UPDATE_COPY.cancelDownload}</Button>
+          {/* 收尾那一拍里下载已经完成，没有可取消的：键留在原处、不可用，底栏不变形 */}
+          <Button disabled={holding} focusableWhenDisabled onClick={() => void run(() => updater.cancelDownload(), UPDATE_COPY.cancelFailed)}>
+            {UPDATE_COPY.cancelDownload}
+          </Button>
         </>
       );
       break;

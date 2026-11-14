@@ -8,7 +8,7 @@ import type { InstanceCover } from "../../art/iso/covers";
 import type { LoaderKind } from "../../domain/types";
 import { fade } from "../../lib/motion";
 import { useReflow } from "../../lib/reflow";
-import { Slide } from "../../lib/slide";
+import { playTween, Slide } from "../../lib/slide";
 import { useAppearance } from "../../state/appearance";
 import { Appear } from "../../ui/Appear";
 import { GlyphSlot } from "../../ui/Button";
@@ -92,6 +92,9 @@ export function StepNav({ visible, current, reached, values, onJump }: StepNavPr
   const listRef = useRef<HTMLOListElement>(null);
   const markRef = useRef<HTMLLIElement>(null);
   const slide = useRef<Slide | null>(null);
+  // 滑块上一次摆在哪一步：停在同一步上切换减少动画也会重跑摆放，那时滑块没换行
+  const placedAt = useRef<StepId | null>(null);
+  const fadeIn = useRef<Animation | null>(null);
   const reduced = useReducedMotionConfig() === true;
   // 值行出没时文字列变高变矮，在按钮里纵向居中的标签跟着上下移 7 px：每一行各自让位，标签从原处滑过去。
   // 没有值的行标签与圆点照旧居中，不为值行常驻留空。同一个回调挂到每一行上，各行各自观察、各自停止
@@ -104,12 +107,20 @@ export function StepNav({ visible, current, reached, values, onJump }: StepNavPr
     const item = row === null ? null : row.closest("li");
     if (item === null) throw new Error(`步骤导航里找不到当前步 ${current}`);
     const y = item.offsetTop;
+    const moved = placedAt.current !== null && placedAt.current !== current;
+    placedAt.current = current;
     if (slide.current === null) {
       // 打开时直接摆到位，跟着弹窗的入场走
       slide.current = new Slide(mark, "settle");
       slide.current.jump(0, y);
     } else if (reduced) slide.current.jump(0, y);
     else slide.current.to(0, y);
+    // 减少动画时不滑：一步换到新的一行，在那里从透明淡入，与侧栏选中滑块、分段控件、标签条、设置分区导航一样。
+    // 上一段淡入还没播完就又换了步时先停掉它，新的一段从透明起。运行环境没有 Web Animations（组件测试的 jsdom）时直接出现
+    if (reduced && moved && typeof mark.animate === "function") {
+      fadeIn.current?.cancel();
+      fadeIn.current = playTween(mark, [{ opacity: 0 }, { opacity: 1 }], fade.in);
+    }
   }, [current, reduced]);
   return (
     <ol ref={listRef} className={styles.steps} aria-label={CREATE_COPY.stepsLabel}>

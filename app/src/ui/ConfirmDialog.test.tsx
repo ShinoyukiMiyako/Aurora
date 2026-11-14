@@ -248,6 +248,39 @@ describe("ConfirmDialog 确认键换文案", () => {
     });
   });
 
+  // 形变是外层布局节点的 transform 缩放，圆角画在里面的按钮上：framer-motion 只校正布局节点自己样式里的值，
+  // 按钮的四角跟着外层被压成横 10 × scaleX、纵 10 的椭圆角
+  it("确认键形变途中按钮读到的圆角按缩放反向校正：乘上此刻的缩放横纵都还是原来的像素，落定后回到像素值", async () => {
+    // jsdom 不加载模块样式：按钮算好的圆角由这条规则给
+    const sheet = document.createElement("style");
+    sheet.textContent = '[role="dialog"] button[data-variant="danger"] { border-top-left-radius: 10px; }';
+    document.head.append(sheet);
+    try {
+      mount(<Commanded />);
+      const { confirm } = stubFooterRects("切换并重下", "取消");
+      const button = buttonOf("切换并重下");
+      const dialog = document.querySelector<HTMLElement>('[role="dialog"]') as HTMLElement;
+      await waitForFrames(() => expect(dialog.style.transform).toBe("none"));
+      // 按钮的圆角改读形变节点上的值；静止时那就是按钮自己算好的圆角，外观不变
+      expect(button.style.borderRadius).toBe("var(--confirm-key-radius, 10px)");
+      expect(confirm.style.getPropertyValue("--confirm-key-radius")).toBe("10px");
+
+      await act(async () => handles.set?.(REMOVE));
+      expect(buttonOf("删除实例")).toBe(button);
+      const scale = /scale\(([\d.]+), ([\d.]+)\)/.exec(confirm.style.transform);
+      if (scale === null) throw new Error(`确认键没有形变：${confirm.style.transform}`);
+      const radius = /^([\d.]+)% \/ ([\d.]+)%$/.exec(confirm.style.getPropertyValue("--confirm-key-radius"));
+      if (radius === null) throw new Error(`圆角没有按缩放校正：${confirm.style.getPropertyValue("--confirm-key-radius")}`);
+      // 新文案 4 个字：布局宽 32 + 14 × 4 = 88、高 36；百分比按按钮自己的盒子折回像素，再乘上外层此刻的缩放
+      expect((Number(radius[1]) / 100) * 88 * Number(scale[1])).toBeCloseTo(10, 1);
+      expect((Number(radius[2]) / 100) * 36 * Number(scale[2])).toBeCloseTo(10, 1);
+      await waitForFrames(() => expect(confirm.style.getPropertyValue("--confirm-key-radius")).toBe("10px"));
+      expect(button.style.borderRadius).toBe("var(--confirm-key-radius, 10px)");
+    } finally {
+      sheet.remove();
+    }
+  });
+
   it("同一个请求里确认键换了文案：文字的位置节点常驻，旧字留在原处淡出、新字从透明淡入，播完旧字移除", async () => {
     mount(<Updating />);
     const track = trackOf("删除实例");

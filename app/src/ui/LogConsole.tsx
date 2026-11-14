@@ -1,6 +1,6 @@
 // 日志控制台：实例的启动日志（进行中的会话实时输出，否则显示最近一次留底）。放在无内边距的卡片里，高度由页面给。
 //
-// 贴底：距底不足 28px 视为贴底，新行进来自动滚到底；用户上翻后停止跟随，出现「跳到最新」，点它或按 End 平滑滚回底部，按 Home 平滑滚到顶。
+// 贴底：距底不足 28px 视为贴底，新行进来自动滚到底；用户上翻后停止跟随，出现「跳到最新」，点它或按 End（含 Ctrl+End）平滑滚回底部，按 Home（含 Ctrl+Home）平滑滚到顶。
 // 上翻阅读时内容只在两头变（尾部追加、头部截掉、顶上出现省略说明）：头部变化按高度找补滚动位置，正在读的行不被推走。
 // 换行：默认不换行，行高固定、横向滚动；开启自动换行后按内容折行并逐行测量，此时只渲染最近 2000 行。
 // 虚拟化常驻开启：游戏日志动辄几千行，不能全部挂进文档。
@@ -316,6 +316,17 @@ export function LogConsole({
     setOmittedPad(bar.offsetHeight);
   }, [omittedShown, hasOpenLogFile]);
 
+  // 筛选为空的说明经 translate 让出说明条的高度：它已在屏上、条随后出现或收起时，带过渡滑开、滑回。
+  // 和条同一次出没时（挂载时就有省略、换到筛选为空的同时条收起）不滑：上面量条高要读布局，那时说明的样式已经算过一遍，
+  // 条高在绘制之前写进来，浏览器照样当成一次变化去过渡，这一截本该直接排到位。所以只给条高落定时就已在屏上的说明开过渡
+  const filteredOut = lines.length > 0 && filtered.length === 0;
+  // 条有最小高度，量出来不会是 0：条在而上内边距还是 0、条已收起而上内边距还没归零，都是还没落定
+  const padSettled = omittedShown === (omittedPad > 0);
+  const noteSettled = useRef(false);
+  useLayoutEffect(() => {
+    noteSettled.current = filteredOut && (noteSettled.current || padSettled);
+  }, [filteredOut, padSettled]);
+
   /**
    * 滚到底或滚到顶：组件逐帧写 scrollTop 的定长补间，时长按起步时的距离给。滚到底时每帧把终点取为当时元素能滚到的最大位置，
    * 途中新行进来、换行时途经的行第一次量出高度，只是把终点推远，不重起；到时长写到当时的终点就结束，不等 scrollend。
@@ -394,10 +405,11 @@ export function LogConsole({
 
   const totalSize = virtualizer.getTotalSize();
   /** 上一次提交时的显示状态：判断这一次是不是只在两头增删了行。 */
-  const committed = useRef({ shown, level, source, wrap, omittedPad });
+  const committed = useRef({ shown, level, source, wrap, omittedPad, userChanged: false });
   useLayoutEffect(() => {
     const before = committed.current;
-    committed.current = { shown, level, source, wrap, omittedPad };
+    const userChanged = before.level !== level || before.source !== source || before.wrap !== wrap;
+    committed.current = { shown, level, source, wrap, omittedPad, userChanged };
     const el = scrollRef.current;
     if (el === null) return;
     if (stuckRef.current) {
@@ -406,7 +418,7 @@ export function LogConsole({
       return;
     }
     // 筛选、换行切换是用户自己换了内容，不找补
-    if (before.level !== level || before.source !== source || before.wrap !== wrap) return;
+    if (userChanged) return;
     // 行按下标定位：头部截掉 k 行，后面每一行都上移这 k 行的高度；内容顶端给省略说明让出的那一截变了，后面的行整体跟着移。
     // 两者都会把正在读的行推走，按同样的量找补滚动位置
     let shift = 0;
@@ -416,9 +428,12 @@ export function LogConsole({
       // 没量过的行（不换行时全都如此）就是按估计行高排的
       shift -= measured === undefined ? LOG_ROW_HEIGHT : measured;
     }
-    shift += omittedPad - before.omittedPad;
+    // 上内边距要到说明条出没之后、量出条高的那次提交才变：条是随筛选、换行切换出没的，这一截也是用户换内容带出来的，同样不找补
+    if (!before.userChanged) shift += omittedPad - before.omittedPad;
     if (shift !== 0) el.scrollTop += shift;
-  }, [shown, totalSize, wrap, level, source, omittedPad, virtualizer]);
+    // 说明条出没的那次提交也要跑一遍、记下这次是不是用户换了内容：量出条高的提交紧跟其后，只看这一笔。
+    // 不跑的话 before 停在更早的某次筛选切换上，之后上翻阅读中出现的说明条也会被当成用户换内容带出来的
+  }, [shown, totalSize, wrap, level, source, omittedPad, omittedShown, hasOpenLogFile, virtualizer]);
 
   const stickToBottom = () => {
     const el = scrollRef.current;
@@ -464,8 +479,10 @@ export function LogConsole({
   // 用户自己动手（滚轮、拖滚动条、按键）就不再是程序滚动：之后的位置照常判断是否贴底，新行进来也不再把用户拽回底部
   const takeOver = endGlide;
 
+  // Ctrl+Home、Ctrl+End 在 Chromium 里同样是平滑滚到头，换行时一样会被途中的测量找补拖到停在半路，与 Home、End 一并接管。
+  // Alt、Meta 组合是浏览器或系统的快捷键，不拦
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if ((event.key !== "End" && event.key !== "Home") || event.ctrlKey || event.altKey || event.metaKey) {
+    if ((event.key !== "End" && event.key !== "Home") || event.altKey || event.metaKey) {
       takeOver();
       return;
     }
@@ -475,7 +492,6 @@ export function LogConsole({
   };
 
   const lastIndex = shown.length - 1;
-  const filteredOut = lines.length > 0 && filtered.length === 0;
 
   return (
     <div className={cx(styles.console, className)} data-wrap={wrap || undefined}>
@@ -531,7 +547,9 @@ export function LogConsole({
           <Appear itemClassName={styles.omittedSlot}>
             {omittedShown && (
               <div ref={omittedRef} className={styles.omitted}>
-                <span className={styles.omittedText}>较早的 {omitted} 行已省略，完整日志在 latest.log</span>
+                <span className={styles.omittedText}>
+                  较早的 <span className={styles.omittedCount}>{omitted}</span> 行已省略，完整日志在 latest.log
+                </span>
                 {onOpenLogFile !== undefined && (
                   <Button variant="ghost" size="sm" icon="file-text" onClick={onOpenLogFile}>
                     打开日志文件
@@ -540,7 +558,11 @@ export function LogConsole({
               </div>
             )}
           </Appear>
-          {filteredOut && filteredEmpty !== undefined && <div className={styles.filteredEmpty}>{filteredEmpty}</div>}
+          {filteredOut && filteredEmpty !== undefined && (
+            <div className={styles.filteredEmpty} data-glide={noteSettled.current || undefined}>
+              {filteredEmpty}
+            </div>
+          )}
           <div className={styles.canvas} style={{ height: `${totalSize}px`, ...cssVars({ "--log-text-cols": textCols }) }}>
             {virtualizer.getVirtualItems().map((item) => {
               const line = shown[item.index];

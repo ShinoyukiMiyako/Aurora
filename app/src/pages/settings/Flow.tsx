@@ -15,7 +15,10 @@ export function SectionFlow({ children }: { children: ReactNode }) {
   );
 }
 
-/** 卡片里卡头下面的一列设置行；排法与卡片自己相同，连续的设置行之间照常有分隔线。 */
+/**
+ * 卡片里卡头下面的一列设置行；排法与卡片自己相同，连续的设置行之间照常有分隔线。
+ * 所在卡片要开 reflowEdge（ui/Card）：行变矮时下面的行还在往上滑，卡片外框一步收矮的话末行会先画到卡片外面。
+ */
 export function RowFlow({ children }: { children: ReactNode }) {
   const reflow = useReflow<HTMLDivElement>();
   return (

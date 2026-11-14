@@ -22,6 +22,8 @@ interface Box {
 }
 
 interface FakeAnimation {
+  /** 与 Web Animations 一致：建好时为 null，等起步那一帧才定；调用方可以直接写。 */
+  startTime: number | null;
   currentTime: number | null;
   playState: AnimationPlayState;
   cancel: ReturnType<typeof vi.fn>;
@@ -73,6 +75,15 @@ const start = (call: Call) => String(call.frames[0].translate);
 const callsOn = (el: HTMLElement) => calls.filter((c) => c.el === el);
 /** MutationObserver 的回调在微任务里。 */
 const flushMutations = () => Promise.resolve();
+
+/** 页面的 performance.now() 定在一个随机时刻并返回它：走 morph 的起步时刻按它钉。 */
+function pinNow(): number {
+  const view = document.defaultView;
+  if (view === null) throw new Error("测试文档没有窗口");
+  const now = 1000 + Math.round(Math.random() * 1e6) / 10;
+  vi.spyOn(view.performance, "now").mockReturnValue(now);
+  return now;
+}
 
 /** 走一帧：跑完此刻排着的动画帧回调，回调里新排的留到下一帧。 */
 function frame(): void {
@@ -132,6 +143,7 @@ beforeEach(() => {
     value(this: HTMLElement, frames: Keyframe[], options: KeyframeAnimationOptions) {
       // 与 Web Animations 一致：建好就在播；暂停不挪时间；取消之后回到 idle、没有当前时间
       const animation: FakeAnimation = {
+        startTime: null,
         currentTime: 0,
         playState: "running",
         cancel: vi.fn(() => {
@@ -164,7 +176,7 @@ afterEach(() => {
 });
 
 /** 一列三项：0 / 100 / 200，容器宽 800，子项的定位祖先就是容器。 */
-function column() {
+function column(spring: SpringName = "settle") {
   const container = document.createElement("div");
   document.body.append(container);
   place(document.body, {});
@@ -172,7 +184,7 @@ function column() {
   const a = child(container, 0);
   const b = child(container, 100);
   const c = child(container, 200);
-  stop = observeReflow(container);
+  stop = observeReflow(container, spring);
   // 第一趟：只记位置
   sizes.resize(container, 800);
   return { container, a, b, c };
@@ -799,6 +811,8 @@ describe("observeReflow：从静止起步等新排布画出来再计时", () => 
     expect(flyB.animation.pause).toHaveBeenCalledTimes(1);
     expect(flyB.animation.playState).toBe("paused");
     expect(flyC.animation.playState).toBe("paused");
+    // 起步时刻不钉：等播起来的那一帧再定
+    expect(flyB.animation.startTime).toBeNull();
     // 这一帧画的就是新排布：还停在起点
     frame();
     expect(flyB.animation.play).not.toHaveBeenCalled();
@@ -911,9 +925,10 @@ describe("observeReflow：从静止起步等新排布画出来再计时", () => 
     expect(start(second)).toBe(`0px ${Math.round((now.x - 40) * 100) / 100}px`);
     expect(second.animation.pause).not.toHaveBeenCalled();
     expect(second.animation.playState).toBe("running");
+    expect(second.animation.startTime).toBeNull();
   });
 
-  it("走 morph 的（与 framer-motion 的形变同拍）：不暂停，与形变同一刻起步", () => {
+  it("走 morph 的（与 framer-motion 的形变同拍）：不暂停，起步时刻钉在建好的此刻，还没走到时停在首帧", () => {
     const container = document.createElement("div");
     document.body.append(container);
     place(document.body, {});
@@ -922,12 +937,40 @@ describe("observeReflow：从静止起步等新排布画出来再计时", () => 
     const b = child(container, 100);
     stop = observeReflow(container, "morph");
     sizes.resize(container, 800);
+    const now = pinNow();
     place(b, { top: 220 });
     sizes.resize(a, 800);
     const [fly] = callsOn(b);
     expect(fly.animation.pause).not.toHaveBeenCalled();
     expect(fly.animation.playState).toBe("running");
+    // 不等带着它的那一帧画出来才定：形变的时钟从提交那一刻走
+    expect(fly.animation.startTime).toBe(now);
+    // 长提交之后的第一帧，帧时间早于起步时刻：停在首个关键帧，不先画成终点
+    expect(fly.options.fill).toBe("backwards");
     expect(frameQueue).toHaveLength(0);
+  });
+
+  // 先被挤开的距离取多组，含随机；还没走到的时长也随机
+  const earlyPushes = [34, -34, 56, 120, ...Array.from({ length: 4 }, () => 1 + Math.floor(Math.random() * 400))];
+  it.each(earlyPushes)("走 morph、还没走到起步时刻又被挤（先被挤开 %ipx）：从起点加上新位移、零速出发，起步时刻钉在这一次", (d) => {
+    const { a, b } = column("morph");
+    const first = pinNow();
+    place(b, { top: 100 + d });
+    sizes.resize(a, 800);
+    const [prev] = callsOn(b);
+    expect(prev.animation.startTime).toBe(first);
+    // 文档时间轴还停在上一帧：当前时间为负
+    prev.animation.currentTime = -(0.5 + Math.random() * 80);
+    const second = pinNow();
+    place(b, { top: 140 + d });
+    sizes.resize(a, 800);
+    expect(prev.animation.cancel).toHaveBeenCalledTimes(1);
+    const next = callsOn(b)[1];
+    expect(start(next)).toBe(`0px ${-d - 40}px`);
+    expect(next.frames[1].translate).toBe(`0px ${Math.round(springAt("morph", -d - 40, 0, SAMPLE_S).x * 100) / 100}px`);
+    expect(next.animation.startTime).toBe(second);
+    expect(next.options.fill).toBe("backwards");
+    expect(next.animation.pause).not.toHaveBeenCalled();
   });
 
   it("停止观察时还在等的：照常开始走，不会停在起点", () => {
@@ -979,15 +1022,26 @@ describe("observeReflow：容器长高、新插入的项开了新的一行", () 
 
   it("走 morph：折到新一行的项从 -Δh 起步、速度为 0，沿 morph 跟着外框下沿下来；挤进原有行的照常就地出现", async () => {
     const { container, logs } = actionRow("morph");
+    // 时钟每读一次走一点：逐个建动画要花时间
+    const view = document.defaultView;
+    if (view === null) throw new Error("测试文档没有窗口");
+    let clock = 2000 + Math.random() * 1000;
+    const before = clock;
+    vi.spyOn(view.performance, "now").mockImplementation(() => (clock += 0.25));
     const { dismiss, fix } = await wrap(container, logs);
     const [ride] = callsOn(fix);
+    const [slide] = callsOn(logs);
     expect(start(ride)).toBe("0px -34px");
     expect(ride.frames[1].translate).toBe(`0px ${Math.round(springAt("morph", -34, 0, SAMPLE_S).x * 100) / 100}px`);
     expect(ride.frames[ride.frames.length - 1].translate).toBe("0px 0px");
-    // 与外框的形变同一刻起步
+    // 与外框的形变同一刻起步：起步时刻钉在这一趟里读到的时刻，同一趟的几段钉在同一刻，不随逐个建动画错开
     expect(ride.animation.pause).not.toHaveBeenCalled();
+    expect(ride.animation.startTime).toBeGreaterThan(before);
+    expect(ride.animation.startTime).toBeLessThanOrEqual(clock);
+    expect(slide.animation.startTime).toBe(ride.animation.startTime);
+    expect(ride.options.fill).toBe("backwards");
     expect(callsOn(dismiss)).toHaveLength(0);
-    expect(start(callsOn(logs)[0])).toBe("140px 0px");
+    expect(start(slide)).toBe("140px 0px");
   });
 
   it("走 settle（容器下沿一步到位：卡片、页面）：新的一行就地淡入，不滑", async () => {

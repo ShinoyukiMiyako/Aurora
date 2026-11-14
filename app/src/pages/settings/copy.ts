@@ -261,7 +261,7 @@ export const APPEARANCE_COPY = {
   motionTitle: "背景与动效",
   petals: "飘落花瓣",
   petalsDesc: "主页背景少量像素花瓣缓慢飘落，鼠标经过时轻轻避让",
-  petalsReduced: "「减少动画」已开启，花瓣会停在原处不动",
+  petalsReduced: "「减少动画」已开启，花瓣换成一幅静止的散落画面，不再飘动",
   panorama: "樱花林全景背景",
   panoramaDesc: "主页背景换成原版的樱花林全景，花瓣照常飘在它前面。全景图读取自你本机的游戏文件。",
   panoramaMissing: "本机还没有带樱花林全景的游戏版本，装好 1.20 系列任一版本后可以开启",

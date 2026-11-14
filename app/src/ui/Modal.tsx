@@ -18,7 +18,8 @@
 //   （由渲染 Modal 的组件持有那份状态）才接得住。形变途中主体不滚动（见 MorphingMark）。
 // - 带内边距的主体常驻滚动条槽位：内容在超出与不超出可视高度之间来回时，主体里的东西不横移。满版主体默认不留：
 //   贴边的头图（资讯）右侧会多出一条一直看得见的空槽，从不溢出的满版主体（新建实例）右侧也会平白多出一条留白。
-//   满版主体里会出没滚动条、又没有贴右边的内容时，由调用方传 stableGutter 打开。
+//   满版主体里会出没滚动条时由调用方权衡后传 stableGutter 打开：滚动条出没时内容不再横移，代价是贴着右边的内容旁
+//   一直露着那条空槽。资源详情传了它：弹窗定高，换标签、骨架换正文时滚动条常常出没，头图与统计条右侧因此总留一条槽宽的空边。
 
 import { AnimatePresence, motion, useIsPresent, useMotionValue, useReducedMotionConfig, type Transition } from "framer-motion";
 import {

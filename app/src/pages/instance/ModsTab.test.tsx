@@ -19,7 +19,7 @@ import { WindowPortProvider, browserWindowPort, type WindowDropEvent, type Windo
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
-import { render, stepFrames, stubMatchMedia, stubResizeObserver, stubSpanAnimations, type Rendered } from "../../test/dom";
+import { fakeAnimate, render, stepFrames, stubMatchMedia, stubResizeObserver, stubSpanAnimations, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
@@ -1170,30 +1170,7 @@ describe("更新检查晚到时行里不跳", () => {
     if (fresh === undefined || fresh === null) throw new Error("「新增」不在出入场的包裹层里");
     // 被挪动的是包裹层（div）：jsdom 没有 Web Animations，只给它这一个元素装上，记下让位起的关键帧
     const slides: Keyframe[][] = [];
-    Object.defineProperty(fresh, "animate", {
-      configurable: true,
-      value: (frames: Keyframe[]) => {
-        slides.push(frames);
-        // 与 Web Animations 一致：建好就在播；从静止起步的让位先暂停、隔几帧再播，暂停不挪时间；取消之后回到 idle
-        const animation = {
-          currentTime: 0 as number | null,
-          playState: "running" as AnimationPlayState,
-          cancel: () => {
-            animation.playState = "idle";
-            animation.currentTime = null;
-          },
-          pause: () => {
-            animation.playState = "paused";
-          },
-          play: () => {
-            animation.playState = "running";
-          },
-          onfinish: null,
-          oncancel: null,
-        };
-        return animation;
-      },
-    });
+    Object.defineProperty(fresh, "animate", { configurable: true, value: fakeAnimate((_el, frames) => slides.push(frames)) });
     // 观察者挂上后的第一趟：只记位置
     observers.resize(sub, 0);
     expect(slides).toEqual([]);

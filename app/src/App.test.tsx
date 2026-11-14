@@ -117,8 +117,9 @@ function sidebarItem(key: string): HTMLElement {
   return el;
 }
 
+/** 按看得见的文字找按钮：文案槽（LabelSlot）里叠着全部候选，看得见的只有标着 data-current 的那条。 */
 function buttonIn(scope: ParentNode, label: string): HTMLButtonElement {
-  const el = [...scope.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === label);
+  const el = [...scope.querySelectorAll<HTMLButtonElement>("button")].find((b) => (b.querySelector("[data-align] > [data-current]") ?? b).textContent?.trim() === label);
   if (el === undefined) throw new Error(`找不到按钮「${label}」`);
   return el;
 }

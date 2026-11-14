@@ -8,7 +8,7 @@ import { useId, useRef } from "react";
 import { percent } from "../domain/format";
 import { fade } from "../lib/motion";
 import { useMounted } from "../lib/useMounted";
-import { cx } from "../lib/util";
+import { clamp, cx } from "../lib/util";
 import type { ProgressTone } from "./ProgressBar";
 import { useSmoothProgress } from "./ProgressBar";
 import styles from "./ProgressRing.module.css";
@@ -53,7 +53,8 @@ export function ProgressRing({ value, size = 36, tone = "accent", track, capAt99
   const stroke = RING_STROKE[size];
   const radius = (size - stroke) / 2;
   const circumference = 2 * Math.PI * radius;
-  const dashOffset = useTransform(smooth, (p) => circumference * (1 - p));
+  // 截到 [0, 1]（同 rawFillOffset）：settle 弹簧补满时会略冲过 1，描边偏移变负，弧的起点让出一道缝
+  const dashOffset = useTransform(smooth, (p) => circumference * (1 - clamp(p, 0, 1)));
   const text = useTransform(smooth, (p) => percent(p, capAt99));
   const center = size / 2;
   // 挂载时就有进度的填充直接显示，之后才出现的淡入。不写在 AnimatePresence 的 initial={false} 上：

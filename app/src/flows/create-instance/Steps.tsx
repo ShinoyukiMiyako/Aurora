@@ -2,7 +2,7 @@
 // 单选列表与单选卡用漫游焦点：组内一个 Tab 停靠点，方向键移动并立即选中，Enter 由流程组件统一当作「下一步」。
 
 import { useAnimate, useReducedMotionConfig } from "framer-motion";
-import { startTransition, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, startTransition, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Icon } from "../../art/Icon";
 import { COVER_PRESETS, type InstanceCover } from "../../art/iso/covers";
 import { InstanceBlock } from "../../art/iso/InstanceBlock";
@@ -71,6 +71,13 @@ const TYPE_TONE = { release: "ok", snapshot: "warn", old: "neutral" } as const;
 
 /** 封面样本的色相区高度：4 × 4 的网格要放进固定高的右栏，方块宽 32 居中。 */
 const SWATCH_ART_HEIGHT = 48;
+
+/**
+ * 这一步的入场（滑入加淡入，减少动画时只有淡入）播完了没有，由流程组件的步骤容器提供。
+ * 挂上之后才补的重活（外观步的 16 块卡面）等它播完再做：提交阶段不可中断，落在入场途中就是途中的一帧长帧。
+ * 弹窗打开时的第一步不播入场，一挂上就算播完；不在步骤容器里单独渲染时也算播完。
+ */
+export const StepEnteredContext = createContext(true);
 
 function StepHead({ title, body, right }: { title: string; body: string; right?: ReactNode }) {
   return (
@@ -570,13 +577,14 @@ export function CoverStep({ previewId, value, onChange, random }: CoverStepProps
     const others = COVER_PRESETS.filter((p) => p.block !== value.block);
     onChange(others[Math.floor(random() * others.length)]);
   };
-  // 16 块卡面（丘陵与像素花瓣）和换步挂在同一次提交里时那一帧很长，入场的第一帧露面时淡入已经走了一半。
-  // 换步那一次只挂色样与方块，画完第一帧再在过渡更新里补卡面：React 分片做完、不占住换步的滑入
+  // 16 块卡面（丘陵与像素花瓣）和换步挂在同一次提交里时那一帧很长，入场的第一帧露面时淡入已经走了一半；
+  // 挪到画完第一帧之后补，那次提交（每块卡面量宽、重渲染）又落在入场途中，掉一帧。
+  // 所以换步那一次只挂色样与方块，等这一步入场播完再在过渡更新里补卡面，卡面自己淡入
+  const entered = useContext(StepEnteredContext);
   const [decorated, setDecorated] = useState(false);
   useEffect(() => {
-    const frame = requestAnimationFrame(() => startTransition(() => setDecorated(true)));
-    return () => cancelAnimationFrame(frame);
-  }, []);
+    if (entered) startTransition(() => setDecorated(true));
+  }, [entered]);
   return (
     <>
       <StepHead

@@ -55,7 +55,7 @@ export function AppearanceSection() {
           onChange={(accent) => write(APPEARANCE_COPY.accentTitle, { accent })}
         />
       </Card>
-      <Card>
+      <Card reflowEdge>
         <CardHeader title={APPEARANCE_COPY.motionTitle} icon="sparkle" />
         {/* 材质下完、目录载入后下载块退场，「减少动画」一行滑上去，而不是一帧跳上去 */}
         <RowFlow>

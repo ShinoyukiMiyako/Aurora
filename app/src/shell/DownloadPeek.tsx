@@ -381,9 +381,14 @@ function PeekRow({ task: placed, finishing, enter, onCancel }: { task: Task; fin
   const present = useIsPresent();
   const listLeaving = useContext(ListLeaving);
   const leaving = !present || listLeaving;
-  const live = useLauncherSelector((s) => (leaving ? s.tasks.find((t) => t.id === placed.id) : undefined));
-  // 淡出途中任务被「清除已结束」拿掉时读不到，照冻结的样子淡完：节点已带 inert，只剩这一百多毫秒
-  const landed = live !== undefined && live.status === "done";
+  // 读不到时沿用上一次读到的：淡出途中任务被「清除已结束」拿掉，照拿掉前的样子淡完。不退回冻结的 placed，那是完成前
+  // 运行中的样子，取消键会变回可按、详情换回完成前那句。在场时取页面给的任务，退场前总有上一次；连上一次都没有是状态坏了，照样抛
+  const live = useLauncherSelector(
+    (s) => (leaving ? s.tasks.find((t) => t.id === placed.id) : placed),
+    (prev, next) => next === undefined || prev === next,
+  );
+  if (live === undefined) throw new Error(`任务 ${placed.id} 已不在任务表里，快览却还在画它`);
+  const landed = leaving && live.status === "done";
   const task = landed ? live : placed;
   const holding = finishing || landed;
   const queued = task.status === "queued";

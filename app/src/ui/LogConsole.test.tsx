@@ -26,6 +26,7 @@ import {
   type LogConsoleLine,
   type LogConsoleProps,
 } from "./LogConsole";
+import styles from "./LogConsole.module.css";
 
 const AT = new Date(2026, 9, 30, 12, 3, 11).getTime();
 const line = (i: number, level: LogConsoleLine["level"] = "info", source: LogConsoleLine["source"] = "game"): LogConsoleLine => ({
@@ -379,9 +380,23 @@ describe("贴底与跳到最新", () => {
     expect(end.defaultPrevented).toBe(true);
     glideOut();
     expect(scroller().scrollTop).toBe(maxTop(20));
-    const ctrlEnd = keydown(scroller(), "End", { ctrlKey: true });
-    expect(ctrlEnd.defaultPrevented).toBe(false);
     await waitForFrames(() => expect(jump()).toBeUndefined());
+  });
+
+  it("Alt、Meta 组合的 Home、End 交给浏览器：不拦默认行为、不排补间，进行中的补间当场停下", () => {
+    mount({ lines: lines(100) });
+    userScroll(0);
+    for (const init of [{ altKey: true }, { metaKey: true }, { ctrlKey: true, altKey: true }]) {
+      for (const key of ["Home", "End"]) {
+        expect(keydown(scroller(), key, init).defaultPrevented, `${key} ${JSON.stringify(init)}`).toBe(false);
+        expect(queued.size).toBe(0);
+      }
+    }
+    clickJump();
+    frame();
+    expect(queued.size).toBe(1);
+    keydown(scroller(), "End", { altKey: true });
+    expect(queued.size).toBe(0);
   });
 
   it("换行时按 Home：组件自己逐帧滚到顶，往上途经的行第一次量出高度也正好停在 0，不发滚动命令、不写测量找补；离开底部，出现「跳到最新」", () => {
@@ -418,8 +433,41 @@ describe("贴底与跳到最新", () => {
     // 停在顶上：新行进来不拉回底部
     view?.rerender(ui({ lines: all }));
     expect(scroller().scrollTop).toBe(0);
+  });
+
+  it("换行时按 Ctrl+Home、Ctrl+End：与 Home、End 一样由组件逐帧滚到头，途经的行第一次量出高度也正好停在头上，不发滚动命令、不写测量找补", async () => {
+    mount({ lines: lines(200) });
+    toggleWrap();
+    reportStickScroll();
+    // 前 120 行折成两行：往上途中才第一次渲染、第一次量出高度
+    const realHeight = (index: number) => (index < 120 ? 2 * LOG_ROW_HEIGHT : LOG_ROW_HEIGHT);
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+      return this.dataset.index === undefined ? 0 : realHeight(Number(this.dataset.index));
+    });
+    // 浏览器把测量找补的瞬时写入叠加到进行中的键盘平滑滚动的终点上：途中一次都不该有
+    let instantWrites = 0;
+    instantImpl = () => {
+      instantWrites++;
+    };
     const ctrlHome = keydown(scroller(), "Home", { ctrlKey: true });
-    expect(ctrlHome.defaultPrevented).toBe(false);
+    expect(ctrlHome.defaultPrevented).toBe(true);
+    expect(queued.size, "排上了组件自己的补间").toBe(1);
+    expect(jump(), "按下就离开了底部").toBeDefined();
+    glideOut(rowReporter());
+    expect(scroller().scrollTop).toBe(0);
+    expect(Number(renderedInOrder()[0].dataset.index)).toBe(0);
+
+    const ctrlEnd = keydown(scroller(), "End", { ctrlKey: true });
+    expect(ctrlEnd.defaultPrevented).toBe(true);
+    expect(queued.size, "排上了组件自己的补间").toBe(1);
+    glideOut(rowReporter());
+    expect(distanceFromBottom(scroller())).toBe(0);
+    expect(scrollToCalls).toEqual([]);
+    expect(instantWrites).toBe(0);
+    await waitForFrames(() => expect(jump()).toBeUndefined());
+    // 回到贴底：新行进来跟着滚到底
+    view?.rerender(ui({ lines: lines(201) }));
+    expect(scroller().scrollTop).toBe(scroller().scrollHeight);
   });
 
   it("滚到顶与滚到底的补间途中按反方向的键：从当前位置改道，不跳；同方向再按不重起", () => {
@@ -720,6 +768,58 @@ describe("上翻阅读时的位置找补", () => {
     expect(scroller().scrollTop).toBe(100 + BAR);
   });
 
+  describe("用户自己换了内容、省略说明随之出现或消失时不找补", () => {
+    const BAR = 31;
+    beforeEach(() => {
+      vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+        if (this.textContent?.startsWith("较早的") === true) return BAR;
+        return this.dataset.index === undefined ? 0 : LOG_ROW_HEIGHT;
+      });
+    });
+    const omittedNote = () => [...document.querySelectorAll("span")].find((s) => s.textContent?.startsWith("较早的"))?.textContent;
+    const toggleWrap = () => act(() => document.querySelector<HTMLButtonElement>('button[aria-label="自动换行"]')?.click());
+
+    it("没贴底、停在最上面时打开自动换行，超过显示上限出现说明条：仍停在顶上；再关掉、说明条收起，也不找补", () => {
+      mount({ lines: lines(WRAP_RENDER_LIMIT + 3) });
+      userScroll(0);
+      toggleWrap();
+      expect(omittedNote()).toBe("较早的 3 行已省略，完整日志在 latest.log");
+      expect(scroller().style.getPropertyValue("--log-omitted-pad")).toBe(`${BAR}px`);
+      expect(scroller().scrollTop).toBe(0);
+      userScroll(500);
+      toggleWrap();
+      expect(scroller().style.getPropertyValue("--log-omitted-pad")).toBe("0px");
+      expect(scroller().scrollTop).toBe(500);
+    });
+
+    it("换行开着、没贴底停在最上面时从「警告及以上」切到「全部」，筛选后的行数越过显示上限出现说明条：仍停在顶上", () => {
+      const mixed = [...Array.from({ length: WRAP_RENDER_LIMIT - 10 }, (_, i) => line(i, "warn")), ...lines(20, WRAP_RENDER_LIMIT)];
+      mount({ lines: mixed, level: "warn" });
+      toggleWrap();
+      expect(omittedNote()).toBeUndefined();
+      userScroll(0);
+      view?.rerender(ui({ lines: mixed, level: "all" }));
+      expect(omittedNote()).toBe("较早的 10 行已省略，完整日志在 latest.log");
+      expect(scroller().style.getPropertyValue("--log-omitted-pad")).toBe(`${BAR}px`);
+      expect(scroller().scrollTop).toBe(0);
+    });
+  });
+
+  it("换了筛选之后、说明条没跟着变时，之后上翻阅读中出现的省略说明照常找补", () => {
+    const BAR = 31;
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+      if (this.textContent?.startsWith("较早的") === true) return BAR;
+      return this.dataset.index === undefined ? 0 : LOG_ROW_HEIGHT;
+    });
+    const mixed = Array.from({ length: 30 }, (_, i) => line(i, "info", i % 2 === 0 ? "game" : "launcher"));
+    mount({ lines: mixed });
+    userScroll(100);
+    view?.rerender(ui({ lines: mixed, source: "game" }));
+    expect(scroller().scrollTop).toBe(100);
+    view?.rerender(ui({ lines: mixed, source: "game", dropped: 5 }));
+    expect(scroller().scrollTop).toBe(100 + BAR);
+  });
+
   it("换行且超过显示上限时，无关的重渲染不重跑贴底：不在每次渲染里读写滚动区", () => {
     const all = lines(WRAP_RENDER_LIMIT + 3);
     mount({ lines: all });
@@ -840,7 +940,36 @@ describe("LogConsole 样式", () => {
     expect(rule(".omittedSlot")).toMatch(/height: 0;/);
     expect(rule(".omitted")).toMatch(/background: var\(--sk-surface\);/);
     expect(rule(".omittedText")).toMatch(/white-space: nowrap;/);
-    expect(rule(".filteredEmpty")).toMatch(/margin-top: var\(--log-omitted-pad\);/);
+    expect(rule(".filteredEmpty")).toMatch(/translate: 0 var\(--log-omitted-pad\);/);
+    expect(rule(".filteredEmpty")).not.toMatch(/margin/);
+  });
+
+  it("筛选为空的说明让位只动 translate，已在屏上时按落定弹簧过渡；减少动画时不过渡", () => {
+    expect(rule(":global(:root:not([data-sk-reduced])) .filteredEmpty[data-glide]")).toMatch(/transition: translate var\(--sk-spring-settle-dur\) var\(--sk-spring-settle\);/);
+    expect(css).not.toMatch(/(?<!:root:not\(\[data-sk-reduced\]\)\) )\.filteredEmpty\[data-glide\] \{/);
+  });
+
+  it("键盘聚焦日志区的焦点环画在滚动区外面一层、叠在说明条之上：说明条粘在顶上时四边都看得见", () => {
+    expect(css).not.toMatch(/\.scroller:focus-visible \{/);
+    expect(rule(".area")).toMatch(/isolation: isolate;/);
+    const ring = rule(".area:has(> .scroller:focus-visible)::after");
+    expect(ring).toMatch(/position: absolute;/);
+    expect(ring).toMatch(/inset: 0;/);
+    expect(ring).toMatch(/pointer-events: none;/);
+    expect(ring).toMatch(/box-shadow: inset 0 0 0 2px var\(--sk-accent\);/);
+    const zIndex = (body: string) => {
+      const match = /z-index: (\d+);/.exec(body);
+      if (match === null) throw new Error("规则里没有 z-index");
+      return Number(match[1]);
+    };
+    expect(zIndex(ring)).toBeGreaterThan(zIndex(rule(".omittedSlot")));
+  });
+
+  it("省略说明的计数槽按四位定宽、右对齐，用等宽数字：位数在四位以内变化时后面的文字不右移", () => {
+    expect(rule(".omittedCount")).toMatch(/display: inline-block;/);
+    expect(rule(".omittedCount")).toMatch(/min-width: 4ch;/);
+    expect(rule(".omittedCount")).toMatch(/font-variant-numeric: tabular-nums;/);
+    expect(rule(".omittedCount")).toMatch(/text-align: end;/);
   });
 });
 
@@ -853,6 +982,17 @@ describe("省略说明与换行", () => {
     const open = [...document.querySelectorAll("button")].find((b) => b.textContent === "打开日志文件");
     act(() => open?.click());
     expect(onOpenLogFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("说明里的行数单独放在计数槽里：位数变了只换槽里的数字，前后文字不变", () => {
+    const note = () => [...document.querySelectorAll("span")].find((s) => s.textContent?.startsWith("较早的"));
+    mount({ lines: lines(3), dropped: 99 });
+    const slot = note()?.querySelector(`.${styles.omittedCount}`);
+    expect(slot?.textContent).toBe("99");
+    view?.rerender(ui({ lines: lines(3), dropped: 100 }));
+    expect(note()?.querySelector(`.${styles.omittedCount}`)).toBe(slot);
+    expect(slot?.textContent).toBe("100");
+    expect(note()?.textContent).toBe("较早的 100 行已省略，完整日志在 latest.log");
   });
 
   it("没有丢弃时不显示说明", () => {
@@ -925,6 +1065,54 @@ describe("筛选后为空", () => {
     view?.rerender(ui({ lines: [line(0, "info"), line(1, "info")], level: "all", filteredEmpty: NOTE }));
     expect(scroller().textContent).not.toContain(NOTE);
     expect(rendered()).toHaveLength(2);
+  });
+
+  describe("省略说明条出没时让出它的高度", () => {
+    const BAR = 31;
+    beforeEach(() => {
+      vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+        if (this.textContent?.startsWith("较早的") === true) return BAR;
+        return this.dataset.index === undefined ? 0 : LOG_ROW_HEIGHT;
+      });
+    });
+    const noteEl = () => scroller().querySelector<HTMLElement>(":scope > :not([data-index]):not([style])");
+    const infoOnly = [line(0, "info"), line(1, "info")];
+
+    it("说明已在屏上时说明条出现、收起：说明带着过渡滑开、滑回，不一帧跳过去", () => {
+      mount({ lines: infoOnly, level: "error", filteredEmpty: NOTE });
+      const el = noteEl();
+      expect(el?.textContent).toBe(NOTE);
+      expect(scroller().style.getPropertyValue("--log-omitted-pad")).toBe("0px");
+      view?.rerender(ui({ lines: infoOnly, level: "error", filteredEmpty: NOTE, dropped: 5 }));
+      expect(noteEl()).toBe(el);
+      expect(scroller().style.getPropertyValue("--log-omitted-pad")).toBe(`${BAR}px`);
+      expect(el?.hasAttribute("data-glide")).toBe(true);
+      view?.rerender(ui({ lines: infoOnly, level: "error", filteredEmpty: NOTE, dropped: 0 }));
+      expect(scroller().style.getPropertyValue("--log-omitted-pad")).toBe("0px");
+      expect(el?.hasAttribute("data-glide")).toBe(true);
+    });
+
+    it("说明与说明条一起出现（挂载时就有省略）：量出条高的那次直接排到条下面，不滑；之后条再出没才带过渡", () => {
+      mount({ lines: infoOnly, level: "error", filteredEmpty: NOTE, dropped: 5 });
+      const el = noteEl();
+      expect(scroller().style.getPropertyValue("--log-omitted-pad")).toBe(`${BAR}px`);
+      expect(el?.hasAttribute("data-glide")).toBe(false);
+      view?.rerender(ui({ lines: infoOnly, level: "error", filteredEmpty: NOTE, dropped: 0 }));
+      expect(scroller().style.getPropertyValue("--log-omitted-pad")).toBe("0px");
+      expect(el?.hasAttribute("data-glide")).toBe(true);
+    });
+
+    it("换到筛选为空的同时说明条收起：说明直接排在顶上，不从条下面滑上来", () => {
+      const toggleWrap = () => act(() => document.querySelector<HTMLButtonElement>('button[aria-label="自动换行"]')?.click());
+      const all = lines(WRAP_RENDER_LIMIT + 3);
+      mount({ lines: all, filteredEmpty: NOTE });
+      toggleWrap();
+      expect(scroller().style.getPropertyValue("--log-omitted-pad")).toBe(`${BAR}px`);
+      view?.rerender(ui({ lines: all, level: "error", filteredEmpty: NOTE }));
+      expect(scroller().style.getPropertyValue("--log-omitted-pad")).toBe("0px");
+      expect(noteEl()?.textContent).toBe(NOTE);
+      expect(noteEl()?.hasAttribute("data-glide")).toBe(false);
+    });
   });
 });
 

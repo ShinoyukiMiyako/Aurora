@@ -2,10 +2,12 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { act, type ReactNode } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { springAt } from "../lib/motion";
+import { springTrack } from "../lib/slide";
 import type { Tier } from "../shell/tier";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { keydown, render, type Rendered } from "../test/dom";
+import { keydown, render, stubResizeObserver, stubSpanAnimations, type Rendered, type ResizeObserverStub } from "../test/dom";
 import { Card, CardTitleButton, resolveResponsive, resolveRowSpan, resolveSpan, SPAN_MIN, type TierName } from "./Card";
 import { CardHeader } from "./CardHeader";
 import { IconButton } from "./IconButton";
@@ -217,6 +219,22 @@ describe("Card 样式", () => {
     expect(rule(".card:has(.titleButton)::after")).toMatchObject({ "box-shadow": "var(--sk-shadow)", opacity: "0" });
   });
 
+  it("外框跟随：底色、描边与阴影改画在铺满边框盒的外框层上，与卡片自己的画法同一套令牌；外框垫在内容下面、以上沿为原点缩放", () => {
+    expect(rule(".card[data-edge]")).toEqual({ isolation: "isolate", "border-color": "transparent", background: "transparent", "box-shadow": "none" });
+    expect(rule(".frame")).toMatchObject({
+      position: "absolute",
+      inset: "-1px",
+      "z-index": "-1",
+      border: rule(".card").border,
+      "border-radius": "inherit",
+      background: rule(".card").background,
+      "box-shadow": rule(".card")["box-shadow"],
+      "transform-origin": "top",
+      "pointer-events": "none",
+    });
+    expect(rule(".card").border).toBe("1px solid var(--sk-line)");
+  });
+
   it("按下：从悬停上浮落回原位、缩到 0.99、阴影叠层减半，这一程走 Tap", () => {
     for (const selector of [".card[data-interactive]:active", ".card:has(.titleButton:active)"]) {
       expect(rule(selector)).toMatchObject({ translate: "none", scale: "0.99" });
@@ -271,6 +289,144 @@ describe("Card 样式", () => {
     const button = card.querySelector("button") as HTMLButtonElement;
     expect(button.parentElement).not.toBe(card);
     expect(button.parentElement?.parentElement).toBe(card);
+  });
+});
+
+describe("Card 外框跟随（reflowEdge）", () => {
+  // jsdom 不做布局：外框的尺寸由这张表给出，尺寸观察由用例推送
+  const sizes = new Map<Element, { width: number; height: number }>();
+  let observer: ResizeObserverStub;
+  /** 排着的动画帧回调：nextFrame() 一帧一帧地走。 */
+  let frameQueue: FrameRequestCallback[] = [];
+  const nextFrame = () => {
+    const due = frameQueue;
+    frameQueue = [];
+    for (const callback of due) callback(performance.now());
+  };
+  const size = (el: Element) => {
+    const found = sizes.get(el);
+    if (found === undefined) throw new Error("测试元素没有登记尺寸");
+    return found;
+  };
+
+  beforeEach(() => {
+    frameQueue = [];
+    observer = stubResizeObserver();
+    vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function (this: HTMLElement) {
+      return size(this).width;
+    });
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+      return size(this).height;
+    });
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frameQueue.push(callback);
+      return frameQueue.length;
+    });
+  });
+
+  afterEach(() => {
+    sizes.clear();
+    document.documentElement.removeAttribute("data-sk-reduced");
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  /** 开了外框跟随的卡片与它的外框层；外框按 width x height 记下第一次尺寸（只记不动）。 */
+  function edgeCard(width: number, height: number) {
+    const card = mount(
+      <Card reflowEdge>
+        <p>启动</p>
+      </Card>,
+    );
+    const frame = card.firstElementChild as HTMLElement;
+    expect(frame.getAttribute("aria-hidden")).toBe("true");
+    resize(frame, width, height);
+    return { card, frame };
+  }
+  function resize(frame: HTMLElement, width: number, height: number) {
+    sizes.set(frame, { width, height });
+    observer.resize(frame, width);
+  }
+  /** 外框某一帧的纵向缩放。 */
+  const scaleY = (keyframe: Keyframe) => Number(String(keyframe.scale).split(" ")[1]);
+
+  it("卡片变矮（291 -> 251）：外框以上沿为原点从旧高度沿 settle 弹簧缩回，与被挤开的行同一条轨迹；从静止起步先停在起点，下一帧才播", () => {
+    const waapi = stubSpanAnimations();
+    const { card, frame } = edgeCard(600, 291);
+    expect(card.dataset.edge).toBe("true");
+    expect(waapi.played).toHaveLength(0);
+
+    resize(frame, 600, 251);
+    const shrink = waapi.running(frame, "scale");
+    expect(shrink.frames[0]).toEqual({ scale: "1 1.15936" });
+    expect(shrink.frames.at(-1)).toEqual({ scale: "1 1" });
+    // 第 k 帧（120 Hz 取样）下沿离新位置的距离就是让位里被挤开的行此刻的位移
+    for (const k of [6, 12, 24]) expect(scaleY(shrink.frames[k])).toBeCloseTo((251 + springAt("settle", 40, 0, k / 120).x) / 251, 4);
+    const row = springTrack("settle", 0, 0, 40, 0);
+    expect(shrink.frames).toHaveLength(row.frames.length);
+    expect(shrink.options.duration).toBe(row.duration);
+    expect(shrink.options.easing).toBe("linear");
+    expect(shrink.playState).toBe("paused");
+    nextFrame();
+    expect(shrink.playState).toBe("running");
+  });
+
+  it("卡片变高（251 -> 291）：外框从旧高度沿弹簧长到新高度", () => {
+    const waapi = stubSpanAnimations();
+    const { frame } = edgeCard(600, 251);
+    resize(frame, 600, 291);
+    const grow = waapi.running(frame, "scale");
+    expect(grow.frames[0]).toEqual({ scale: "1 0.86254" });
+    expect(grow.frames.at(-1)).toEqual({ scale: "1 1" });
+  });
+
+  it("途中又变：按弹簧算出此刻的下沿与速度，带着速度当场接着走，旧的那段取消", () => {
+    const waapi = stubSpanAnimations();
+    const { frame } = edgeCard(600, 291);
+    resize(frame, 600, 251);
+    const shrink = waapi.running(frame, "scale");
+    nextFrame();
+    shrink.currentTime = 50;
+    resize(frame, 600, 291);
+    expect(shrink.cancelled).toBe(true);
+    const back = waapi.running(frame, "scale");
+    const now = springAt("settle", 40, 0, 0.05);
+    expect(scaleY(back.frames[0])).toBeCloseTo((291 + now.x - 40) / 291, 4);
+    expect(scaleY(back.frames[6])).toBeCloseTo((291 + springAt("settle", now.x - 40, now.v, 6 / 120).x) / 291, 4);
+    // 在动的接着走，不再停一帧
+    expect(back.playState).toBe("running");
+  });
+
+  it("宽度变了（窗口缩放、换档）：一步到位，还在走的当场落定", () => {
+    const waapi = stubSpanAnimations();
+    const { frame } = edgeCard(600, 291);
+    resize(frame, 600, 251);
+    const shrink = waapi.running(frame, "scale");
+    resize(frame, 520, 291);
+    expect(shrink.cancelled).toBe(true);
+    expect(waapi.played).toHaveLength(1);
+  });
+
+  it("减少动画：一步到位", () => {
+    const waapi = stubSpanAnimations();
+    const { frame } = edgeCard(600, 291);
+    document.documentElement.setAttribute("data-sk-reduced", "");
+    resize(frame, 600, 251);
+    expect(waapi.played).toHaveLength(0);
+  });
+
+  it("不开时没有外框层，也不盯尺寸", () => {
+    const card = mount(<Card>正文</Card>);
+    expect(card.firstElementChild).toBeNull();
+    expect(card.hasAttribute("data-edge")).toBe(false);
+    expect(observer.observed()).toEqual([]);
+  });
+
+  it("与整卡可点、选中、裁切同用直接报错：悬停、选中外圈与裁切仍按卡片自己的边框画，跟不上外框", () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    expect(() => render(<Card reflowEdge onClick={() => undefined} ariaLabel="打开" />)).toThrow("reflowEdge");
+    expect(() => render(<Card reflowEdge selected />)).toThrow("reflowEdge");
+    expect(() => render(<Card reflowEdge clip />)).toThrow("reflowEdge");
   });
 });
 
