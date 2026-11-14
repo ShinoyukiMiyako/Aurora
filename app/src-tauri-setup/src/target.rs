@@ -245,7 +245,17 @@ pub fn write_fault(
             ),
         });
     }
-    probe_write(anchor).err().map(|err| refused(dir, &err))
+    // 目标目录已在时 NSIS 把文件直接写在这一层：建得了子目录、建不了文件的目录（C:\ 根的默认权限）也要查出来
+    probe_write(anchor)
+        .and_then(|()| {
+            if anchor == dir {
+                probe_file(anchor)
+            } else {
+                Ok(())
+            }
+        })
+        .err()
+        .map(|err| refused(dir, &err))
 }
 
 fn refused(dir: &Path, err: &io::Error) -> Failure {
@@ -911,6 +921,21 @@ mod tests {
         let prefix = format!("{} 写不进去：", dir.display());
         assert!(fault.detail.starts_with(&prefix), "{}", fault.detail);
         assert!(fault.detail.contains("os error 5"), "{}", fault.detail);
+    }
+
+    #[test]
+    fn an_existing_target_that_takes_folders_but_not_files_is_dir_unwritable() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("Petalfall");
+        fs::create_dir(&dir).unwrap();
+
+        let fault = with_denied(&dir, &["(WD)"], || write_fault(&dir, 1000, 0, roomy));
+
+        let fault = fault.unwrap();
+        assert_eq!(fault.code, FailureCode::DirUnwritable);
+        assert!(fault.detail.contains("os error 5"), "{}", fault.detail);
+        assert_eq!(entries(&dir), Vec::<String>::new());
+        temp.close().unwrap();
     }
 
     #[test]
