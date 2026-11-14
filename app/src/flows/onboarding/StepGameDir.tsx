@@ -11,6 +11,7 @@ import { samePath } from "../../domain/paths";
 import type { LoadingView } from "../../lib/loading-gate";
 import { useReflow } from "../../lib/reflow";
 import { useMounted } from "../../lib/useMounted";
+import { usePaintedOnce } from "../../lib/usePaintedOnce";
 import { useRunner } from "../../shell/useRunner";
 import { useDiscoveredGameDirectories, useGameDirectoryInspection } from "../../state/queries/catalog";
 import { Appear } from "../../ui/Appear";
@@ -103,7 +104,7 @@ interface ExtraRowProps {
   ref?: Ref<HTMLLIElement>;
   dir: NamedDirectory;
   picked: boolean;
-  /** 是否播入场：列表挂上时就在的行跟着整块出现，不单独入场。 */
+  /** 是否播入场：列表挂上时就在的行跟着整块出现，不单独入场。只认挂载那一刻的值。 */
   enter: boolean;
   onToggle(path: string, picked: boolean): void;
 }
@@ -112,8 +113,19 @@ interface ExtraRowProps {
 function ExtraRow({ ref, dir, picked, enter, onToggle }: ExtraRowProps) {
   const present = useIsPresent();
   const item = useInsertItem();
+  // 冻结挂载那一刻的值：列表挂上之后每次渲染给的 enter 都为真，挂载时就在的行不能因此退回起点
+  const [entering] = useState(enter);
+  // 接回来的行先停在起点，画出第一帧之后才淡入：改路径那次提交还连着别的块出没与让位，从提交就计时的话第一帧画出来时已走掉一截
+  const painted = usePaintedOnce("row", entering);
   return (
-    <motion.li ref={ref} className={s.extraRow} inert={!present} initial={enter ? item.initial : false} animate={item.animate} exit={item.exit}>
+    <motion.li
+      ref={ref}
+      className={s.extraRow}
+      inert={!present}
+      initial={entering ? item.initial : false}
+      animate={painted ? item.animate : item.initial}
+      exit={item.exit}
+    >
       <Checkbox
         checked={picked}
         onChange={(next) => onToggle(dir.path, next)}

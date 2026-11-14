@@ -8,7 +8,7 @@
 // animate 桩在 HTMLElement 上而不是 Element 上：framer 只认 Element 自己的 animate 来决定走不走 Web Animations，桩在这里不改变它的行为。
 import { MotionConfig } from "framer-motion";
 import { act } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { TaskRecordDto } from "../../ipc/tasks";
 import { springAt, type SpringName } from "../../lib/motion";
 import { springTrack } from "../../lib/slide";
@@ -78,8 +78,8 @@ const FRAME_ID_BASE = 1_000_000;
 let view: Rendered | undefined;
 let launcher: LauncherApi;
 let observers: ResizeObserverStub;
-/** 桩上的 animate 收到的每一次调用，连同交还的 Animation。 */
-let played: { el: HTMLElement; frames: Keyframe[]; animation: StubAnimation }[];
+/** 桩上的 animate 收到的每一次调用，连同交还的 Animation 与建在第几个动画帧回调里（不在回调里为 0）。 */
+let played: { el: HTMLElement; frames: Keyframe[]; animation: StubAnimation; callback: number }[];
 /** 每一次 play：哪个元素上的动画、在第几个动画帧回调里（不在回调里为 0）。 */
 let starts: { el: HTMLElement; callback: number }[];
 /** 接管之后排下、还没跑的动画帧回调，按排下的先后。 */
@@ -122,7 +122,7 @@ beforeEach(() => {
     configurable: true,
     writable: true,
     value: fakeAnimate<HTMLElement>((el, frames, _options, animation) => {
-      played.push({ el, frames, animation });
+      played.push({ el, frames, animation, callback: inCallback });
       const play = animation.play;
       animation.play = function (this: StubAnimation) {
         starts.push({ el, callback: inCallback });
@@ -372,7 +372,13 @@ describe("飞行与分组之间的让位同一帧起步：两层起点方向相�
     expect(started[1].callback).toBe(started[0].callback);
   });
 
-  it("分组上一段让位还在走时又换进一行：分组带着速度当场接着走，飞行也当场起步，不排到下一帧", async () => {
+  it("分组上一段让位还在走时又换进一行：分组的旧轨迹接着走、这次的位移先留着，飞行停在起点；新排布画出来之后的那个回调里分组换成整段、飞行开播", async () => {
+    // jsdom 没有 Web Animations：文档时间轴桩上一个，接着走的分组按它读走了多久、钉起步时刻
+    let timelineTime = 500 + Math.round(Math.random() * 1e5) / 10;
+    Object.defineProperty(document, "timeline", { configurable: true, get: () => ({ currentTime: timelineTime }) });
+    onTestFinished(() => {
+      Reflect.deleteProperty(document, "timeline");
+    });
     const runs = new Map<string, Deferred<unknown>>();
     ipc.overrides.set("install_java", (args) => {
       const run = deferred<unknown>();
@@ -416,28 +422,46 @@ describe("飞行与分组之间的让位同一帧起步：两层起点方向相�
     const elapsedMs = 50;
     lift.animation.currentTime = elapsedMs;
 
-    // 最后一个也取消：进行中组整块退场，已结束组再被带上去组标题加一行，带着此刻的速度当场接着走
+    // 最后一个也取消：进行中组整块退场，已结束组再被带上去组标题加一行
     act(() => runs.get(`${last}#1`)?.reject(cancelledError()));
     await flush();
+    // 新排布画出来的那一帧：先跑动画帧回调，再报尺寸观察。分组在这时让位（隔一帧），飞行随后量、建好
     stepFrame();
     observers.resize(groups, ROW_SIZE.width);
     const lifts = played.filter((p) => p.el === finished);
     expect(lifts).toHaveLength(2);
-    const relift = lifts[1];
+    const held = lifts[1];
     const spring = reflowSprings.get(groups);
     if (spring === undefined) throw new Error("分组容器没有挂让位");
     const now = springAt(spring, ROW_SIZE.height, 0, elapsedMs / 1000);
-    expect(relift.frames[0]).toEqual({ translate: `0px ${Math.round((now.x + GROUP_HEAD_HEIGHT + ROW_SIZE.height) * 100) / 100}px` });
+    const pushed = GROUP_HEAD_HEIGHT + ROW_SIZE.height;
+    expect(held.frames[0]).toEqual({ translate: `0px ${Math.round((now.x + pushed) * 100) / 100}px` });
+    // 新排布画出来之前只有旧轨迹接着走，这次带上去的位移原样留着
+    expect(held.frames.at(-1)).toEqual({ translate: `0px ${pushed}px` });
     expect(lift.animation.playState).toBe("idle");
+    expect([held.animation.playState, held.animation.startTime]).toEqual(["running", timelineTime]);
+    // 飞行停在起点，挂进分组这一趟的等待
     const [lastRow] = rowsOf(last).arriving;
     const lastFlight = onlyAnimation(lastRow);
     expect(lastFlight.frames[0]).toEqual({ translate: `${LEAVING_AT.left - ARRIVING_AT.left}px ${LEAVING_AT.top - ARRIVING_AT.top}px` });
-    // 两段都是建好就在播、没停在起点：起步时刻都在建好之后的那一帧定下
-    expect([relift.animation.playState, lastFlight.animation.playState]).toEqual(["running", "running"]);
+    expect([lastFlight.animation.playState, lastFlight.animation.currentTime]).toEqual(["paused", 0]);
+
+    const frameMs = 1000 / 60;
+    timelineTime += frameMs;
+    held.animation.currentTime = frameMs;
     const before = starts.length;
+    const ran = callbacksRun;
     stepFrame();
-    stepFrame();
-    expect(starts.slice(before).filter((s) => s.el === finished || s.el === lastRow)).toEqual([]);
-    expect([relift.animation.playState, lastFlight.animation.playState]).toEqual(["running", "running"]);
+    // 同一个回调：分组换成从这一刻的位置与速度起步的整段，飞行开播，两段钉同一个起步时刻（这一帧的时间）
+    const whole = played.filter((p) => p.el === finished)[2];
+    const at = springAt(spring, now.x, now.v, frameMs / 1000);
+    expect(whole.frames[0]).toEqual({ translate: `0px ${Math.round((at.x + pushed) * 100) / 100}px` });
+    expect(whole.frames.at(-1)).toEqual({ translate: "0px 0px" });
+    expect([whole.animation.startTime, lastFlight.animation.startTime]).toEqual([timelineTime, timelineTime]);
+    expect(held.animation.playState).toBe("idle");
+    expect(starts.slice(before).map((s) => s.el)).toEqual([lastRow]);
+    expect(starts[before].callback).toBeGreaterThan(ran);
+    expect(whole.callback).toBe(starts[before].callback);
+    expect(lastFlight.animation.playState).toBe("running");
   });
 });

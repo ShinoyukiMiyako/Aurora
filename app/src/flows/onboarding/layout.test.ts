@@ -19,6 +19,17 @@ describe("步骤条", () => {
     expect(declarations('.railItem[data-status="current"] .railDot::before')).toMatch(/opacity:\s*1/);
     expect(declarations('.railItem[data-status="current"] .railDot')).not.toMatch(/background/);
   });
+
+  it("「已跳过」的进出全由 popMark 驱动：样式表里不再挂只管入场的关键帧，否则入场叠两遍、退场仍是一帧没了", () => {
+    expect(declarations(".railSkipped")).not.toMatch(/animation/);
+    expect(css).not.toMatch(/@keyframes\s+railTagIn/);
+  });
+});
+
+describe("收尾", () => {
+  it("向导根裁切溢出：收尾时放大的是根里面的晕染与面板，溢出被根裁掉，外壳的滚动容器不因此出滚动条", () => {
+    expect(declarations(".root")).toMatch(/overflow:\s*hidden/);
+  });
 });
 
 describe("步骤内容区", () => {

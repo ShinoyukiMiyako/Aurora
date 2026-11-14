@@ -81,6 +81,13 @@ export const ambientFade = {
 } as const satisfies Record<string, Transition>;
 
 /**
+ * 一组键整组换成另一组时旧组的退场（更新面板底栏换阶段）。新旧两组的键不同宽、不同左缘，旧组照 fade.out 起手慢、
+ * 新组照 fade.in 起手快，两条曲线在 0.7 附近交叉，交接的三四帧里两组都还实着，叠成错位的两行字与两种底色。
+ * 旧组改走淡入那条起手快的曲线、80 ms，新组画出第一帧时它已所剩无几；新组照常等第一帧画出后按 fade.in 淡入，到位的时刻不变。
+ */
+export const groupSwapOut = { duration: 0.08, ease: fade.in.ease } as const satisfies Transition;
+
+/**
  * 补间在第 t 秒走到的进度（0 到 1，已过缓动曲线）。给不经 framer-motion、自己逐帧画的动画用
  * （花瓣画布里单片花瓣的淡入淡出），与弹簧的 springAt 相对。
  */

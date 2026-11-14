@@ -50,11 +50,6 @@
   min-height: var(--home-row-one);
 }
 
-/* 加载开始的前 300 ms：骨架占位但不可见，请求很快回来时界面不闪 */
-.pending {
-  visibility: hidden;
-}
-
 .grow {
   flex: 1;
 }

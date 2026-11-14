@@ -4,10 +4,10 @@ import { AnimatePresence, MotionConfig } from "framer-motion";
 import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
-import { AUTHLIB_COPY, LITTLESKIN_API, MICROSOFT_LOGIN_COPY, NO_ACCOUNT_COPY, OFFLINE_NAME_COPY, TOAST_COPY } from "../../copy/flows";
+import { ACTION_ERROR, AUTHLIB_COPY, LITTLESKIN_API, MICROSOFT_LOGIN_COPY, NO_ACCOUNT_COPY, OFFLINE_NAME_COPY, TOAST_COPY } from "../../copy/flows";
 import { validateOfflineName } from "../../domain/rules";
 import { COPY_FEEDBACK_MS, LOADING_DELAY_MS } from "../../domain/limits";
-import { DEVICE_CODE_EVENT } from "../../ipc/accounts";
+import { DEVICE_CODE_EVENT, type AccountDto } from "../../ipc/accounts";
 import { IpcError } from "../../ipc/errors";
 import { mockInvoke } from "../../ipc/mock";
 import { OverlayRoot } from "../../shell/overlay";
@@ -137,6 +137,8 @@ function typeInto(el: HTMLInputElement, value: string) {
   });
 }
 
+const pressEnter = (el: HTMLInputElement) => act(() => void el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+
 const inputs = () => [...(dialog()?.querySelectorAll<HTMLInputElement>("input") ?? [])].filter(live);
 /** 最里层换内容那一格里当前的内容（外置登录的当前这一步）。 */
 const stepPane = () => {
@@ -256,6 +258,118 @@ describe("离线账户弹窗", () => {
     typeInto(inputs()[0], "ALEX");
     expect(dialog()?.textContent).toContain(OFFLINE_NAME_COPY.duplicate);
     expect(button(OFFLINE_NAME_COPY.submit).disabled).toBe(true);
+  });
+
+  describe("提交之后", () => {
+    /** 后端的账户库：添加真的写进去，之后读列表能读到新账户；当前账户是库里的第一个。 */
+    let stored: AccountDto[];
+    beforeEach(() => {
+      stored = [accountDto({ name: "Alex" })];
+      ipc.overrides.set("list_accounts", () => stored);
+      ipc.overrides.set("current_account", () => (stored.length === 0 ? null : stored[0]));
+      ipc.overrides.set("create_offline_account", (args) => {
+        const created = accountDto({ uuid: "5627dd98e6be3c21b8a8e92344183641", name: String(args.name) });
+        stored = [...stored, created];
+        return created;
+      });
+    });
+
+    /** 用户名下方那一行：默认说明、「可以使用」与错误都写在这里。 */
+    const nameMessage = () => {
+      const el = inputs()[0].closest("[class*='_nameField_']")?.querySelector("[aria-live='polite']");
+      if (!(el instanceof HTMLElement)) throw new Error("找不到用户名下方的提示行");
+      return el;
+    };
+    /** 提示行此刻显示的那一条：提示与错误互换时换下去的一块带 inert 留在原处淡出，jsdom 里播不完会一直留着，只认在场的那一块。 */
+    const nameLine = () => nameMessage().querySelector(":scope > :not([inert])")?.textContent;
+
+    it("回车添加成功：退场途中用户名下方仍是「可以使用」，主按钮仍在转圈、没变禁用，再按回车不会再提交", async () => {
+      await mount({ presence: true });
+      await act(async () => {
+        await launcher.actions.openLogin("offline");
+      });
+      await flush();
+      typeInto(inputs()[0], "Steve");
+      pressEnter(inputs()[0]);
+      await flush();
+      // 新账户已读回、弹窗已关：它正在退场，jsdom 里退场播不完，一直挂在 DOM 上
+      expect(launcher.state.accounts.map((a) => a.name)).toEqual(["Alex", "Steve"]);
+      expect(launcher.state.login).toBeNull();
+      expect(nameLine()).toBe(OFFLINE_NAME_COPY.ok);
+      expect(nameMessage().hasAttribute("data-error")).toBe(false);
+      const submit = button(OFFLINE_NAME_COPY.submit);
+      expect(submit.getAttribute("aria-busy")).toBe("true");
+      expect(submit.disabled).toBe(false);
+
+      pressEnter(inputs()[0]);
+      await flush();
+      expect(callsOf(ipc, "create_offline_account")).toEqual([{ name: "Steve" }]);
+      expect(nameLine()).toBe(OFFLINE_NAME_COPY.ok);
+    });
+
+    it("由启动触发：加上账户后接着启动，启动还没回来与随后失败时，退场途中都不报同名、主按钮一直转圈", async () => {
+      stored = [];
+      const launching = deferred<never>();
+      ipc.overrides.set("launch_game", () => launching.promise);
+      await mount({ presence: true });
+      await act(async () => {
+        await launcher.actions.launch("生存");
+      });
+      await flush();
+      act(() => button(NO_ACCOUNT_COPY.addOffline).click());
+      await flush();
+      typeInto(inputs()[0], "Steve");
+      pressEnter(inputs()[0]);
+      await flush();
+      // 添加动作要等启动回来才落定：此刻弹窗已关、账户已在列表里，提交还没有结果
+      expect(launcher.state.login).toBeNull();
+      expect(launcher.state.accounts.map((a) => a.name)).toEqual(["Steve"]);
+      expect(callsOf(ipc, "launch_game")).toHaveLength(1);
+      expect(nameLine()).toBe(OFFLINE_NAME_COPY.ok);
+      expect(button(OFFLINE_NAME_COPY.submit).getAttribute("aria-busy")).toBe("true");
+
+      // 账户加上之后的启动失败：添加动作以失败告终，但弹窗已在退场，不回到可以再填的样子
+      await act(async () => {
+        launching.reject(new Error("启动器进程意外退出"));
+        await settle();
+      });
+      expect(nameLine()).toBe(OFFLINE_NAME_COPY.ok);
+      expect(nameMessage().hasAttribute("data-error")).toBe(false);
+      const submit = button(OFFLINE_NAME_COPY.submit);
+      expect(submit.getAttribute("aria-busy")).toBe("true");
+      expect(submit.disabled).toBe(false);
+    });
+
+    it("添加失败而弹窗还开着：回到可以再提交的样子，改好后再试一次", async () => {
+      ipc.overrides.set("create_offline_account", () => {
+        throw new IpcError("io", "账户库写不进去");
+      });
+      await mount({ presence: true });
+      await act(async () => {
+        await launcher.actions.openLogin("offline");
+      });
+      await flush();
+      typeInto(inputs()[0], "Steve");
+      pressEnter(inputs()[0]);
+      await flush();
+      expect(launcher.state.login).toEqual({ kind: "offline", intent: MANUAL_LOGIN });
+      const submit = button(OFFLINE_NAME_COPY.submit);
+      expect(submit.hasAttribute("aria-busy")).toBe(false);
+      expect(submit.disabled).toBe(false);
+      expect(nameLine()).toBe(OFFLINE_NAME_COPY.ok);
+
+      // 改名之后照实时的账户列表查重：撞上已有的仍然报同名
+      typeInto(inputs()[0], "alex");
+      expect(nameLine()).toBe(OFFLINE_NAME_COPY.duplicate);
+      expect(button(OFFLINE_NAME_COPY.submit).disabled).toBe(true);
+
+      ipc.overrides.set("create_offline_account", (args) => accountDto({ uuid: "5627dd98e6be3c21b8a8e92344183641", name: String(args.name) }));
+      typeInto(inputs()[0], "Steve");
+      pressEnter(inputs()[0]);
+      await flush();
+      expect(callsOf(ipc, "create_offline_account")).toEqual([{ name: "Steve" }, { name: "Steve" }]);
+      expect(launcher.state.login).toBeNull();
+    });
   });
 
   describe("预览立绘", () => {
@@ -616,7 +730,7 @@ describe("外置登录弹窗", () => {
     await bridge.invoke("is_first_run");
   });
 
-  async function openAuthlib(options: { reduced?: boolean } = {}) {
+  async function openAuthlib(options: { reduced?: boolean; presence?: boolean } = {}) {
     await mount(options);
     await act(async () => {
       await launcher.actions.openLogin("authlib");
@@ -788,7 +902,8 @@ describe("外置登录弹窗", () => {
     act(() => button(AUTHLIB_COPY.preset).click());
     expect(inputs()[0].value).toBe(LITTLESKIN_API);
     expect(liveText()).not.toContain(AUTHLIB_COPY.notYggdrasil.title);
-    expect(dialog()?.querySelector("[inert]")?.textContent).toContain(AUTHLIB_COPY.notYggdrasil.title);
+    // 地址框下「将使用 …」的提示也随之原地淡出、同样带 inert：只看退场中的说明块
+    expect(dialog()?.querySelector("[inert] [role='alert']")?.textContent).toContain(AUTHLIB_COPY.notYggdrasil.title);
 
     ipc.overrides.set("probe_auth_server", serviceDown("读取验证服务器信息"));
     act(() => button(AUTHLIB_COPY.next).click());
@@ -992,6 +1107,93 @@ describe("外置登录弹窗", () => {
     picking.resolve();
     await flush();
     expect(launcher.state.login).toBeNull();
+  });
+
+  // 弹窗关上后退场的面板画的是关上那一刻交上去的外框与主体（AnimatePresence 留着移除时的元素）：按钮的转圈、
+  // 回车与点击的处理函数都停在提交在途的那一刻，结果回来后弹窗自己再改状态也到不了退场中的面板上
+  describe("提交之后", () => {
+    /** 照外壳那样挂、停在登录这一步并填好账号与密码。 */
+    async function atLogin(username: string, password: string) {
+      await openAuthlib({ presence: true });
+      typeInto(inputs()[0], "skin.example.com");
+      act(() => button(AUTHLIB_COPY.next).click());
+      await flush();
+      typeInto(inputs()[0], username);
+      typeInto(inputs()[1], password);
+    }
+    const toastTitles = (tone: "success" | "error") => launcher.state.toasts.filter((t) => t.tone === tone).map((t) => t.title);
+
+    it("回车登录成功：退场途中主按钮仍在转圈、没变禁用，再按回车或点它都不会再登录一次", async () => {
+      await atLogin("steve@example.com", "secret");
+      pressEnter(inputs()[1]);
+      await flush();
+      // 状态容器已关掉弹窗：它正在退场，jsdom 里退场播不完，一直挂在 DOM 上
+      expect(launcher.state.login).toBeNull();
+      expect(toastTitles("success")).toEqual([TOAST_COPY.authlibAdded("steve", "skin.example.com").title]);
+      const submit = button(AUTHLIB_COPY.login);
+      expect(submit.getAttribute("aria-busy")).toBe("true");
+      expect(submit.disabled).toBe(false);
+      expect(button(AUTHLIB_DIALOG_COPY.back).disabled).toBe(true);
+
+      pressEnter(inputs()[1]);
+      act(() => submit.click());
+      await flush();
+      expect(callsOf(ipc, "authlib_login")).toHaveLength(1);
+      expect(toastTitles("success")).toHaveLength(1);
+      expect(submit.getAttribute("aria-busy")).toBe("true");
+    });
+
+    it("选定角色成功：退场途中「使用这个角色」仍在转圈，再按它不会拿用掉的那次登录再选一次", async () => {
+      await atLogin("multi@example.com", "secret");
+      pressEnter(inputs()[1]);
+      await flush();
+      act(() => button(AUTHLIB_COPY.pickProfile).click());
+      await flush();
+      expect(launcher.state.login).toBeNull();
+      expect(toastTitles("success")).toEqual([TOAST_COPY.authlibAdded("multi_main", "skin.example.com").title]);
+      const pick = button(AUTHLIB_COPY.pickProfile);
+      expect(pick.getAttribute("aria-busy")).toBe("true");
+      expect(button(AUTHLIB_DIALOG_COPY.back).disabled).toBe(true);
+
+      // 焦点还在这个按钮上：键盘的回车与空格落到它身上就是一次 click
+      act(() => pick.click());
+      await flush();
+      expect(callsOf(ipc, "select_authlib_profile")).toHaveLength(1);
+      expect(toastTitles("error")).toEqual([]);
+      expect(pick.getAttribute("aria-busy")).toBe("true");
+    });
+
+    it("登录被拒、选定失败而弹窗还开着：回到可以再提交的样子，改好后再试一次", async () => {
+      await atLogin("multi@example.com", "wrong");
+      pressEnter(inputs()[1]);
+      await flush();
+      expect(launcher.state.login).not.toBeNull();
+      expect(liveText()).toContain(AUTHLIB_COPY.badCredentials);
+      expect(button(AUTHLIB_COPY.login).hasAttribute("aria-busy")).toBe(false);
+      expect(button(AUTHLIB_DIALOG_COPY.back).disabled).toBe(false);
+
+      typeInto(inputs()[1], "secret");
+      pressEnter(inputs()[1]);
+      await flush();
+      expect(callsOf(ipc, "authlib_login")).toHaveLength(2);
+
+      ipc.overrides.set("select_authlib_profile", () => {
+        throw new IpcError("io", "账户库写不进去");
+      });
+      act(() => button(AUTHLIB_COPY.pickProfile).click());
+      await flush();
+      expect(launcher.state.login).not.toBeNull();
+      expect(toastTitles("error")).toEqual([ACTION_ERROR.authlib]);
+      const pick = button(AUTHLIB_COPY.pickProfile);
+      expect(pick.hasAttribute("aria-busy")).toBe(false);
+      expect(button(AUTHLIB_DIALOG_COPY.back).disabled).toBe(false);
+
+      ipc.overrides.delete("select_authlib_profile");
+      act(() => pick.click());
+      await flush();
+      expect(callsOf(ipc, "select_authlib_profile")).toHaveLength(2);
+      expect(launcher.state.login).toBeNull();
+    });
   });
 });
 

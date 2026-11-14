@@ -2,7 +2,7 @@
 // Loadable 里要等退场播完的用例（内容退回加载、骨架的退场）。整个文件走真实计时器：退场要等 framer-motion 的帧循环把动画播完，
 // 假定时器下它请求的帧不会到，帧循环停住之后同一文件里后面的用例也推不动它。
 import { act } from "react";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { LoadingView } from "../lib/loading-gate";
 import { render, waitForFrames, type Rendered } from "../test/dom";
 import { Loadable } from "./Loadable";
@@ -118,6 +118,29 @@ it("骨架显出来过、调用方直接把它退回等待期：淡到 0 之后�
   expect(find("[data-skeleton]")?.parentElement).toBe(layer);
   view.rerender(tree("content"));
   expect(find("[data-skeleton]")).toBeNull();
+});
+
+it("骨架显出来过、内容到达：骨架淡出播完撤下的前后，内容函数只求值一次，内容子树不重渲染", async () => {
+  let renders = 0;
+  function Content() {
+    renders++;
+    return <p data-content="">内容</p>;
+  }
+  const children = vi.fn(() => <Content />);
+  const at = (state: LoadingView) => (
+    <Loadable view={state} skeleton={<span data-skeleton="" />}>
+      {children}
+    </Loadable>
+  );
+  view = render(at("skeleton"));
+  view.rerender(at("content"));
+  expect(children).toHaveBeenCalledTimes(1);
+  expect(renders).toBe(1);
+  // 骨架撤下与退场播完的回调在同一次更新里提交：DOM 里没有骨架时，回调引起的重渲染也已经提交
+  await waitForFrames(() => expect(find("[data-skeleton]")).toBeNull());
+  expect(find("[data-content]")?.textContent).toBe("内容");
+  expect(children).toHaveBeenCalledTimes(1);
+  expect(renders).toBe(1);
 });
 
 it("重新加载再回来：旧内容淡完移除之后，新的内容层从透明淡入", async () => {

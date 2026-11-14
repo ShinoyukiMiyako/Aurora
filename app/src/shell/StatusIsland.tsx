@@ -23,6 +23,7 @@ import { fade, faceSwap, lineSwap, lineSwapFade, popMark, shake, springs } from 
 import { useReflow } from "../lib/reflow";
 import { useCompletionHold, useDisplaySpeed, useFinishing, type FinishedItem } from "../lib/progress-display";
 import { playTween } from "../lib/slide";
+import { usePaintedOnce } from "../lib/usePaintedOnce";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { findInstance } from "../state/selectors";
 import { DOWNLOAD_STAGE, isLoadingPhase, type SessionState } from "../state/session";
@@ -169,6 +170,13 @@ const shakeVariants: Variants = {
 /** 减少动画时的退场：位移与缩放在那时瞬时到位，留在退场里会先瞬缩、瞬移一下再淡出，所以只留透明度。 */
 const FADE_OUT = { opacity: 0, transition: fade.out };
 
+/**
+ * 岛的入场起点，也是画出第一帧之前停着的目标：两处是同一个对象，挂载时 framer-motion 不建一段原地不动的动画。
+ * 减少动画时缩放一步到位，停着时透明度为 0，跳的那一下看不见，不另备一份。
+ */
+const ISLAND_FROM = { opacity: 0, scale: 0.92 } as const;
+const ISLAND_SHOW = { opacity: 1, scale: 1, transition: { ...springs.base, opacity: fade.in } } as const;
+
 function Island({ session }: { session: SessionState }) {
   const actions = useLauncherActions();
   const instance = useLauncherSelector((s) => findInstance(s, session.instanceId));
@@ -178,6 +186,9 @@ function Island({ session }: { session: SessionState }) {
   const now = useRunningNow(session.phase === "running");
   const present = useIsPresent();
   const reduced = useReducedMotionConfig() === true;
+  // 入场等挂载后的第一帧画出来才起步：点击启动那次提交之后同一个任务里还有几十毫秒的工作，入场从提交就计时的话，
+  // 第一帧画出来时淡入已走掉大半。键与 hold 都不变，一座岛只入场一次：换阶段、换一局都不重播
+  const painted = usePaintedOnce("island", true);
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
   // 「正在结束」是纯界面态：确认结束或点了取消、IPC 还没返回的这段时间；超时由动作本身以错误结束
@@ -250,8 +261,8 @@ function Island({ session }: { session: SessionState }) {
           aria-expanded={open}
           aria-haspopup="dialog"
           style={{ borderRadius: ISLAND_RADIUS }}
-          initial={{ opacity: 0, scale: 0.92 }}
-          animate={{ opacity: 1, scale: 1, transition: { ...springs.base, opacity: fade.in } }}
+          initial={ISLAND_FROM}
+          animate={painted ? ISLAND_SHOW : ISLAND_FROM}
           exit={reduced ? FADE_OUT : { opacity: 0, scale: 0.96, transition: fade.out }}
           transition={{ layout: springs.morph }}
           onClick={() => setOpen((v) => !v)}

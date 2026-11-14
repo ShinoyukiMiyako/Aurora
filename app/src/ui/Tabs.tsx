@@ -248,7 +248,8 @@ export interface TabPanelProps {
  * 面板是一块内容，只动一次：里面的卡片、横幅不再认领页面入场序号（否则面板淡入的同时它们按序号再等一拍、
  * 再上移一次，内容分两段出现）。面板放在页面一级位置时，进页那一次由面板自己按序号随页面入场；
  * 嵌套在首帧里的一级区块之内时，进页那一次跟着那个区块走，自己不动；之后换标签只走面板的切换动画。
- * 面板自己播的入场（换标签、不归页面管的第一次挂载）先停在 hidden，画出第一帧之后才切到 show（usePaintedOnce）。
+ * 不归页面管的第一次挂载先停在 hidden，画出第一帧之后才切到 show（usePaintedOnce）：那时没有旧内容被撤掉，多等一帧不露空白。
+ * 换标签不等：旧面板按 key 在同一次提交里撤掉、不留退场，新面板再停一帧 hidden，这一帧内容区就是空的。
  */
 export function TabPanel({ tabsId, value, motion: kind = "page", from, initial: firstEntrance = kind === "page", className, children }: TabPanelProps) {
   const entrance = usePageEntrance();
@@ -262,8 +263,9 @@ export function TabPanel({ tabsId, value, motion: kind = "page", from, initial: 
   // 不归页面管却赶上了首帧：嵌在首帧里的区块之内，外层整块已在随页面入场（或直接是成品），面板跟着它走
   const withBlock = !switched && entrance === null && firstFrame;
   const still = withPage ? entrance === "still" : !switched && (withBlock || !firstEntrance);
-  // 页面错开入场的那一次与兄弟区块同一个时钟起步，不单独等
-  const painted = usePaintedOnce(value, !withPage && !still);
+  // 页面错开入场的那一次与兄弟区块同一个时钟起步，不单独等；换标签也不等（见上）。
+  // switched 只在 value 换掉的那次渲染里由假变真，hold 只会随换 key 由真变假，不违反 usePaintedOnce 的约定
+  const painted = usePaintedOnce(value, !switched && !withPage && !still);
   return (
     <motion.div
       key={value}

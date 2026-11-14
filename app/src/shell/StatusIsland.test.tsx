@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
-import { MotionConfig } from "framer-motion";
+import { MotionConfig, visualElementStore } from "framer-motion";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { act, Profiler } from "react";
@@ -16,7 +16,7 @@ import { feedSpeed, publishSpeed, SPEED_REFRESH_MS, startSpeed } from "../lib/pr
 import { springTrack } from "../lib/slide";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { startSession, type SessionState } from "../state/session";
-import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
+import { render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { emulateFocusFixup } from "../test/focus-fixup";
 import { bootOverrides, callsOf, cancelledError, deferred, emit, instanceDto, resetRecorder, settle } from "../test/launcher";
@@ -1257,6 +1257,15 @@ describe("状态岛按片订阅", () => {
     return island;
   }
 
+  /**
+   * 岛的入场等画出第一帧之后才放行，放行时岛重渲染一次：数提交之前先逐帧推过这一下，数到的才只是用例要数的那些变化。
+   * 核对的是入场目标已经换上，不看透明度：同文件前面的用例换计时器时没有排空帧循环，到这里 framer-motion 的帧可能已经不走了
+   */
+  async function pastEntrance() {
+    await stepFrames(3);
+    expect(visualElementStore.get(islandButton())?.getProps().animate).toMatchObject({ opacity: 1, scale: 1 });
+  }
+
   async function running() {
     ipc.overrides.set("launch_game", () => ({ pid: 4242 }));
     mount();
@@ -1334,6 +1343,7 @@ describe("状态岛按片订阅", () => {
     act(() => void launcher.actions.launch("生存"));
     await flush();
     expect(launcher.state.session?.phase).toBe("preparing");
+    await pastEntrance();
     commits = 0;
     // 每秒单独一次 act：一次 act 里的更新会合并成一次提交，数不出每秒一次的重渲染
     for (let i = 0; i < 5; i++) {
@@ -1367,6 +1377,7 @@ describe("状态岛按片订阅", () => {
     await flush();
     const session = launcher.state.session;
     if (session === null) throw new Error("启动后应有会话");
+    await pastEntrance();
     const download = (finished: number, speed: number) =>
       act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 4, download: { finished, total: 10, bytes: 0, total_bytes: null, speed } }));
     download(2, 1024);

@@ -11,8 +11,9 @@ import { useRef, useState, type ReactNode, type Ref } from "react";
 import { Icon } from "../../art/Icon";
 import { BlossomBranch } from "../../art/illustrations/BlossomBranch";
 import { useLoadingGate } from "../../lib/loading-gate";
-import { fade, stepPane, stepPaneFade } from "../../lib/motion";
+import { fade, popMark, stepPane, stepPaneFade } from "../../lib/motion";
 import { useMounted } from "../../lib/useMounted";
+import { usePaintedOnce } from "../../lib/usePaintedOnce";
 import { cx } from "../../lib/util";
 import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
@@ -59,9 +60,13 @@ const BRANCH_HEIGHT = 200;
 /**
  * 收尾时整体淡出并轻微放大。退场一律走 fade.out，缩放也跟着它在 120ms 内走完：外壳要等这段退场播完才挂主界面，
  * 缩放若走弹簧，透明度早已到 0 还要再等弹簧静止，窗口只剩底色与标题条。减少动画时只淡出：缩放在那里是一步到位的。
+ *
+ * 淡出在根上，放大在根里面的晕染与面板上：根在外壳的滚动容器里撑满一格，放大根会把容器的可滚动区撑大、冒出滚动条，
+ * 根随之变窄变矮，面板在退场途中一帧左移、上移半个滚动条宽。根自己裁切溢出，里面放大出去的部分不外溢。
+ * 晕染铺满根、面板在根里居中，两者各按自身中心放大，合起来与整体放大一样。
  */
-const FINISH_EXIT = { opacity: 0, scale: 1.02, transition: fade.out } as const;
-const FINISH_EXIT_REDUCED = { opacity: 0, transition: fade.out } as const;
+const FINISH_FADE = { opacity: 0, transition: fade.out } as const;
+const FINISH_GROW = { scale: 1.02, transition: fade.out } as const;
 
 type FinishVia = "start_now" | "skip" | "finish";
 
@@ -92,7 +97,7 @@ interface StepPaneProps {
   /** popLayout 往直接子项上挂 ref 来量尺寸、把退场的那一步抽出布局：React 19 下它是普通 prop，要自己接住挂到根元素上。 */
   ref?: Ref<HTMLDivElement>;
   direction: 1 | -1;
-  /** 是否播入场：向导挂上时就在的那一步不播。 */
+  /** 是否播入场：向导挂上时就在的那一步不播。只认挂载那一刻的值。 */
   enter: boolean;
   children: ReactNode;
 }
@@ -101,14 +106,19 @@ interface StepPaneProps {
 function StepPane({ ref, direction, enter, children }: StepPaneProps) {
   const present = useIsPresent();
   const reduced = useReducedMotionConfig() === true;
+  // 冻结挂载那一刻的值：向导挂上之后每次渲染给的 enter 都为真，挂载时就在的那一步不能因此退回起点
+  const [entering] = useState(enter);
+  // 换上来的一步先停在起点，画出第一帧之后才起步：换步那次提交要挂上整片新内容，从提交就计时的话第一帧画出来时已走掉一截。
+  // 旧的一步这时正在退场，多等这一帧不会露出空白
+  const painted = usePaintedOnce("pane", entering);
   return (
     <motion.div
       ref={ref}
       className={s.pane}
       custom={direction}
       variants={reduced ? stepPaneFade : stepPane}
-      initial={enter ? "enter" : false}
-      animate="center"
+      initial={entering ? "enter" : false}
+      animate={painted ? "center" : "enter"}
       exit="exit"
       data-step-pane=""
       aria-hidden={present ? undefined : true}
@@ -116,6 +126,22 @@ function StepPane({ ref, direction, enter, children }: StepPaneProps) {
     >
       {children}
     </motion.div>
+  );
+}
+
+/**
+ * 步骤条行尾的「已跳过」：跳过那一步时弹出，回到那一步时原地淡出。它在行尾，进出都不挤别的内容，退场不必抽出布局。
+ * 按钮里只能放行内元素，所以不用 ui/Appear（它每项外面包一层 div），自己挂 popMark。
+ */
+function SkippedTag() {
+  const reduced = useReducedMotionConfig() === true;
+  const mark = reduced ? popMark.reduced : popMark.tag;
+  // 跳过与换步落在同一次提交里，那一帧要挂上整片新的一步：先停在起点，画出第一帧之后才弹出，开头一截不在提交里耗掉
+  const painted = usePaintedOnce("tag", true);
+  return (
+    <motion.span className={s.railSkipped} initial={mark.initial} animate={painted ? mark.animate : mark.initial} exit={mark.exit}>
+      {FOOTER_COPY.skippedTag}
+    </motion.span>
   );
 }
 
@@ -139,7 +165,7 @@ function StepRail({ wizard, onJump }: { wizard: WizardState; onJump: (index: num
                 <GlyphSlot glyph={status === "done" ? "check" : "index"}>{status === "done" ? <Icon name="check" size={14} /> : i + 1}</GlyphSlot>
               </span>
               <span className={s.railName}>{STEP_COPY[id].name}</span>
-              {status === "skipped" && <span className={s.railSkipped}>{FOOTER_COPY.skippedTag}</span>}
+              <AnimatePresence>{status === "skipped" && <SkippedTag key="skipped" />}</AnimatePresence>
             </button>
           </li>
         );
@@ -315,9 +341,9 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
   const primaryLoading = last ? finishing === "finish" : committing;
 
   return (
-    <motion.div className={s.root} exit={reduced ? FINISH_EXIT_REDUCED : FINISH_EXIT}>
-      <span className={s.ambience} aria-hidden="true" />
-      <div className={s.panel} role="group" aria-label={WIZARD_LABEL}>
+    <motion.div className={s.root} exit={FINISH_FADE}>
+      <motion.span className={s.ambience} aria-hidden="true" exit={reduced ? undefined : FINISH_GROW} />
+      <motion.div className={s.panel} role="group" aria-label={WIZARD_LABEL} exit={reduced ? undefined : FINISH_GROW}>
         <aside className={s.side}>
           <BlossomBranch width={SIDE_WIDTH[tier]} height={BRANCH_HEIGHT} />
           <StepRail wizard={wizard} onJump={(index) => void jump(index)} />
@@ -394,7 +420,7 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
             </div>
           </footer>
         </section>
-      </div>
+      </motion.div>
     </motion.div>
   );
 }

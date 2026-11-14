@@ -11,7 +11,7 @@
 
 import { createContext, useCallback, useContext, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { springAt } from "../lib/motion";
-import { HOLD_AFTER_RESIZE, holdUntilPainted } from "../lib/reflow";
+import { HOLD_AFTER_RESIZE, holdUntilPainted, playContinuing, startWhenPainted } from "../lib/reflow";
 import { elapsedSeconds, playTrack, springTrack } from "../lib/slide";
 import { cssVars, cx } from "../lib/util";
 import styles from "./Card.module.css";
@@ -89,11 +89,12 @@ export interface CardProps {
 const TitleButtonRegistry = createContext<(() => () => void) | null>(null);
 
 /**
- * 下沿离新位置 d（向下为正）、速度 v，沿 settle 弹簧回到新位置的整条轨迹，写成高 height 的外框以上沿为原点的纵向缩放。
+ * 下沿离新位置 rest + d（向下为正）、速度 v，弹簧那部分 d 沿 settle 弹簧回到 0 的整条轨迹，写成高 height 的外框以上沿为原点的纵向缩放。
+ * rest 只在途中又变、等新排布画出来的那一截不为 0：这次的高度差原样留着，旧轨迹接着走（见 observeEdge）。
  * 直接拿 lib/slide 的 springTrack 出的纵向位移换算：被挤开的行也由它出关键帧，取样、停稳与时长都是同一份，下沿与行逐帧落在同一条曲线上。
  */
-function edgeTrack(height: number, d: number, v: number): ReturnType<typeof springTrack> {
-  const track = springTrack("settle", 0, 0, d, v);
+function edgeTrack(height: number, d: number, v: number, rest = 0): ReturnType<typeof springTrack> {
+  const track = springTrack("settle", 0, 0, d, v, 0, rest);
   const frames = track.frames.map((keyframe) => {
     const match = /^0px (-?\d+(?:\.\d+)?)px$/.exec(String(keyframe.translate));
     if (match === null) throw new Error(`springTrack 的关键帧应当只有纵向位移，收到 ${String(keyframe.translate)}`);
@@ -127,7 +128,9 @@ function frameRadius(view: Window, frame: HTMLElement): number {
 /**
  * 盯着外框层自己的尺寸（它铺满卡片的边框盒）：高度变了就补一段从旧高度回到新高度的缩放，四角的圆角同步反向校正，返回停止函数。
  * 起步的时机与 lib/reflow 的尺寸让位一致：都在尺寸观察里起步，从静止起步的先停在起点、挂进让位的等待队列（holdUntilPainted），
- * 下一帧与卡内的让位在同一个回调里开播；途中再变的带着速度当场接着走。两边同一帧开始计时，下沿与被挤开的行才对得齐。
+ * 下一帧与卡内的让位在同一个回调里开播；途中再变的与卡内接着走的行同一个做法：旧轨迹接着走（起步时刻钉在文档时间轴此刻），
+ * 这次的高度差原样留着，下一帧在同一个回调里换成整段（startWhenPainted）。
+ * 两边的新位移同一刻开始计时，下沿与被挤开的行才对得齐。
  * 宽度变了（窗口缩放、换档引起的重排）与减少动画时一步到位，还在走的当场落定。
  * 测量只在尺寸观察报了变化时做，读的是已排好的布局。运行环境没有 ResizeObserver 或 Web Animations（组件测试的 jsdom）时什么也不做。
  */
@@ -136,11 +139,28 @@ function observeEdge(frame: HTMLElement): () => void {
   if (view === null || typeof ResizeObserver === "undefined" || typeof frame.animate !== "function") return () => {};
   let width: number | null = null;
   let height = 0;
-  // 缩放与圆角两段同起同停：第一段是缩放，接续时按它读走了多久
-  let flight: { animations: Animation[]; d: number; v: number } | null = null;
+  // 缩放与圆角两段同起同停：第一段是缩放，接续时按它读走了多久。下沿离新位置 rest 加上弹簧从 (d, v) 起走的位移，见 edgeTrack
+  type EdgeFlight = { animations: Animation[]; d: number; v: number; rest: number };
+  let flight: EdgeFlight | null = null;
   const land = () => {
     flight?.animations.forEach((animation) => animation.cancel());
     flight = null;
+  };
+  // 弹簧那部分此刻的位移与速度（不含 rest）。还没开始计时的就是起步时记下的值：欠阻尼弹簧在 t=0 算出的速度带舍入误差
+  const stateOf = (of: EdgeFlight) => {
+    const t = elapsedSeconds(of.animations[0]);
+    return t === 0 ? { x: of.d, v: of.v } : springAt("settle", of.d, of.v, t);
+  };
+  /** 播一条下沿轨迹：缩放一段，外框有圆角时再配一段反向校正的圆角，两段同一种播法。 */
+  const playEdge = (scale: ReturnType<typeof springTrack>, radius: number, play: (track: ReturnType<typeof springTrack>) => Animation) =>
+    radius === 0 ? [play(scale)] : [play(scale), play(cornerTrack(scale, radius))];
+  /** 登记成此刻在走的一段；settled 的播完就清掉，留着高度差的那一截不清（它停在末帧等着换）。 */
+  const register = (current: EdgeFlight, settled: boolean) => {
+    flight = current;
+    if (!settled) return;
+    current.animations[0].onfinish = () => {
+      if (flight === current) flight = null;
+    };
   };
   const sizes = new ResizeObserver(() => {
     const nextWidth = frame.offsetWidth;
@@ -155,27 +175,46 @@ function observeEdge(frame: HTMLElement): () => void {
     }
     // 高度按整像素读（与 lib/reflow 读 offsetTop 同一口径）：不到一像素的变化不跟
     if (grown === 0) return;
-    // 此刻画出来的下沿离旧布局的下沿多远、往哪走。还没开始计时的就是起步时记下的值：欠阻尼弹簧在 t=0 算出的速度带舍入误差
-    let now = { x: 0, v: 0 };
-    if (flight !== null) {
-      const t = elapsedSeconds(flight.animations[0]);
-      now = t === 0 ? { x: flight.d, v: flight.v } : springAt("settle", flight.d, flight.v, t);
-    }
-    const d = now.x - grown;
+    // 此刻画出来的下沿离旧布局的下沿多远、往哪走
+    const now = flight === null ? { x: 0, v: 0 } : stateOf(flight);
+    const rest = flight === null ? 0 : flight.rest;
+    // 那一段已在播就按在动的接着走，刚开播、速度还是 0 也一样：卡内跟着它一起开播的行已在走，它并进新的一段重新等就错开两帧
+    const moving = flight !== null && (flight.animations[0].playState !== "paused" || now.v !== 0);
     land();
-    const scale = edgeTrack(nextHeight, d, now.v);
     const radius = frameRadius(view, frame);
-    const animations = radius === 0 ? [playTrack(frame, scale)] : [playTrack(frame, scale), playTrack(frame, cornerTrack(scale, radius))];
-    const current = { animations, d, v: now.v };
-    flight = current;
-    animations[0].onfinish = () => {
-      if (flight === current) flight = null;
-    };
-    if (now.v !== 0) return;
-    // 新排布要等这一帧画完才上屏：先停在起点（首帧当场生效），挂进让位的等待队列，与卡内从静止起步的行在同一个动画帧回调里开播。
-    // 这里只由尺寸观察触发，等 HOLD_AFTER_RESIZE 帧。卡内的让位由增删引起时等两帧，但它在提交后的微任务里就挂上了，
-    // 比外框的尺寸观察早一帧，两边落在同一帧；外框跟着等两帧反而晚一帧。被顶替、落定时两段已当场取消，队列不再播
-    for (const animation of animations) holdUntilPainted(animation, view, HOLD_AFTER_RESIZE);
+    if (!moving) {
+      const d = rest + now.x - grown;
+      const animations = playEdge(edgeTrack(nextHeight, d, 0), radius, (scale) => playTrack(frame, scale));
+      register({ animations, d, v: 0, rest: 0 }, true);
+      // 新排布要等这一帧画完才上屏：先停在起点（首帧当场生效），挂进让位的等待队列，与卡内从静止起步的行在同一个动画帧回调里开播。
+      // 这里只由尺寸观察触发，等 HOLD_AFTER_RESIZE 帧。卡内的让位由增删引起时等两帧，但它在提交后的微任务里就挂上了，
+      // 比外框的尺寸观察早一帧，两边落在同一帧；外框跟着等两帧反而晚一帧。被顶替、落定时两段已当场取消，队列不再播
+      for (const animation of animations) holdUntilPainted(animation, view, HOLD_AFTER_RESIZE);
+      return;
+    }
+    // 途中再变：旧轨迹不停（新建的动画要到下一帧才定起步时刻，不钉的话外框在那一帧停住，卡内的行还在走），起步时刻钉在
+    // 文档时间轴此刻，上面读走了多久就是按它读的。这次的高度差原样留着，下一帧与卡内从静止起步的行在同一个回调里
+    // 换成从那一刻的下沿与速度起步的整段：早一帧起步，下沿就比被挤开的行先走一截
+    const held: EdgeFlight = { animations: playEdge(edgeTrack(nextHeight, now.x, now.v, rest - grown), radius, (scale) => playContinuing(frame, scale)), d: now.x, v: now.v, rest: rest - grown };
+    register(held, false);
+    startWhenPainted(
+      (pinned) => {
+        // 等着的时候又变了、宽度变了或减少动画打开了：已换成别的一段或落定，不再换
+        if (flight !== held) return;
+        const at = stateOf(held);
+        land();
+        const d = held.rest + at.x;
+        // 起步时刻钉在这一批钉的时刻上，与同一个回调里开播的卡内行同一刻（见 lib/reflow 的 tick）
+        const play = (scale: ReturnType<typeof springTrack>) => {
+          const animation = playTrack(frame, scale);
+          animation.startTime = pinned;
+          return animation;
+        };
+        register({ animations: playEdge(edgeTrack(nextHeight, d, at.v), radius, play), d, v: at.v, rest: 0 }, true);
+      },
+      view,
+      HOLD_AFTER_RESIZE,
+    );
   });
   sizes.observe(frame);
   return () => sizes.disconnect();

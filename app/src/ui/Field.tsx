@@ -3,15 +3,13 @@
 // 关联经上下文下发：放进来的输入框、下拉选择、开关等自动拿到 id（标签 for 指向它）、aria-describedby（提示与错误）
 // 与 aria-invalid；单选组这类不可被 label 关联的控件用 labelId 做 aria-labelledby。
 // 提示与错误共用一个常驻的 polite 播报区：先有播报区、后变内容，读屏才会念出新出现的错误。
-// 之后才出现的错误按流内块的增删（insertItem）淡入并从略小处落到位，与 Appear 里的提示条、警告同一种出现方式；
-// 挂载时就有的错误跟着所在页面或弹窗入场。
+// 播报区里的提示与错误是同一个 Appear 里互斥的两块：之后才出现的画出第一帧再淡入并从略小处落到位，换下去的抽出布局、
+// 叠在换上来的那块上原地淡出（错误替换提示时提示不一帧消失），减少动画时只动透明度；挂载时就有的跟着所在页面或弹窗入场。
 
-import { motion } from "framer-motion";
-import { createContext, useContext, useId, type ReactNode } from "react";
+import { Fragment, createContext, useContext, useId, type ReactNode } from "react";
 import { Icon } from "../art/Icon";
-import { insertItem } from "../lib/motion";
-import { useMounted } from "../lib/useMounted";
 import { cx } from "../lib/util";
+import { Appear } from "./Appear";
 import styles from "./Field.module.css";
 
 export interface FieldControl {
@@ -59,7 +57,8 @@ export function Field({ label, optional = false, hint, error, reserve = false, c
   const base = useId();
   const invalid = error !== undefined && error !== "";
   const control: FieldControl = { controlId: `${base}-control`, labelId: `${base}-label`, describedBy: `${base}-message`, invalid };
-  const mounted = useMounted();
+  // 这几种值本来画不出任何节点：照样包进 Appear 会多出一层空的包裹，播报区不再 :empty，没有提示的字段平白多出上距
+  const hinted = hint !== undefined && hint !== null && typeof hint !== "boolean" && hint !== "";
   return (
     <FieldContext.Provider value={control}>
       <div className={cx(styles.field, className)}>
@@ -69,19 +68,17 @@ export function Field({ label, optional = false, hint, error, reserve = false, c
         </label>
         {children}
         <div id={control.describedBy} className={styles.message} data-error={invalid || undefined} data-reserve={reserve || undefined} aria-live="polite">
-          {invalid ? (
-            <motion.span
-              key="error"
-              className={styles.error}
-              initial={mounted.current ? insertItem.initial : false}
-              animate={insertItem.animate}
-            >
-              <Icon name="alert" size={14} className={styles.errorIcon} />
-              <span>{error}</span>
-            </motion.span>
-          ) : (
-            hint
-          )}
+          {/* 两块的 key 固定：同一块里换字（换一条错误、提示随输入改说法）原地换，不退场重播 */}
+          <Appear itemClassName={styles.item}>
+            {invalid ? (
+              <span key="error" className={styles.error}>
+                <Icon name="alert" size={14} className={styles.errorIcon} />
+                <span>{error}</span>
+              </span>
+            ) : (
+              hinted && <Fragment key="hint">{hint}</Fragment>
+            )}
+          </Appear>
         </div>
       </div>
     </FieldContext.Provider>

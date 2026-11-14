@@ -7,7 +7,7 @@
 //   所以视图变化后先把旧面「留住」一小段（useFaceHold），时长按方块报来的组装进度算；减少动画时不留，直接换。
 // - 进度填充在容器级的裁切层里，按 translateX((p − 1) × 100%) 移动，不随面的入场位移一起动。
 
-import { AnimatePresence, motion, useReducedMotionConfig, useTransform, type Variants } from "framer-motion";
+import { AnimatePresence, frameData, motion, useReducedMotionConfig, useTransform, type Variants } from "framer-motion";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Icon } from "../art/Icon";
 import { AssemblingBlock, assemblyExitMs, assemblySeatInMs, type AssemblyClock, type AssemblyExit } from "../art/iso/AssemblingBlock";
@@ -42,11 +42,12 @@ export interface LaunchCapsuleProps {
   relaunch?: boolean;
   className?: string;
   /**
-   * 胶囊的布局形变起步时调用（framer-motion 的 onLayoutAnimationStart：提交后的微任务里冲刷布局、建好形变的那一刻）。
-   * 所在的动作行挂了 morph 让位时传 useReflow 返回值的 sync：尺寸观察要到下一帧的渲染步骤才报，
-   * 兄弟靠它让位会比胶囊的边缘晚一帧以上起步，宽度变化大时两者先挤到一起再分开。
+   * 胶囊的布局形变起步时调用（framer-motion 的 onLayoutAnimationStart：提交后的微任务里冲刷布局、建好形变的那一刻），
+   * startedAt 是形变的起步时刻。所在的动作行挂了 morph 让位时传 useReflow 返回值的 sync：尺寸观察要到下一帧的渲染步骤才报，
+   * 兄弟靠它让位会比胶囊的边缘晚一帧以上起步，宽度变化大时两者先挤到一起再分开；补跑时按 startedAt 钉起步时刻，
+   * 不另读此刻，两者才在同一个时刻起步。
    */
-  onMorphStart?: () => void;
+  onMorphStart?: (startedAt: number) => void;
 }
 
 export const CAPSULE_HEIGHT: Readonly<Record<LaunchCapsuleSize, number>> = { md: 48, lg: 56 };
@@ -260,6 +261,9 @@ export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch
   const announce = entry.view.kind === "loading" || entry.view.kind === "running" || entry.view.kind === "stopped" || entry.view.kind === "failed" || entry.view.kind === "crashed"
     ? sessionPhaseLabel(entry.view.session)
     : "";
+  // framer-motion 12.43 的形变在它的帧处理里建（冲刷布局或帧循环都先写 frameData.timestamp、置 isProcessing），
+  // JSAnimation.play 先调这个回调，再取 driver.now() 作 startTime，处理中取的就是 frameData.timestamp
+  const morphStarted = onMorphStart === undefined ? undefined : () => onMorphStart(frameData.timestamp);
 
   return (
     // 不撑满时胶囊自己的位置与宽度都由布局动画管：所在的动作行挂了兄弟让位（lib/reflow）时，它不再被让位重复位移一次
@@ -268,7 +272,7 @@ export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch
       layout
       layoutDependency={layoutKey}
       transition={{ layout: springs.morph }}
-      onLayoutAnimationStart={onMorphStart}
+      onLayoutAnimationStart={morphStarted}
       role="group"
       aria-label={LAUNCH_COPY.group(entry.instance.name)}
       tabIndex={-1}

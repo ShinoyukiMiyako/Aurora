@@ -20,6 +20,7 @@ import { useCompletionHold, useDisplaySpeed, useFinishing, type FinishedItem } f
 import { useReflow } from "../lib/reflow";
 import { useInsertItem } from "../lib/useInsertItem";
 import { useMounted } from "../lib/useMounted";
+import { usePaintedOnce } from "../lib/usePaintedOnce";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { clearableFinishedCount, findInstance } from "../state/selectors";
 import type { LauncherState } from "../state/store";
@@ -378,6 +379,11 @@ function ActiveGlyph({ tasks }: { tasks: readonly Task[] }) {
 function PeekRow({ task: placed, finishing, enter, onCancel }: { task: Task; finishing: boolean; enter: boolean; onCancel: () => void }) {
   // ul 的直接子项只能是 li，不能再包一层 Appear；减少动画时进出只留透明度，删掉的行不先缩一下再淡出
   const insert = useInsertItem();
+  // 冻结挂载那一刻的值：快览打开之后每次渲染给的 enter 都为真，打开时就在的行不能因此退回起点
+  const [entering] = useState(enter);
+  // 自己入场的行先停在起点，画出第一帧之后才换成目标，与 Appear 的子项同一做法：新行挂上的那一帧连同同一刻别的数据引起的渲染
+  // 可能很长，入场从提交就计时的话第一帧画出来时淡入已走掉一截。停着的目标与 initial 是同一个对象，挂载时 framer-motion 不建一段原地不动的动画
+  const painted = usePaintedOnce("row", entering);
   // 退场时行留在流里淡出、播完才移除：这段时间带 inert，取消键点不到、聚焦不到，读屏也不再读它
   const present = useIsPresent();
   const listLeaving = useContext(ListLeaving);
@@ -396,7 +402,7 @@ function PeekRow({ task: placed, finishing, enter, onCancel }: { task: Task; fin
   const progress = holding ? 1 : task.progress;
   const track = progressTrack(task);
   return (
-    <motion.li className={styles.row} inert={!present} initial={enter ? insert.initial : false} animate={insert.animate} exit={insert.exit}>
+    <motion.li className={styles.row} inert={!present} initial={entering ? insert.initial : false} animate={painted ? insert.animate : insert.initial} exit={insert.exit}>
       <div className={styles.rowHead}>
         <span className={styles.rowTitle} title={task.title}>
           {task.title}

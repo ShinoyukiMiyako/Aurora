@@ -17,8 +17,12 @@
   font-weight: var(--sk-w-body);
 }
 
-/* 播报区常驻；没有提示也没有错误时不占位 */
+/*
+ * 播报区常驻；没有提示也没有错误时不占位。
+ * 它是提示与错误交接时退场那一块的定位基准：popLayout 按 offsetParent 量出位置，抽出布局后原地叠在新的一块上淡出
+ */
 .message {
+  position: relative;
   display: flex;
   align-items: flex-start;
   gap: var(--sk-space-4);
@@ -29,6 +33,7 @@
   line-height: var(--sk-lh-caption);
 }
 
+/* 退场的那一块淡完才移除：没开预留的字段从有到无时，上距等它淡完才收起。提示或错误会时有时无的字段要开预留 */
 .message:empty {
   margin-top: 0;
 }
@@ -39,16 +44,31 @@
   margin-top: var(--sk-space-6);
 }
 
-.message[data-error] {
-  color: var(--sk-danger);
+/*
+ * 换下去的一块比换上来的高时，退场层按旧高度抽出布局，伸出播报区下沿。减少动画时下面的内容不让位、一步到位上移，
+ * 伸出的那部分会压在它上面淡完整个退场：这时纵向裁到播报区，伸出的部分随布局一步收起，播报区里的照常交叉淡化。
+ * 平时不裁：下面的内容由所在容器的让位从旧位置滑上来，碰到退场层时它已淡得差不多，裁了反而让那一行一帧消失。
+ * 只在有退场层时裁、只裁纵向：提示里可聚焦内容的焦点环平时不被切掉
+ */
+:global([data-sk-reduced]) .message:has(> [inert]) {
+  overflow-y: clip;
 }
 
-/* 错误的图标与文字是一个整体，一起淡入 */
+/* Appear 给每块包的那一层是这一行的 flex 子项：与原来直接作子项的错误一样可以窄过最长的词 */
+.item {
+  min-width: 0;
+}
+
+/*
+ * 错误的图标与文字是一个整体，一起淡入。错误色写在这一块自己身上，不按播报区的错误态整体改色：
+ * 交接时退场的提示仍是提示色淡出，退场的错误也不先变灰
+ */
 .error {
   display: flex;
   align-items: flex-start;
   gap: var(--sk-space-4);
   min-width: 0;
+  color: var(--sk-danger);
 }
 
 /* 14 的图标对齐 18 行高的第一行 */

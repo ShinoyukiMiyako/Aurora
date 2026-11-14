@@ -20,7 +20,7 @@ import type { Appearance } from "../../domain/types";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { resources } from "../../state/resource";
-import { fakeAnimate, focusByKeyboard, keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { fakeAnimate, focusByKeyboard, keydown, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, callsOf, configDto, deferred, resetRecorder, settle } from "../../test/launcher";
 import { CREATE_COPY } from "./copy";
@@ -1295,6 +1295,78 @@ describe("新建实例：占位与换态", () => {
       expect(seen.map((s) => s.opacity)).toEqual(seen.map((s) => s.opacity).sort((a, b) => b - a));
       expect(item.style.opacity).toBe("0");
       expect(backItem()).toBeNull();
+    });
+
+    /** 最长连续几帧不透明度一点没动。 */
+    const longestStall = (opacities: readonly number[]) => {
+      let run = 0;
+      let longest = 0;
+      for (let i = 1; i < opacities.length; i++) {
+        run = opacities[i] === opacities[i - 1] ? run + 1 : 0;
+        longest = Math.max(longest, run);
+      }
+      return longest;
+    };
+
+    it("退场途中被拉回：「取消」一直没动，不再等它让位，从淡出到半路的不透明度直接回到 1，中途不停住", async () => {
+      await mount();
+      await fillName("周末生存");
+      const item = backItem();
+      if (item === null) throw new Error("第 2 步的底栏没有「上一步」");
+      expect(item.style.opacity).toBe("1");
+      click(button(CREATE_COPY.back));
+      expect(item.hasAttribute("inert")).toBe(true);
+      await stepFrames(4);
+      const left = Number(item.style.opacity);
+      expect(left).toBeGreaterThan(0);
+      expect(left).toBeLessThan(1);
+
+      click(button(CREATE_COPY.next));
+      expect(subtitle()).toBe(CREATE_COPY.subtitle(2, 5, "version"));
+      // 拉回的是退场中的那一格，不是重新插进来的一格
+      expect(backItem()).toBe(item);
+      expect(item.hasAttribute("inert")).toBe(false);
+      const opacities = [left];
+      while (opacities.at(-1) !== 1) {
+        if (opacities.length > 60) throw new Error("「上一步」被拉回后一直没回到不透明");
+        await stepFrames(1);
+        opacities.push(Number(item.style.opacity));
+      }
+      expect(opacities).toEqual([...opacities].sort((a, b) => a - b));
+      expect(longestStall(opacities)).toBeLessThanOrEqual(1);
+      // 一段淡入的时长就回到 1，不先停着等一个入场延迟
+      expect(opacities.length - 1).toBeLessThanOrEqual(Math.ceil((fade.in.duration * 1000) / 16) + 1);
+    });
+
+    it("插进来还没开始淡入就退场：当场拿掉，再点下一步是新插进来的一格，照旧等「取消」滑出这一格才显出来", async () => {
+      await mount();
+      setInput(nameInput(), "周末生存");
+      click(button(CREATE_COPY.next));
+      const first = backItem();
+      if (first === null) throw new Error("换到第 2 步后底栏没有「上一步」");
+      await stepFrames(4);
+      expect(first.style.opacity).toBe("0");
+      click(stepButton("名称"));
+      // 不透明度与缩放都已在退场的终点上，没有可播的退场：不会留下来等着被拉回、跳过入场的等待
+      await stepFrames(3);
+      expect(first.isConnected).toBe(false);
+
+      click(button(CREATE_COPY.next));
+      const item = backItem();
+      if (item === null) throw new Error("回到第 2 步后底栏没有「上一步」");
+      expect(item).not.toBe(first);
+      // 与第一条同一个口径：「取消」离终点还超过一个间距时，它还压在这一格上
+      let clearMs = 0;
+      while (springAt("morph", 1, 0, clearMs / 1000).x > 10 / (95 + 10)) clearMs += 1;
+      const opacities: number[] = [];
+      for (let t = 16; t <= clearMs; t += 16) {
+        await stepFrames(1);
+        opacities.push(Number(item.style.opacity));
+      }
+      expect(opacities.length).toBeGreaterThan(8);
+      expect(opacities).toEqual(opacities.map(() => 0));
+      await flush();
+      expect(item.style.opacity).toBe("1");
     });
   });
 

@@ -533,6 +533,67 @@ describe("换阶段时底栏换组", () => {
       [true, true, false, "1"],
     ]);
   });
+
+  /** 包着键的那一层此刻的不透明度：换组时它由 framer-motion 逐帧写在行内样式上。 */
+  function opacityOf(f: ReturnType<typeof footerItems>[number]): number {
+    const value = f.item?.style.opacity;
+    if (value === undefined || value === "") throw new Error(`「${f.button.textContent}」外面那层没有行内不透明度`);
+    return Number(value);
+  }
+
+  /**
+   * 换组之后逐帧记下退场的一组（带 inert）里最实的一项、新的一组里最虚的一项的不透明度，退场项移除之后记 0。
+   * 两组的键不同宽、不同左缘，两边都还实着的帧就是错位叠在一起的两行字。
+   */
+  async function trackSwap(frames: number): Promise<{ leaving: number; entering: number }[]> {
+    const rows: { leaving: number; entering: number }[] = [];
+    for (let i = 0; i < frames; i++) {
+      await stepFrames(1);
+      const items = footerItems();
+      rows.push({ leaving: Math.max(0, ...items.filter((f) => f.leaving).map(opacityOf)), entering: Math.min(...items.filter((f) => !f.leaving).map(opacityOf)) });
+    }
+    return rows;
+  }
+
+  it.each(["开始下载", "下载完成"] as const)("%s：旧的一组先掉下去，两组都还过 0.3 的帧至多一帧；新的一组照常淡入，不往后推", async (moment) => {
+    const TOTAL = 1200;
+    const pending = deferred<UpdateDto>();
+    info = { ...info, downloaded_version: null, downloaded_channel: null, downloaded_intent: null };
+    ipc.overrides.set("download_update", () => pending.promise);
+    await openReady();
+    // 弹窗的入场先播完，换组从静止的底栏开始
+    await stepFrames(40);
+    act(() => button(UPDATE_COPY.download).click());
+    await flush();
+    let entering: string[] = [UPDATE_COPY.background, UPDATE_COPY.cancelDownload];
+    if (moment === "下载完成") {
+      await stepFrames(40);
+      const taskId = callsOf(ipc, "download_update")[0].taskId;
+      act(() => emit(CORE_EVENT, { kind: "download", task_id: taskId, total: 1, finished: 0, bytes: TOTAL / 2, total_bytes: TOTAL, speed: 0 }));
+      await flush();
+      act(() => pending.resolve(UPDATE));
+      await flush();
+      // 收尾一拍到点的那一刻换成已下好，此后一帧都还没走
+      await act(() => vi.advanceTimersByTimeAsync(COMPLETION_HOLD_S * 1000));
+      await flush();
+      entering = [UPDATE_COPY.installOnExit, UPDATE_COPY.restartInstall];
+    }
+    // 换组那次提交刚落下：旧组还全实着，新组停在透明处等第一帧画出来
+    const swapped = footerItems();
+    expect([swapped.filter((f) => !f.leaving).map((f) => [f.button.textContent, opacityOf(f)]), swapped.filter((f) => f.leaving).every((f) => opacityOf(f) === 1)]).toEqual([
+      entering.map((text) => [text, 0]),
+      true,
+    ]);
+    const rows = await trackSwap(12);
+    const trace = JSON.stringify(rows);
+    expect(rows.filter((r) => r.leaving > 0.3 && r.entering > 0.3).length, trace).toBeLessThanOrEqual(1);
+    // 新组的淡入没有为了让旧组而往后挪：等画出第一帧就起步（至多两帧），起步后第 5 帧（约 80 ms）已过 0.95，那时旧组已经移除
+    const start = rows.findIndex((r) => r.entering > 0);
+    expect(start, trace).toBeGreaterThan(0);
+    expect(start, trace).toBeLessThanOrEqual(2);
+    expect(rows[start + 5].leaving, trace).toBe(0);
+    expect(rows[start + 5].entering, trace).toBeGreaterThan(0.95);
+  });
 });
 
 describe("换阶段时键盘焦点", () => {

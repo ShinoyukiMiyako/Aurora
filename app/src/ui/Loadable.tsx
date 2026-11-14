@@ -54,44 +54,43 @@ export interface LoadableProps {
   className?: string;
   /** 包住内容的那一层的类名，只用于布局：内容要撑满按高度分配的区域、自己滚动时，让这一层也参与分高。 */
   contentClassName?: string;
+  /**
+   * 根元素与骨架、内容两层的元素类型，默认 div。放在只收短语内容的地方（段落里的一行字）时用 span，
+   * 交叉淡化与 div 时同一套、同一帧起步。span 时由 className 把根排成块或网格：行内的层量不出宽高，
+   * 退场的那一层抽不出布局，会和进来的那一层并排挤在一行里。
+   */
+  as?: LoadableTag;
 }
 
-export function Loadable({ view, skeleton, children, busyLabel, className, contentClassName }: LoadableProps) {
-  // 一挂上就是内容（数据早就在）：不单独淡入，跟着所在页面的入场走。见过加载态之后，内容每次出现都淡入
+type LoadableTag = "div" | "span";
+
+const LAYER_TAG = { div: motion.div, span: motion.span } as const;
+/**
+ * 两层的 ref 由 AnimatePresence 递进来，只给 popLayout 量尺寸。层是 motion.div 还是 motion.span 由 as 定，
+ * 两种组件的 ref 都要收得下，所以写成两种元素的交集。
+ */
+type LayerRef = Ref<HTMLDivElement & HTMLSpanElement>;
+
+export function Loadable({ view, skeleton, children, busyLabel, className, contentClassName, as = "div" }: LoadableProps) {
+  const Root = as;
+  // 一挂上就是内容（数据早就在）：不单独淡入，跟着所在页面的入场走。见过加载态之后，内容每次出现都淡入。
+  // 它只在离开内容时变，这时不求值 children。会在内容显示期间变的状态都在 SkeletonHost 里：
+  // 这里的状态一变，children 就重新求值、整棵内容树跟着重渲染
   const [waited, setWaited] = useState(view !== "content");
   if (view !== "content" && !waited) setWaited(true);
-  // 内容出现过：之后再挂上的骨架从透明淡入，接住正在淡出的内容，而不是不透明地一下子盖上去
-  const [hadContent, setHadContent] = useState(view === "content");
-  if (view === "content" && !hadContent) setHadContent(true);
-  // 骨架此刻可能还看得见：显出来过，而且退场还没播完。确实看不见的骨架（一直停在等待期，或上一次退场已经播完之后
-  // 才挂上的），内容到达时连同它所在的 AnimatePresence 一起卸掉：退场只能经 AnimatePresence 播，卸掉宿主才能让它不播、
-  // 同一次提交里就离开 DOM，而不是透明地在内容上多叠一段退场。
-  // 退场播完时清掉；回到等待期时不立即清，等淡出走到 0 再清：退场途中被拉回等待期的骨架是从半透明往 0 走的，
-  // 这时内容又到，卸掉宿主就是半透明时一帧消失；走到 0 之后不清，内容到达时又会带着 data-pending 多播一段看不见的退场
-  const [shown, setShown] = useState(view === "skeleton");
-  if (view === "skeleton" && !shown) setShown(true);
   const body = (
-    <div className={cx(styles.loadable, className)} aria-busy={view === "content" ? undefined : true}>
-      {/* 首次挂载时骨架里的区块不播页面入场：骨架此时多半还在等待期，页面根的淡入已经盖住它。之后才挂上的骨架要播自己的淡入 */}
-      {(view !== "content" || shown) && (
-        <AnimatePresence mode="popLayout" initial={hadContent} onExitComplete={() => setShown(false)}>
-          {view !== "content" && (
-            <SkeletonLayer key="skeleton" pending={view === "pending"} fadeIn={hadContent} onHidden={() => setShown(false)}>
-              {skeleton}
-            </SkeletonLayer>
-          )}
-        </AnimatePresence>
-      )}
+    <Root className={cx(styles.loadable, className)} aria-busy={view === "content" ? undefined : true}>
+      <SkeletonHost view={view} skeleton={skeleton} as={as} />
       {/* 进出不牵动兄弟的布局（让位交给 lib/reflow）：关掉 presenceAffectsLayout，内容层的在场上下文才不会随每次重渲染换新，
           连带内容里所有 motion 元素跟着重渲染 */}
       <AnimatePresence mode="popLayout" presenceAffectsLayout={false}>
         {view === "content" && (
-          <ContentLayer key="content" waited={waited} className={cx(styles.content, contentClassName)}>
+          <ContentLayer key="content" as={as} waited={waited} className={cx(styles.content, contentClassName)}>
             {children()}
           </ContentLayer>
         )}
       </AnimatePresence>
-    </div>
+    </Root>
   );
   return (
     <>
@@ -116,13 +115,43 @@ function BusyStatus({ text }: { text: string }) {
   );
 }
 
+/**
+ * 骨架那一侧的宿主。骨架淡出播完、等待期里淡到 0 时要清掉「还看得见」的记号，这一下发生在内容已经显示的时候：
+ * 记号放在 Loadable 里的话，children 随之重新求值，整棵内容树重渲染（内容大时是几十毫秒的长任务，
+ * 又正落在内容到达后让位的尾段），所以骨架这一侧的状态由它自己管，变化只重渲染骨架这一层。
+ */
+function SkeletonHost({ view, skeleton, as }: { view: LoadingView; skeleton: ReactNode; as: LoadableTag }) {
+  // 内容出现过：之后再挂上的骨架从透明淡入，接住正在淡出的内容，而不是不透明地一下子盖上去
+  const [hadContent, setHadContent] = useState(view === "content");
+  if (view === "content" && !hadContent) setHadContent(true);
+  // 骨架此刻可能还看得见：显出来过，而且退场还没播完。确实看不见的骨架（一直停在等待期，或上一次退场已经播完之后
+  // 才挂上的），内容到达时连同它所在的 AnimatePresence 一起卸掉：退场只能经 AnimatePresence 播，卸掉宿主才能让它不播、
+  // 同一次提交里就离开 DOM，而不是透明地在内容上多叠一段退场。
+  // 退场播完时清掉；回到等待期时不立即清，等淡出走到 0 再清：退场途中被拉回等待期的骨架是从半透明往 0 走的，
+  // 这时内容又到，卸掉宿主就是半透明时一帧消失；走到 0 之后不清，内容到达时又会带着 data-pending 多播一段看不见的退场
+  const [shown, setShown] = useState(view === "skeleton");
+  if (view === "skeleton" && !shown) setShown(true);
+  if (view === "content" && !shown) return null;
+  return (
+    // 首次挂载时骨架里的区块不播页面入场：骨架此时多半还在等待期，页面根的淡入已经盖住它。之后才挂上的骨架要播自己的淡入
+    <AnimatePresence mode="popLayout" initial={hadContent} onExitComplete={() => setShown(false)}>
+      {view !== "content" && (
+        <SkeletonLayer key="skeleton" as={as} pending={view === "pending"} fadeIn={hadContent} onHidden={() => setShown(false)}>
+          {skeleton}
+        </SkeletonLayer>
+      )}
+    </AnimatePresence>
+  );
+}
+
 /** 骨架层淡出的目标。第一个关键帧取当前值：停在哪都建得出一段动画、播完时报完成，据此放它离开。 */
 const SKELETON_LEAVE: TargetAndTransition = { opacity: [null, 0], transition: fade.out };
 const registerNothing = () => () => {};
 
 interface SkeletonLayerProps {
   /** popLayout 把退场的骨架抽出布局时要量这一层，由 AnimatePresence 递进来。 */
-  ref?: Ref<HTMLDivElement>;
+  ref?: LayerRef;
+  as: LoadableTag;
   /** 等待期：占着位但看不见。 */
   pending: boolean;
   /** 内容出现过之后才挂上的骨架：从透明淡入，里面的区块不再领页面入场序号。只在挂载那一刻读。 */
@@ -141,7 +170,8 @@ interface SkeletonLayerProps {
  * 各自的退场一下就报完，回到在场时 framer-motion 会把报完的元素跳回 initial，退场途中被拉回的骨架就会一帧变透明。
  * 外层的 initial 照传：首次挂载时骨架里的区块仍不播入场。
  */
-function SkeletonLayer({ ref, pending, fadeIn, onHidden, children }: SkeletonLayerProps) {
+function SkeletonLayer({ ref, as, pending, fadeIn, onHidden, children }: SkeletonLayerProps) {
+  const Layer = LAYER_TAG[as];
   const outer = useContext(PresenceContext);
   const [present, safeToRemove] = usePresence();
   const leave = usePaintedOnce(present ? "present" : "leaving", !present) && !present;
@@ -151,7 +181,7 @@ function SkeletonLayer({ ref, pending, fadeIn, onHidden, children }: SkeletonLay
   );
   return (
     <PresenceContext.Provider value={inner}>
-      <motion.div
+      <Layer
         ref={ref}
         className={styles.skeleton}
         data-pending={pending || undefined}
@@ -167,14 +197,15 @@ function SkeletonLayer({ ref, pending, fadeIn, onHidden, children }: SkeletonLay
         }}
       >
         <EntranceGate own={fadeIn}>{children}</EntranceGate>
-      </motion.div>
+      </Layer>
     </PresenceContext.Provider>
   );
 }
 
 interface ContentLayerProps {
   /** popLayout 把退场的内容抽出布局时要量这一层，由 AnimatePresence 递进来。 */
-  ref?: Ref<HTMLDivElement>;
+  ref?: LayerRef;
+  as: LoadableTag;
   /** 等过加载才挂上：整层自己淡入，里面的区块不再领页面入场序号。只在挂载那一刻读。 */
   waited: boolean;
   className: string;
@@ -192,14 +223,15 @@ const LAYER_SHOWN = { opacity: 1, transition: fade.in } as const;
  * 从提交就计时的话第一帧画出来时淡入已走掉一截。停在透明时就退回加载的，退场目标与当前值相同、也没有动画在走，
  * framer-motion 不建退场，这一层随即移除：它本来就看不见。
  */
-function ContentLayer({ ref, waited, className, children }: ContentLayerProps) {
+function ContentLayer({ ref, as, waited, className, children }: ContentLayerProps) {
+  const Layer = LAYER_TAG[as];
   const present = useIsPresent();
   // 冻结挂载那一刻的值：一挂上就是内容的这一层，退回加载、淡完之前又被接着用时 waited 已经为真，不能因此退回透明再等一帧
   const [entering] = useState(waited);
   const painted = usePaintedOnce("content", entering);
   return (
-    <motion.div ref={ref} className={className} inert={!present} initial={entering ? LAYER_HIDDEN : false} animate={painted ? LAYER_SHOWN : LAYER_HIDDEN} exit={{ opacity: 0, transition: fade.out }}>
+    <Layer ref={ref} className={className} inert={!present} initial={entering ? LAYER_HIDDEN : false} animate={painted ? LAYER_SHOWN : LAYER_HIDDEN} exit={{ opacity: 0, transition: fade.out }}>
       <EntranceGate own={waited}>{children}</EntranceGate>
-    </motion.div>
+    </Layer>
   );
 }

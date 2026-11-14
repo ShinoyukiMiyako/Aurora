@@ -238,6 +238,33 @@ describe("首次启动向导：第一步的内容不跳", () => {
     expect(text()).toContain("1/1");
   });
 
+  it.each([false, true])("改回别的路径时接回来的文件夹行等第一帧画出来才淡入（减少动画 %s）：挂上之后的第一帧仍是透明的起点", async (reduceMotion) => {
+    await mount({ ...DEFAULT_APPEARANCE, reduceMotion });
+    const hmclRows = () => all("li").filter((li) => li.textContent?.includes("D:\\HMCL\\.minecraft"));
+    await typePath("D:\\HMCL\\.minecraft");
+    // 等那一行淡出播完、移出文档：接回来的才是新挂上的一行，不是把退场中的那一行原地拉回
+    await stepFrames(30);
+    expect(hmclRows()).toEqual([]);
+    await click(button("用回默认位置"));
+    const [row] = hmclRows();
+    expect(hmclRows()).toHaveLength(1);
+    expect(row.hasAttribute("inert")).toBe(false);
+    const start = reduceMotion ? "" : "scale(0.98)";
+    expect(row.style.opacity).toBe("0");
+    expect(row.style.transform).toBe(start);
+    await stepFrames(1);
+    expect(row.style.opacity).toBe("0");
+    expect(row.style.transform).toBe(start);
+    // 放行排在绘制之后的任务里，假时钟要再推进一帧才到点
+    await stepFrames(2);
+    const opacity = Number(row.style.opacity);
+    expect(opacity).toBeGreaterThan(0);
+    expect(opacity).toBeLessThan(1);
+    await stepFrames(60);
+    expect(row.style.opacity).toBe("1");
+    expect(row.style.transform).toBe(reduceMotion ? "" : "none");
+  });
+
   it("配置还没读到：加载门内只占位不显示，到点才淡入照字段画的骨架；读到后换成输入框", async () => {
     let answer: () => void = () => undefined;
     ipc.overrides.set("get_config", () => new Promise((resolve) => (answer = () => void mockInvoke("get_config").then(resolve))));
@@ -615,9 +642,9 @@ describe("首次启动向导：选到数据格式不合的游戏目录", () => {
       throw error;
     });
 
-  /** 路径框下那一行的错误；没有错误时（显示常驻提示）为 null。 */
+  /** 路径框下那一行的错误；没有错误时（显示常驻提示）为 null。换下去的提示带 inert 留在原处淡出，只认在场的那一块。 */
   const dirError = () => {
-    const message = document.querySelector("[data-step-pane]:not([aria-hidden]) [data-error]");
+    const message = document.querySelector("[data-step-pane]:not([aria-hidden]) [data-error] > :not([inert])");
     return message === null ? null : message.textContent;
   };
 
@@ -713,6 +740,41 @@ describe("首次启动向导：换步动效", () => {
     expect(presentPane().style.transform).toContain("translateX(16px)");
   });
 
+  it.each([false, true])("换上来的一步等第一帧画出来才起步（减少动画 %s）：挂上之后的第一帧仍停在起点；挂载时就在的那一步之后重渲染也不退回起点", async (reduceMotion) => {
+    await mount({ ...DEFAULT_APPEARANCE, reduceMotion });
+    // 向导挂上之后的重渲染：挂载时就在的第一步不能因此当成新换上来的、退回起点再播一遍
+    await typePath("D:\\Games\\Petal");
+    await stepFrames(3);
+    expect(presentPane().style.opacity).toBe("1");
+    expect(presentPane().style.transform).not.toContain("translateX");
+
+    await click(button("下一步"));
+    expect(title()).toBe("看看这台电脑上的 Java");
+    const pane = presentPane();
+    const start = reduceMotion ? "" : "translateX(16px)";
+    expect(pane.style.opacity).toBe("0");
+    expect(pane.style.transform).toBe(start);
+    await stepFrames(1);
+    expect(pane.style.opacity).toBe("0");
+    expect(pane.style.transform).toBe(start);
+    // 放行排在绘制之后的任务里，假时钟要再推进一帧才到点
+    await stepFrames(2);
+    const opacity = Number(pane.style.opacity);
+    expect(opacity).toBeGreaterThan(0);
+    expect(opacity).toBeLessThan(1);
+    if (reduceMotion) {
+      expect(pane.style.transform).toBe("");
+    } else {
+      const x = /^translateX\((.+)px\)$/.exec(pane.style.transform);
+      if (x === null) throw new Error(`新的一步没有在横移的半路上：${pane.style.transform}`);
+      expect(Number(x[1])).toBeGreaterThan(0);
+      expect(Number(x[1])).toBeLessThan(16);
+    }
+    await stepFrames(60);
+    expect(pane.style.opacity).toBe("1");
+    expect(pane.style.transform).toBe(reduceMotion ? "" : "none");
+  });
+
   it("步骤条：走过的那一步序号换成勾号时勾号弹出、序号原地淡出；向导挂上时就在的序号不入场", async () => {
     const waapi = stubSpanAnimations();
     await mount();
@@ -732,6 +794,43 @@ describe("首次启动向导：换步动效", () => {
     waapi.finish(waapi.running(index, "opacity"));
     expect(leavingIndex()).toBeNull();
     expect(dot()?.getAttribute("data-glyph")).toBe("check");
+  });
+
+  it.each([false, true])("步骤条「已跳过」（减少动画 %s）：跳过时等第一帧画出来才弹出，回到那一步时原地淡出，不一帧没了", async (reduceMotion) => {
+    await mount({ ...DEFAULT_APPEARANCE, reduceMotion });
+    const tag = () => railItem("Java").querySelector<HTMLElement>('[class*="_railSkipped_"]');
+    await click(button("下一步"));
+    await click(button("跳过"));
+    expect(title()).toBe("用什么账户进游戏");
+    const shown = tag();
+    if (shown === null) throw new Error("跳过之后步骤条上没有「已跳过」");
+    expect(shown.textContent).toBe("已跳过");
+    // 平时从 0.6 弹出；减少动画时只淡入，不缩放
+    const start = reduceMotion ? "" : "scale(0.6)";
+    expect(shown.style.opacity).toBe("0");
+    expect(shown.style.transform).toBe(start);
+    await stepFrames(1);
+    expect(shown.style.opacity).toBe("0");
+    expect(shown.style.transform).toBe(start);
+    await stepFrames(2);
+    expect(Number(shown.style.opacity)).toBeGreaterThan(0);
+    expect(Number(shown.style.opacity)).toBeLessThan(1);
+    await stepFrames(60);
+    expect(shown.style.opacity).toBe("1");
+    expect(shown.style.transform).toBe(reduceMotion ? "" : "none");
+
+    await click(railItem("Java"));
+    expect(title()).toBe("看看这台电脑上的 Java");
+    // 状态一离开「已跳过」，标签留在原处淡出，不在同一次提交里卸掉
+    expect(tag()).toBe(shown);
+    await stepFrames(3);
+    expect(shown.isConnected).toBe(true);
+    expect(Number(shown.style.opacity)).toBeGreaterThan(0);
+    expect(Number(shown.style.opacity)).toBeLessThan(1);
+    expect(shown.style.transform).toBe(reduceMotion ? "" : "none");
+    await stepFrames(60);
+    expect(shown.isConnected).toBe(false);
+    expect(tag()).toBeNull();
   });
 
   it("底栏随步骤出现的按钮淡入，离开的原地淡出并且不可再点", async () => {

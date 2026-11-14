@@ -121,3 +121,44 @@ it("一挂上就是内容的那一层退回加载、淡完之前内容又回来�
   await stepFrames(60);
   expect(layer.style.opacity).toBe("1");
 });
+
+it("as 为 span：根与两层都是 span，放得进段落；骨架换内容的交叉淡化与 div 版同一帧起步、逐帧相同", async () => {
+  const both = (state: LoadingView) => (
+    <>
+      <p>
+        <Loadable as="span" view={state} skeleton={<i data-skeleton="span" />}>
+          {() => <b data-content="span">内容</b>}
+        </Loadable>
+      </p>
+      <Loadable view={state} skeleton={<i data-skeleton="div" />}>
+        {() => <b data-content="div">内容</b>}
+      </Loadable>
+    </>
+  );
+  const layer = (selector: string): HTMLElement => {
+    const el = view?.container.querySelector<HTMLElement>(selector)?.parentElement;
+    if (el === null || el === undefined) throw new Error(`${selector} 所在的层不在`);
+    return el;
+  };
+  view = render(both("skeleton"));
+  const spanSkeleton = layer('[data-skeleton="span"]');
+  const divSkeleton = layer('[data-skeleton="div"]');
+  view.rerender(both("content"));
+  const spanContent = layer('[data-content="span"]');
+  const divContent = layer('[data-content="div"]');
+  expect([spanSkeleton.parentElement?.tagName, spanSkeleton.tagName, spanContent.tagName]).toEqual(["SPAN", "SPAN", "SPAN"]);
+  expect(spanSkeleton.parentElement?.parentElement?.tagName).toBe("P");
+  expect([divSkeleton.parentElement?.tagName, divSkeleton.tagName, divContent.tagName]).toEqual(["DIV", "DIV", "DIV"]);
+  const sample = (skeleton: HTMLElement, content: HTMLElement) => [skeleton.isConnected ? skeleton.style.opacity : null, content.style.opacity];
+  await stepFrames(1);
+  expect(sample(spanSkeleton, spanContent)).toEqual(["1", "0"]);
+  const spanSeen: (string | null)[][] = [];
+  for (let i = 0; i < 20; i++) {
+    await stepFrames(1);
+    const span = sample(spanSkeleton, spanContent);
+    expect(span).toEqual(sample(divSkeleton, divContent));
+    spanSeen.push(span);
+  }
+  expect(spanSeen.some(([, content]) => Number(content) > 0 && Number(content) < 1)).toBe(true);
+  expect(sample(spanSkeleton, spanContent)).toEqual([null, "1"]);
+});

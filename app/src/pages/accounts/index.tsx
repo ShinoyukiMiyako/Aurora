@@ -2,8 +2,9 @@
 // 登录弹窗（设备码、离线、外置登录）由外壳按 state.login 挂载，这里只经 actions 打开它们，
 // 所以从标题栏、启动拦截发起的登录进到本页同样可见。
 
-import { useId, useState, type ReactNode } from "react";
+import { memo, useDeferredValue, useId, useMemo, useState, type ReactNode } from "react";
 import { ACTION_ERROR, BOOT_SLICE_ERROR, MSA_CLIENT_ID_MISSING, SLOW_LOADING_HINT } from "../../copy/flows";
+import type { Account } from "../../domain/adapt";
 import type { AccountKind } from "../../domain/types";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { useReflow } from "../../lib/reflow";
@@ -45,18 +46,36 @@ const OPEN_LOGIN_ERROR: Readonly<Record<AccountKind, string>> = {
   authlib: ACTION_ERROR.authlib,
 };
 
+/** 正文按它画的账户切片。四项一起延后：读取状态、列表与当前账户不会错开一拍（读到了而列表还是旧的空列表，空状态会闪一下）。 */
+interface AccountsSnapshot {
+  status: SliceStatus;
+  accounts: readonly Account[];
+  currentAccountId: string | null;
+  me: Account | null;
+}
+
 export default function AccountsPage(_props: PageProps<"accounts">) {
-  const titleId = useId();
   const status = useLauncherSelector((s) => s.status.accounts);
   const accounts = useLauncherSelector((s) => s.accounts);
   const currentAccountId = useLauncherSelector((s) => s.currentAccountId);
   // 账户切片读到之前当前账户 id 与列表还对不上，那时不去找当前账户
   const me = useLauncherSelector((s) => (s.status.accounts.kind === "ready" ? activeAccount(s) : null));
+  // 弹窗里添加账户时，写入新列表、关弹窗、弹通知在同一个任务里。正文换上新列表要挂新卡（舞台的花枝与立绘两块画布、
+  // 画布挂上时还会强制一次样式与布局）、给聚光卡换人，和关弹窗挤在同一次提交里的话，弹窗淡出与通知入场要等它做完才起步。
+  // 所以正文按延后的快照画：状态容器一变的那次同步提交里只有这一层重渲染、正文原样跳过；新列表在随后的任务里分片渲染，
+  // 浏览器先把弹窗淡出的第一帧画出来
+  const live = useMemo<AccountsSnapshot>(() => ({ status, accounts, currentAccountId, me }), [status, accounts, currentAccountId, me]);
+  return <AccountsView view={useDeferredValue(live)} />;
+}
+
+const AccountsView = memo(function AccountsView({ view }: { view: AccountsSnapshot }) {
+  const { status, accounts, currentAccountId, me } = view;
+  const titleId = useId();
   const actions = useLauncherActions();
   const run = useRunner();
   const online = useOnline();
   const microsoftUnavailable = useLauncherSelector(microsoftLoginUnavailable);
-  const act = useAccountActions();
+  const act = useAccountActions(accounts, currentAccountId);
   const gridRef = useReflow<HTMLDivElement>();
 
   // 上一次落定的读取结果。读取出错后点重试的这一轮不开加载门：错误卡留在原处、重试按钮转圈，结果回来再原位换掉。
@@ -188,7 +207,7 @@ export default function AccountsPage(_props: PageProps<"accounts">) {
       <Appear>{gate.view === "skeleton" && gate.slow && <p className={styles.slowHint}>{SLOW_LOADING_HINT}</p>}</Appear>
     </Page>
   );
-}
+});
 
 /**
  * 读到之后的正文，与骨架同一副栈。挂载时就是内容（页面还在入场），从页面分给 Loadable 的那个号往下编，聚光卡与分区照常错开入场；

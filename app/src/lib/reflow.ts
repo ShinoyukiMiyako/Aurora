@@ -11,14 +11,21 @@
 // 做法（FLIP）：布局照常一步到位；每个子项记着上一次相对容器的位置，位置变了就补一段从旧位置衰减到 0 的位移。
 // - 位移走独立的 translate 属性：页面入场用的是 transform，两者叠加，互不覆盖。
 // - 位移交给 Web Animations，关键帧由 settle 弹簧的解析解采样而来：整段在合成线程上播，数据到达时主线程正忙着渲染也不掉帧。
-// - 途中又被挤一次：按解析解算出此刻的位置与速度，带着速度接着走，不从零速重新起步。
+// - 途中又被挤一次：按解析解算出此刻的位置与速度，带着速度接着走，不从零速重新起步。弹簧是线性的，这一段等于
+//   「旧轨迹照旧走」加上「这一趟的新位移从静止起步」两部分之和，两部分各按各的时刻起步：
+//   旧轨迹不能停，新的一段起步时刻钉在文档时间轴此刻（旧动画的 currentTime 就是相对它算的）；新建的 Web Animation
+//   要到带着它的那一帧（忙时下一帧）才定起步时刻，不钉的话在动的东西先停一两帧再接着走。
+//   新位移那部分与别处从静止起步的让位一样等新排布画出来：先原样留着，到期时在同一个回调里换成从那一刻的位置与速度
+//   起步的整段。嵌套的两层（外层分组接着走、里面的行从静止起步）同一刻起步，方向相反的两段位移才互相抵消；
+//   早一两帧起步，叠起来就露出单层的位移，在终点附近多冲出去一截。长提交之后也不会把新位移的开头一截跳过去。
 // - 从静止起步的先暂停在起点，等新排布画出来的下一帧才开始计时：画一整片新内容的那一帧很长，从提交就计时的话第一步跳一大截。
 //   各容器的等待挂在同一条队列上（holdUntilPainted），同一帧到期的在同一个回调里开播；别的模块要与让位同一帧起步的动画也挂进来，
 //   要跟着某一项这一趟的让位起步的（它排队就一起排、它当场起步就当场起步）用 followReflow。
 //   增删引起的按提交在帧与帧之间算（隔两帧）；提交发生在某一帧的动画帧回调里时新排布就在这一帧画出，
 //   由这一帧渲染步骤里的尺寸观察认出来，少等一帧。
 //   跟着 framer-motion 形变走的（传 morph）不等：形变从提交那一刻计时，这里把起步时刻钉在建好的那一刻，与它用同一个时钟。
-//   尺寸观察要到下一帧的渲染步骤才报：形变节点在 onLayoutAnimationStart 里调 syncReflow（useReflow 的 sync）当场补跑，才同一刻起步。
+//   尺寸观察要到下一帧的渲染步骤才报：形变节点在 onLayoutAnimationStart 里调 syncReflow（useReflow 的 sync）当场补跑，
+//   并交来形变自己的起步时刻，才同一刻起步。
 // - 新插入的项自己不动、就地淡入。例外是传 morph 的容器长高、新项开了新的一行：它跟着外框下沿滑下来，
 //   起点不高于原有最低一项的下沿（也不高于 -Δh）；紧贴着上一项的仍就地淡入，由长高的外框下沿逐步露出。
 // - 测量只发生在观察者报了变化的那一帧，先读完再写，不来回触发布局。
@@ -89,31 +96,48 @@ interface Shift {
   ty: number;
 }
 
-interface Flight {
-  animation: Animation;
-  spring: SpringName;
+/**
+ * 一段让位的轨迹：位移是 rest 加上弹簧从 (x0, vx)、(y0, vy) 起走了 t 秒的位移。
+ * rest 只在途中接续、等新排布画出来的那一截不为 0：这一趟新挤出来的位移原样留着，旧轨迹接着走（见 observeReflow 的 launch）。
+ */
+interface Shape {
   x0: number;
   vx: number;
   y0: number;
   vy: number;
+  restX: number;
+  restY: number;
+}
+
+interface Flight extends Shape {
+  animation: Animation;
+  spring: SpringName;
   additive: boolean;
-  /** 从静止起步时挂进等待队列的那一项；带着速度当场起步的、钉了起步时刻的为 null。 */
+  /**
+   * 这一趟挂进等待队列的那一项，到期时新排布已经画出。从静止起步的停在起点、到期开播；途中接续的到期时换成整段
+   * （followReflow 也据此认这一趟）。走 morph 的为 null。
+   */
   hold: Hold | null;
 }
 
-interface Launch {
+interface Launch extends Shape {
   el: HTMLElement;
-  x0: number;
-  vx: number;
-  y0: number;
-  vy: number;
   additive: boolean;
   replaces: Animation | null;
+  /**
+   * 被顶替的那段已在播（没停在起点等）。刚开播、起步时刻还没定的那一刻速度也是 0，仍按在动的接着走：
+   * 跟着它一起开播的（任务页换组行的飞行）已在走，它并进新的一段重新等新排布画出来，两层就错开两帧。
+   */
+  moving: boolean;
 }
 
-/** 暂停在起点、等新排布画出来的一段：frames 是还要等的动画帧回调数，到期时 animations 里还停着的在同一个回调里开播。 */
+/**
+ * 等新排布画出来的一项：frames 是还要等的动画帧回调数。到期时同一个回调里先调 starts（途中接续换成整段，
+ * 收到这一批钉的起步时刻），再开播 animations 里还停着的。
+ */
 interface Hold {
   animations: Animation[];
+  starts: ((at: number) => void)[];
   frames: number;
 }
 
@@ -128,8 +152,10 @@ export const HOLD_AFTER_MUTATION = 2;
 export const HOLD_AFTER_RESIZE = 1;
 
 /**
- * 每个窗口一条等待队列，排着时恰好有一个动画帧回调。各容器的让位与别的模块挂进来的动画共用它：同一帧到期的在同一个回调里开播，
- * 解析出同一个起步时刻。各排各的回调，同一帧里先跑的那个开播时另一个还没轮到，两段就差出一截。
+ * 每个窗口一条等待队列，排着时恰好有一个动画帧回调。各容器的让位与别的模块挂进来的动画共用它：同一帧到期的在同一个回调里开播。
+ * 各排各的回调、在同一帧里分开 play 的，Chromium 实测也定成同一个起步时刻；共用一个回调是为了不依赖引擎这样做：
+ * 规范只说起步时刻取动画就绪那一刻的时间轴时间，没有要求同一帧里分开 play 的在同一刻就绪。
+ * 有途中接续要换成整段的那一批整批钉起步时刻（见 tick），同一批也靠同一个回调认出来。
  */
 const waiting = new WeakMap<Window, Hold[]>();
 
@@ -137,26 +163,62 @@ function tick(view: Window, holds: Hold[]): void {
   // 先换上新的一条：开播途中再挂进来的排到它上面，从下一帧起算
   const kept: Hold[] = [];
   waiting.set(view, kept);
+  const due: Hold[] = [];
   for (const hold of holds) {
-    if (--hold.frames > 0) {
-      kept.push(hold);
-      continue;
-    }
-    // 等待期间被取消（落定、被新的轨迹顶替）、播完或已在别处播起来的不再播：已取消的动画 play 会从头重播
-    for (const animation of hold.animations) if (animation.playState === "paused") animation.play();
+    if (--hold.frames > 0) kept.push(hold);
+    else due.push(hold);
   }
-  if (kept.length > 0) view.requestAnimationFrame(() => tick(view, kept));
-  else waiting.delete(view);
+  // 到期的各项来自互不相干的容器与模块。各排各的动画帧回调时，一个回调抛异常，浏览器报告之后照样跑同一帧别的回调；
+  // 共用一个回调只为同一刻起步，不该让一项的异常连累同一批：每个 start 与 play 各自接住异常，同一批照常做完，
+  // 再原样抛出（不止一个时合成 AggregateError），照样冒到动画帧回调外面。
+  // 下一次回调排在 finally 里：漏排的话 kept 再也等不到回调，之后挂进来的只会追加进这条队列，
+  // 这个窗口的让位全停在起点、接续的停在留着位移的末帧。取不到时间轴的时间时这一批钉不了，整批不做，异常照样抛出
+  const failures: unknown[] = [];
+  try {
+    // 只有从静止起步的一批照常 play，起步时刻交给引擎在这一帧的动画更新里一起定（新上合成线程的常常定在下一帧）。
+    // 有途中接续要换成整段的一批，整批钉在这一帧的时间上：换上的整段不能等引擎定（定在下一帧的话，接着走的旧轨迹
+    // 在那一帧停住）；只钉它又不行，钉了起步时刻的一段新上合成线程时，同一批里还没定时刻、只在主线程上播的（叠加模式）
+    // 要等到下一帧才定，里外两层又错开一帧（Chromium 实测，外层分组钉在这一帧、里面叠加模式的行晚一帧起步）
+    const pinned = due.some((hold) => hold.starts.length > 0) ? timelineNow(view) : null;
+    if (pinned !== null) {
+      for (const hold of due) {
+        for (const start of hold.starts) {
+          try {
+            start(pinned);
+          } catch (error) {
+            failures.push(error);
+          }
+        }
+      }
+    }
+    for (const hold of due) {
+      for (const animation of hold.animations) {
+        // 等待期间被取消（落定、被新的轨迹顶替）、播完或已在别处播起来的不再播：已取消的动画 play 会从头重播
+        if (animation.playState !== "paused") continue;
+        try {
+          animation.play();
+          if (pinned !== null) animation.startTime = pinned;
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+    }
+  } finally {
+    if (kept.length > 0) view.requestAnimationFrame(() => tick(view, kept));
+    else waiting.delete(view);
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, `让位等待队列这一帧到期的有 ${failures.length} 项抛了异常`);
 }
 
 function checkWait(wait: number): void {
   if (!Number.isInteger(wait) || wait < 1) throw new RangeError(`等待的动画帧数要是正整数，收到 ${wait}`);
 }
 
-/** 当场暂停并挂进 view 的等待队列，还要等 frames 次动画帧回调。 */
-function enqueue(animation: Animation, view: Window, frames: number): Hold {
-  animation.pause();
-  const hold: Hold = { animations: [animation], frames };
+/** 挂进 view 的等待队列，还要等 frames 次动画帧回调；animations 当场暂停，到期时开播。 */
+function enqueue(animations: Animation[], view: Window, frames: number): Hold {
+  for (const animation of animations) animation.pause();
+  const hold: Hold = { animations, starts: [], frames };
   const holds = waiting.get(view);
   if (holds !== undefined) {
     holds.push(hold);
@@ -173,43 +235,85 @@ function enqueue(animation: Animation, view: Window, frames: number): Hold {
  * 与同一帧到期的其余等待在同一个回调里开播。等待期间动画已被取消、播完或顶替（playState 不是 paused）就不再播。
  * wait 按调用的时机取：提交后的微任务里（增删观察、framer-motion 的布局冲刷）用 HOLD_AFTER_MUTATION，
  * 渲染步骤里（尺寸观察）用 HOLD_AFTER_RESIZE；这里照数，提交发生在动画帧回调里时少等一帧的校正只有 observeReflow 自己的让位有。
- * 要跟着某一项的让位起步的动画用 followReflow，它该排队时也挂在这里。
+ * 例如卡片外框（ui/Card 的 reflowEdge）：只在尺寸观察里起步，按 HOLD_AFTER_RESIZE 挂进来，与卡内从静止起步的让位在同一个回调里开播。
+ * 要跟着某一项的让位起步的动画（任务页换组行的飞行）用 followReflow，它该排队时也挂在这里。
  * 停止观察、卸载都不撤销等待：还在等的照常开始走，不然会停在起点。
  */
 export function holdUntilPainted(animation: Animation, view: Window, wait: number): void {
   checkWait(wait);
-  enqueue(animation, view, wait);
+  enqueue([animation], view, wait);
+}
+
+/**
+ * 等新排布画出来再调 start：第 wait 次动画帧回调时调，与同一帧到期的等待在同一个回调里、先于它们开播。wait 的取法同 holdUntilPainted。
+ * 给自己算途中接续的元素用（ui/Card 的 reflowEdge 外框）：等着的这段时间旧轨迹接着走、这次的位移原样留着，
+ * start 里换成从那一刻的位置与速度起步的整段，起步时刻钉在收到的 at 上（这一帧的时间）。同一批到期的、从静止起步的
+ * 也钉在 at 上（见 tick），新位移与卡内从静止起步的让位同一刻起步。
+ * 停止观察、卸载都不撤销：到期照常调，start 自己认还该不该换。
+ */
+export function startWhenPainted(start: (at: number) => void, view: Window, wait: number): void {
+  checkWait(wait);
+  enqueue([], view, wait).starts.push(start);
+}
+
+/**
+ * 文档时间轴此刻的时间。途中接续时旧动画走了多久（currentTime）就是相对它算的，接着走的那一截起步时刻钉在这里才与读数同一刻。
+ * 它在帧与帧之间停在上一帧的帧时间上，比 performance.now() 早：钉在后者上，旧轨迹要等到那时才接着走，在动的东西先顿一截。
+ */
+function timelineNow(view: Window): number {
+  const time = view.document.timeline.currentTime;
+  if (typeof time !== "number") throw new Error(`文档时间轴没有可用的时间（${String(time)}），接续的起步时刻无从钉起`);
+  return time;
+}
+
+/**
+ * 途中接续里等新排布画出来的那一截：一条采样好的轨迹（lib/slide 的 springTrack 一类，旧轨迹接着走、这次的位移原样留着）
+ * 交给 Web Animations 播，起步时刻钉在文档时间轴此刻，不先停在起点；fill 为 both，播完也停在留着位移的末帧，等着换成整段。
+ * 与让位里带着速度接着走的同一个做法。给自己按解析解算接续的元素用（ui/Card 的 reflowEdge 外框），换的时机交给 startWhenPainted。
+ */
+export function playContinuing(el: HTMLElement, track: { frames: Keyframe[]; duration: number }): Animation {
+  const view = el.ownerDocument.defaultView;
+  if (view === null) throw new Error("元素不在窗口里，没有文档时间轴可钉");
+  const at = timelineNow(view);
+  const animation = el.animate(track.frames, { duration: track.duration, easing: "linear", fill: "both" });
+  animation.startTime = at;
+  return animation;
 }
 
 const flights = new WeakMap<HTMLElement, Flight>();
 
 /** 观察中的容器各自的补跑入口，见 syncReflow。 */
-const syncs = new WeakMap<HTMLElement, () => void>();
+const syncs = new WeakMap<HTMLElement, (startedAt?: number) => void>();
 
 /**
  * 对已在 observeReflow 观察中的 container 当场补跑一趟：读新位置、与上一趟比、起动画，等同于尺寸观察此刻报到；
  * 之后尺寸观察再报到时位置已记过，不重复起动画。container 不在观察中时什么也不做。
  * 用途：framer-motion 布局节点的 onLayoutAnimationStart 里调用，兄弟的让位与形变同一刻起步。尺寸观察要到提交之后
  * 那一帧的渲染步骤才报，比形变晚一帧以上；形变在提交后的微任务里冲刷时起步，onLayoutAnimationStart 就在这次冲刷里。
- * - 走 morph 的轨迹起步时刻钉在这一趟读到的 performance.now()、fill 为 backwards，与增删那条路一致。
+ * - startedAt：形变自己的起步时刻（framer-motion 冲刷布局时写下的帧时间 frameData.timestamp，形变的 startTime 就取它）。
+ *   走 morph 的轨迹起步时刻钉在这里、fill 为 backwards。冲刷在回调之前就取了时刻，比回调里另读的 performance.now()
+ *   早零点几毫秒（点击触发的提交）到几毫秒（定时器触发的提交）：钉在后者上，兄弟整段都比形变的边缘落后这么多。
+ *   不给时钉在这一趟读到的 performance.now()，与增删那条路一致。
  * - 增删观察还没报的变化（同一次提交里的增删、暂停开关）先一并收下，再跑这一趟。
  * - 从静止起步的按提交后的微任务算，等 HOLD_AFTER_MUTATION 帧：这时新排布还没画出来。
  */
-export function syncReflow(container: HTMLElement): void {
-  syncs.get(container)?.();
+export function syncReflow(container: HTMLElement, startedAt?: number): void {
+  syncs.get(container)?.(startedAt);
 }
 
 /**
- * 让 animation 跟着 leader 这一趟的让位起步，两段的起步时刻在同一帧定下。animation 由调用方建好、还没开始计时；
+ * 让 animation 跟着 leader 这一趟的让位起步，两段同一刻开始计时。animation 由调用方建好、还没开始计时；
  * leader 是某个 observeReflow 容器的让位项（容器的直接子项，display: contents 的包裹层换成它里面的）。
- * - leader 的让位从静止起步、正停在起点等新排布画出来：animation 当场暂停，挂进它的那一项等待，与它在同一个回调里开播
- *   （那一项此后改成少等一帧时一起少等）。
- * - leader 的让位时钟还没走、也不在等（上一段没走完又被挤、带着速度当场接着走的，或刚在这一帧的回调里开播的）：
- *   animation 也不等，建好就播。
+ * 「这一趟」按 leader 这一趟挂的等待认：还没到期，就是这一趟的新排布还没画出来。
+ * - leader 这一趟的新位移还在等新排布画出来：animation 当场暂停，挂进它的那一项等待，与它在同一个回调里开播
+ *   （那一项此后改成少等一帧时一起少等）。从静止起步的停在起点；上一段没走完又被挤的旧轨迹照旧走、这一趟的位移留着，
+ *   到期时换成整段，跟随的与这一趟的位移同一刻起步。增删引起的到下一帧尺寸观察的回调里才调也赶得上，那一项还没到期。
+ * - leader 刚在这一帧的回调里开播或换成整段、时钟还没走：animation 也不等，建好就播；leader 的起步时刻钉在了这一帧
+ *   （那一批有途中接续换成整段）时 animation 钉同一刻，否则与它在同一帧由引擎定。
  * - leader 没有让位，或它的让位早已在走（这一趟没挪动它）：跟谁都不相干，按从静止起步处理，同 holdUntilPainted(animation, view, wait)。
  * 认的是调用这一刻 leader 的让位，所以要在 leader 所在容器这一趟跑过之后调：增删引起的跑在提交后的微任务里，
  * 尺寸变化引起的跑在这一帧尺寸观察的回调里，在比它晚建的尺寸观察回调里调就赶得上。
- * leader 的让位走 morph 时报错：那里的起步时刻钉在建好的那一刻、不经等待队列，跟着它要钉同一刻并留住首帧，这里不做。
+ * leader 的让位走 morph 时报错：那里的起步时刻钉在建好的那一刻，可能晚于接下来那一帧的帧时间，跟着它要钉同一刻并留住首帧，这里不做。
  */
 export function followReflow(animation: Animation, leader: HTMLElement, wait: number): void {
   checkWait(wait);
@@ -217,13 +321,18 @@ export function followReflow(animation: Animation, leader: HTMLElement, wait: nu
   if (view === null) throw new Error("领头元素不在窗口里，没有动画帧可等");
   const flight = flights.get(leader);
   if (flight?.spring === "morph") throw new Error("领头元素的让位走 morph，起步时刻钉在建好的那一刻，followReflow 跟不了");
-  if (flight === undefined || elapsedSeconds(flight.animation) > 0) {
-    enqueue(animation, view, wait);
+  if (flight !== undefined && flight.hold !== null && flight.hold.frames > 0) {
+    animation.pause();
+    flight.hold.animations.push(animation);
     return;
   }
-  if (flight.hold === null || flight.hold.frames <= 0) return;
-  animation.pause();
-  flight.hold.animations.push(animation);
+  if (flight === undefined || elapsedSeconds(flight.animation) > 0) {
+    enqueue([animation], view, wait);
+    return;
+  }
+  // leader 刚在这一帧起步：这一批钉了起步时刻的，跟随的钉同一刻（不钉的话它要等引擎定，可能晚一帧）
+  const startedAt = flight.animation.startTime;
+  if (typeof startedAt === "number") animation.startTime = startedAt;
 }
 
 /**
@@ -236,6 +345,21 @@ function land(el: HTMLElement): void {
   if (flying === undefined) return;
   flights.delete(el);
   flying.animation.cancel();
+}
+
+/**
+ * 登记的这一段此刻弹簧那部分的位移与速度（不含 rest）。时间还没走（暂停在起点等新排布画出来、刚建好、或钉下的起步时刻还没到）：
+ * 就是起步时记下的值，不经解析解换算。欠阻尼弹簧在 t=0 算出的速度带舍入误差（±1e-13），从静止起步的会被当成在动，就不再先暂停
+ */
+function stateOf(flight: Flight): { x: { x: number; v: number }; y: { x: number; v: number } } {
+  const t = elapsedSeconds(flight.animation);
+  if (t === 0) return { x: { x: flight.x0, v: flight.vx }, y: { x: flight.y0, v: flight.vy } };
+  return { x: springAt(flight.spring, flight.x0, flight.vx, t), y: springAt(flight.spring, flight.y0, flight.vy, t) };
+}
+
+/** 留着的位移并进弹簧那部分：一整段从这个位置与速度出发，回到 0。 */
+function whole(shape: Shape): Shape {
+  return { x0: shape.restX + shape.x0, vx: shape.vx, y0: shape.restY + shape.y0, vy: shape.vy, restX: 0, restY: 0 };
 }
 
 /**
@@ -262,7 +386,8 @@ export function closestScroller(el: HTMLElement): HTMLElement | null {
  * 起步时刻取那一刻的 performance.now()；新建的 Web Animations 却要等带着它的那一帧画出来才定起步时刻，一次长提交之后
  * 晚几十毫秒，整段跟着落后。所以这里不等新排布画出来，起步时刻直接钉在建好的那一刻（文档时间轴与 performance.now()
  * 同一原点）。增删观察就报在提交后的微任务里，与形变的起点只差这一趟自己的耗时；尺寸观察报在下一帧的渲染步骤里，
- * 形变已经走了从提交到这一帧的那一段，这条路上仍晚这么多，除非形变节点在 onLayoutAnimationStart 里调 syncReflow 当场补跑。
+ * 形变已经走了从提交到这一帧的那一段，这条路上仍晚这么多，除非形变节点在 onLayoutAnimationStart 里调 syncReflow 当场补跑，
+ * 并把形变自己的起步时刻交过来（见 syncReflow 的 startedAt）。
  * 容器长高 Δh、新插入的项落在原有各项之下时，它们沿 morph 跟着外框下沿下来：起点不高于原有最低一项的下沿，
  * 补的位移也不超过 Δh，不压到上一行上；补不到 1px 的就地淡入。
  * 运行环境没有 ResizeObserver 或 Web Animations 时什么也不做：组件测试用的 jsdom 既不做布局也没有这两个接口，
@@ -292,49 +417,75 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
     if (Math.abs(tx) < MOVE_EPSILON_PX && Math.abs(ty) < MOVE_EPSILON_PX) return null;
     const flying = flights.get(el);
     if (flying !== undefined) {
-      // 时间还没走（暂停在起点等新排布画出来、刚建好、或钉下的起步时刻还没到）：此刻就是起步时记下的位置与速度，不经解析解换算。
-      // 欠阻尼弹簧在 t=0 算出的速度带舍入误差（±1e-13），从静止起步的会被当成在动，launch 就不再先暂停
-      const t = elapsedSeconds(flying.animation);
-      const x = t === 0 ? { x: flying.x0, v: flying.vx } : springAt(flying.spring, flying.x0, flying.vx, t);
-      const y = t === 0 ? { x: flying.y0, v: flying.vy } : springAt(flying.spring, flying.y0, flying.vy, t);
-      return { el, x0: x.x + tx, vx: x.v, y0: y.x + ty, vy: y.v, additive: flying.additive, replaces: flying.animation };
+      // 弹簧那部分照旧，这一趟的位移并进留着的那部分：从静止起步的一起等，在动的旧轨迹接着走、新位移等画出来，见 launch
+      const now = stateOf(flying);
+      const moving = flying.animation.playState !== "paused" || now.x.v !== 0 || now.y.v !== 0;
+      return { el, x0: now.x.x, vx: now.x.v, y0: now.y.x, vy: now.y.v, restX: flying.restX + tx, restY: flying.restY + ty, additive: flying.additive, replaces: flying.animation, moving };
     }
     // 元素自己就靠 translate 定位或悬停位移时，位移叠加在它上面而不是顶替它（叠加模式不上合成线程，但不会把它甩离原位）
     const base = view.getComputedStyle(el).translate;
     const additive = base !== undefined && base !== "" && base !== "none";
-    return { el, x0: tx, vx: 0, y0: ty, vy: 0, additive, replaces: null };
+    return { el, x0: 0, vx: 0, y0: 0, vy: 0, restX: tx, restY: ty, additive, replaces: null, moving: false };
   };
 
   /**
-   * afterCommit：这一趟跑在提交后的微任务里（增删观察、补跑），从静止起步的等 HOLD_AFTER_MUTATION 帧；
-   * 否则跑在渲染步骤里（尺寸观察），等 HOLD_AFTER_RESIZE 帧。
-   * at：这一趟读到的 performance.now()，走 morph 的起步时刻钉在这里。
+   * 起一段并登记。pin 为 null 时起步时刻等带着它的那一帧再定，否则钉在 pin。
+   * held：等新排布画出来、留着位移的那一截。它播完停在末帧（fill 为 both），登记不清，到期还要按它换成整段。
    */
-  const launch = ({ el, x0, vx, y0, vy, additive, replaces }: Launch, afterCommit: boolean, at: number) => {
-    replaces?.cancel();
-    const { frames, duration } = springTrack(spring, x0, vx, y0, vy);
-    // 钉了起步时刻的，接下来那一帧的帧时间可能早于它（尺寸观察报在这一帧的渲染步骤里，帧时间是这一帧开始时定的；
-    // 长提交之后的第一帧，帧时间是长任务之前排下的）：不留住首帧，那一帧会画成终点
-    const animation = el.animate(frames, { duration, easing: "linear", composite: additive ? "add" : "replace", fill: morphSynced ? "backwards" : "auto" });
-    const flight: Flight = { animation, spring, x0, vx, y0, vy, additive, hold: null };
+  const begin = (el: HTMLElement, shape: Shape, additive: boolean, fill: FillMode, pin: number | null, held: boolean): Flight => {
+    const { frames, duration } = springTrack(spring, shape.x0, shape.vx, shape.y0, shape.vy, shape.restX, shape.restY);
+    const animation = el.animate(frames, { duration, easing: "linear", composite: additive ? "add" : "replace", fill });
+    if (pin !== null) animation.startTime = pin;
+    const flight: Flight = { ...shape, animation, spring, additive, hold: null };
     flights.set(el, flight);
     const clear = () => {
       if (flights.get(el) === flight) flights.delete(el);
     };
-    animation.onfinish = clear;
+    if (!held) animation.onfinish = clear;
     animation.oncancel = clear;
-    // 跟着 framer 形变走的与形变同一个时钟，见 observeReflow
+    return flight;
+  };
+
+  /**
+   * afterCommit：这一趟跑在提交后的微任务里（增删观察、补跑），新位移等 HOLD_AFTER_MUTATION 帧；
+   * 否则跑在渲染步骤里（尺寸观察），等 HOLD_AFTER_RESIZE 帧。
+   * at：走 morph 的起步时刻钉在这里：补跑时是形变节点交来的起步时刻，否则是这一趟读到的 performance.now()。
+   */
+  const launch = (planned: Launch, afterCommit: boolean, at: number) => {
+    const { el, additive } = planned;
+    planned.replaces?.cancel();
+    // 跟着 framer 形变走的与形变同一个时钟，见 observeReflow。钉了起步时刻，接下来那一帧的帧时间可能早于它
+    // （尺寸观察报在这一帧的渲染步骤里，帧时间是这一帧开始时定的；长提交之后的第一帧，帧时间是长任务之前排下的）：
+    // 不留住首帧，那一帧会画成终点
     if (morphSynced) {
-      animation.startTime = at;
+      begin(el, whole(planned), additive, "backwards", at, false);
       return;
     }
-    // 时钟从这一刻走，新排布却要等这一帧渲染完才上屏：一次提交要画一整片新内容时这一帧要几十毫秒，
-    // 弹簧开头那一截没上屏就过去了，第一步跳一大截。先停在起点（首帧当场生效，时钟不走），等新排布画出来的下一帧再播。
-    // 途中再被挤的带着速度当场接着走：停两帧就是在动的东西顿一下。
-    // 被顶替或落定时动画当场取消，等待队列认得出、不再播；停止观察时不撤销等待（同一元素换弹簧重新观察时也是先停后挂）
-    if (vx !== 0 || vy !== 0) return;
-    flight.hold = enqueue(animation, view, afterCommit ? HOLD_AFTER_MUTATION : HOLD_AFTER_RESIZE);
-    if (afterCommit) unpainted.push(flight.hold);
+    // 被顶替或落定时动画当场取消，等待队列认得出、不再播也不再换；停止观察时不撤销等待（同一元素换弹簧重新观察时也是先停后挂）
+    const wait = afterCommit ? HOLD_AFTER_MUTATION : HOLD_AFTER_RESIZE;
+    let hold: Hold;
+    if (!planned.moving) {
+      // 时钟从这一刻走，新排布却要等这一帧渲染完才上屏：一次提交要画一整片新内容时这一帧要几十毫秒，
+      // 弹簧开头那一截没上屏就过去了，第一步跳一大截。先停在起点（首帧当场生效，时钟不走），等新排布画出来的下一帧再播
+      const flight = begin(el, whole(planned), additive, "auto", null, false);
+      hold = enqueue([flight.animation], view, wait);
+      flight.hold = hold;
+    } else {
+      // 途中再被挤（被顶替的那段已在播）：旧轨迹不停（停下等就是在动的东西顿一下），起步时刻钉在读旧轨迹的这一刻；这一趟的新位移原样留着，
+      // 与别处从静止起步的让位一样等新排布画出来，到期时在开播它们的同一个回调里，按那一刻的位置与速度换成整段，
+      // 与它们钉同一个起步时刻（见 tick）
+      const flight = begin(el, planned, additive, "both", timelineNow(view), true);
+      hold = enqueue([], view, wait);
+      flight.hold = hold;
+      hold.starts.push((pinned) => {
+        if (flights.get(el) !== flight) return;
+        const now = stateOf(flight);
+        flight.animation.cancel();
+        const shape = whole({ x0: now.x.x, vx: now.x.v, y0: now.y.x, vy: now.y.v, restX: flight.restX, restY: flight.restY });
+        begin(el, shape, additive, "auto", pinned, false).hold = hold;
+      });
+    }
+    if (afterCommit) unpainted.push(hold);
   };
 
   /**
@@ -382,8 +533,8 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
     return ranked.slice(0, REFLOW_MAX_ITEMS).map((r) => r.shift);
   };
 
-  /** quiet：这一趟按暂停处理（暂停开关刚增删过）。afterCommit 见 launch。 */
-  const pass = (quiet: boolean, afterCommit: boolean) => {
+  /** quiet：这一趟按暂停处理（暂停开关刚增删过）。afterCommit 见 launch。startedAt：补跑时形变节点交来的起步时刻，见 syncReflow。 */
+  const pass = (quiet: boolean, afterCommit: boolean, startedAt?: number) => {
     // 先数，再认包裹层，展开之后再数一次，最后才量：超过硬上限时一个位置也不读。
     // 旧位置跟着作废：超限期间的变化没有跟踪，回到上限以内时拿它补滑，会把用户早已看着跳完的位移再播一遍。
     // 还在飞的一并落定：不读位置就认不出谁被挪动了，剩下的轨迹又是相对旧排布起的；落定只走 DOM 与登记表，不读布局
@@ -520,8 +671,8 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
       const planned = plan(s.el, s.tx, s.ty);
       if (planned !== null) launches.push(planned);
     }
-    // 同一趟的几段钉在同一刻：逐个建动画要花时间，各读各的会让它们错开起步
-    const at = view.performance.now();
+    // 同一趟的几段钉在同一刻：逐个建动画要花时间，各读各的会让它们错开起步。形变节点交来了自己的起步时刻就用它
+    const at = startedAt ?? view.performance.now();
     // 已经过动画帧回调的不必再认，免得报不出尺寸的容器越攒越多
     unpainted = unpainted.filter((hold) => hold.frames === HOLD_AFTER_MUTATION);
     const pending = unpainted.length;
@@ -571,7 +722,7 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
   };
   const kids = new MutationObserver((records) => pass(absorb(records), true));
   // 补跑时增删观察可能还有没报的记录（同一次提交里的增删、暂停开关）：取出来先收下，回调也就不会再拿它们跑一趟
-  const sync = () => pass(absorb(kids.takeRecords()), true);
+  const sync = (startedAt?: number) => pass(absorb(kids.takeRecords()), true, startedAt);
   // 用户自己滚动不算位移：滚动事件先于布局派发，这里记下的就是布局之前的滚动位置
   const onScroll = () => {
     scroll = readScroll();
@@ -594,10 +745,11 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
 
 /**
  * 挂到容器元素上的 ref：容器的直接子项互相让位。spring 见 observeReflow。
- * 返回值同时带 sync()：对此刻挂着的容器调 syncReflow，没挂着时什么也不做。返回值（连同 sync）在 spring 不变时引用稳定，
- * 可以直接交给 framer-motion 的 onLayoutAnimationStart。
+ * 返回值同时带 sync(startedAt?)：对此刻挂着的容器调 syncReflow，没挂着时什么也不做。返回值（连同 sync）在 spring 不变时引用稳定，
+ * 可以直接交给启动胶囊的 onMorphStart（它带着形变的起步时刻调用）；直接交给 framer-motion 的 onLayoutAnimationStart 时
+ * 不带时刻，按补跑这一刻的 performance.now() 钉。
  */
-export function useReflow<T extends HTMLElement>(spring: SpringName = "settle"): RefCallback<T> & { sync(): void } {
+export function useReflow<T extends HTMLElement>(spring: SpringName = "settle"): RefCallback<T> & { sync(startedAt?: number): void } {
   const mounted = useRef<T | null>(null);
   return useMemo(() => {
     const ref = (el: T | null) => {
@@ -609,8 +761,8 @@ export function useReflow<T extends HTMLElement>(spring: SpringName = "settle"):
         if (mounted.current === el) mounted.current = null;
       };
     };
-    const sync = () => {
-      if (mounted.current !== null) syncReflow(mounted.current);
+    const sync = (startedAt?: number) => {
+      if (mounted.current !== null) syncReflow(mounted.current, startedAt);
     };
     return Object.assign(ref, { sync });
   }, [spring]);

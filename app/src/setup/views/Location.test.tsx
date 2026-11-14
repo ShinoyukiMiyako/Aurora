@@ -105,9 +105,9 @@ const pathInput = () => {
   return input;
 };
 
-/** Field 的提示和错误共用这一个播报区：它的全部文字就是用户看到的那一条。 */
-const noticeLine = () => document.querySelector("main [aria-live='polite']")?.textContent;
-const noticeHint = () => document.querySelector<HTMLElement>("main [aria-live='polite'] > span");
+/** Field 的提示和错误共用这一个播报区：在场的那一块的文字就是用户看到的那一条（换下去的带 inert 留在原处淡出）。 */
+const noticeLine = () => document.querySelector("main [aria-live='polite'] > :not([inert])")?.textContent;
+const noticeHint = () => document.querySelector<HTMLElement>("main [aria-live='polite'] > :not([inert]) > span");
 
 function typeInto(input: HTMLInputElement, value: string): void {
   act(() => {

@@ -289,7 +289,6 @@
   position: relative;
   width: var(--cr-step-glyph);
   height: var(--cr-step-glyph);
-  place-items: center;
   line-height: var(--cr-step-glyph);
 }
 

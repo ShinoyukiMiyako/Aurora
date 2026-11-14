@@ -10,6 +10,7 @@
   width: 100%;
   height: 100%;
   min-height: 0;
+  /* 收尾时放大的晕染与面板在这里裁掉，不撑大外壳的滚动容器、不让它冒出滚动条 */
   overflow: hidden;
   background: var(--sk-bg);
 }
@@ -155,18 +156,11 @@
   font-weight: var(--sk-w-medium);
 }
 
-/* 跳过那一步时才挂上：淡入，不一帧冒出来（在行尾，不挤别的内容） */
+/* 跳过那一步时才挂上；进出由组件上的 popMark 驱动，这里不再另挂关键帧 */
 .railSkipped {
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
   color: var(--sk-text-2);
-  animation: railTagIn var(--sk-dur-in) var(--sk-ease-out);
-}
-
-@keyframes railTagIn {
-  from {
-    opacity: 0;
-  }
 }
 
 /* ---------------------------------------------------------------- 右栏：标题、步骤内容、底栏 */

@@ -5,7 +5,8 @@
 // 「输入用户名」只在提交、或输入过之后离开输入框才出现：刚打开弹窗就标红没有意义。
 // 弹窗本身由 LoginFlow 渲染（各种登录共用一个），这里只算外框与主体交上去。
 
-import { memo, useEffect, useRef, useState } from "react";
+import { useIsPresent } from "framer-motion";
+import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { BlossomBranch } from "../../art/illustrations/BlossomBranch";
 import { AccountFigure } from "../../art/skin/AccountFigure";
 import type { SkinRef } from "../../art/skin/layout";
@@ -56,8 +57,17 @@ export const OfflineDialog = memo(function OfflineDialog({ report }: { report: R
   const [touched, setTouched] = useState(false);
   // 输入过再清空、离开输入框才算碰过；只是点进来又点「取消」不该闪一下错误
   const edited = useRef(false);
-  const [submitting, setSubmitting] = useState(false);
-  const check = validateOfflineName(name, takenNames);
+  // 提交出去以后按提交那一刻已有的账户名查重，非空即提交中。添加成功时状态容器先读回带着新账户的列表、再关掉弹窗，
+  // 弹窗退场时仍在渲染、仍订阅账户列表：照实时列表查，刚加上的这个就成了与自己同名，主按钮跟着变禁用
+  const [sentAgainst, setSentAgainst] = useState<readonly string[] | null>(null);
+  const submitting = sentAgainst !== null;
+  // 提交的结果回来时弹窗是否还开着：已在退场的不再回到可以再填的样子
+  const present = useIsPresent();
+  const presentNow = useRef(present);
+  useLayoutEffect(() => {
+    presentNow.current = present;
+  }, [present]);
+  const check = validateOfflineName(name, sentAgainst === null ? takenNames : sentAgainst);
   const display = nameDisplay(name, check, touched);
   const figureName = useDebounced(name, FIGURE_DEBOUNCE_MS);
   const figureUuid = offlineUuid(figureName);
@@ -67,10 +77,11 @@ export const OfflineDialog = memo(function OfflineDialog({ report }: { report: R
   const submit = async () => {
     setTouched(true);
     if (check.level === "error" || submitting) return;
-    setSubmitting(true);
-    // 成功后状态容器关掉这个弹窗；失败时留在原处，可以改名再试
-    await run(() => actions.addOfflineAccount(name), ACTION_ERROR.addOffline);
-    setSubmitting(false);
+    setSentAgainst(takenNames);
+    const result = await run(() => actions.addOfflineAccount(name), ACTION_ERROR.addOffline);
+    // 成功时状态容器已关掉这个弹窗；账户加上之后接着的启动失败时也一样。这两种都保持提交时的样子直到退场播完：
+    // 转圈、不再接受提交。弹窗还开着的失败才回到可以改名再试的样子
+    if (!result.ok && presentNow.current) setSentAgainst(null);
   };
 
   useReportView(report, {

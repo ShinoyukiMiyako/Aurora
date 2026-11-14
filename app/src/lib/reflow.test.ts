@@ -3,6 +3,7 @@ import { createElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { drainFrames, fakeAnimate, render, stubResizeObserver, type ResizeObserverStub, type StubAnimation } from "../test/dom";
 import { springAt, type SpringName } from "./motion";
+import { springTrack } from "./slide";
 import {
   closestScroller,
   followReflow,
@@ -10,10 +11,12 @@ import {
   HOLD_AFTER_RESIZE,
   holdUntilPainted,
   observeReflow,
+  playContinuing,
   REFLOW_HARD_MAX_ITEMS,
   REFLOW_MAX_ITEMS,
   REFLOW_PAUSED_ATTR,
   REFLOW_SKIP_ATTR,
+  startWhenPainted,
   syncReflow,
   useReflow,
 } from "./reflow";
@@ -66,6 +69,8 @@ let layoutReads = 0;
 let positionReads = 0;
 /** 读高度（offsetHeight）的次数。 */
 let heightReads = 0;
+/** 文档时间轴此刻的时间（jsdom 没有 Web Animations，桩上一个）：动画的 currentTime 就是相对它算的，途中接续按它钉起步时刻。 */
+let timelineTime = 0;
 const SAMPLE_S = 1 / 120;
 
 function place(el: HTMLElement, box: Partial<Box>): void {
@@ -88,6 +93,8 @@ function child(container: HTMLElement, top: number, left = 0): HTMLElement {
 
 /** 起点位移：第一帧的 translate。 */
 const start = (call: Call) => String(call.frames[0].translate);
+/** 与 springTrack 写关键帧时同一个取整：保留两位小数。 */
+const r2 = (value: number) => Math.round(value * 100) / 100;
 const callsOn = (el: HTMLElement) => calls.filter((c) => c.el === el);
 /** MutationObserver 的回调在微任务里。 */
 const flushMutations = () => Promise.resolve();
@@ -114,6 +121,9 @@ beforeEach(() => {
   layoutReads = 0;
   positionReads = 0;
   heightReads = 0;
+  // 与 performance.now() 分得开：帧与帧之间时间轴停在上一帧的帧时间上，比此刻早
+  timelineTime = 500 + Math.round(Math.random() * 1e5) / 10;
+  Object.defineProperty(document, "timeline", { configurable: true, get: () => ({ currentTime: timelineTime }) });
   sizes = stubResizeObserver();
   vi.spyOn(HTMLElement.prototype, "offsetParent", "get").mockImplementation(function (this: HTMLElement) {
     layoutReads++;
@@ -195,6 +205,7 @@ afterEach(() => {
   document.body.replaceChildren();
   document.documentElement.removeAttribute("data-sk-reduced");
   Reflect.deleteProperty(HTMLElement.prototype, "animate");
+  Reflect.deleteProperty(document, "timeline");
   vi.unstubAllGlobals();
 });
 
@@ -766,7 +777,7 @@ describe(`observeReflow：子项超过 ${REFLOW_MAX_ITEMS} 个`, () => {
 });
 
 describe("observeReflow：途中再被挤", () => {
-  it("取消旧动画，新轨迹从此刻的位置加上新位移出发，速度接着走", () => {
+  it("取消旧动画，新的一段从此刻的位置加上新位移出发、速度接着走；新排布画出来之前只有旧轨迹接着走，这一趟的位移原样留着", () => {
     const { a, b } = column();
     place(b, { top: 220 });
     sizes.resize(a, 800);
@@ -778,9 +789,10 @@ describe("observeReflow：途中再被挤", () => {
     expect(first.animation.cancel).toHaveBeenCalledTimes(1);
     const second = callsOn(b)[1];
     const now = springAt("settle", -120, 0, 0.05);
-    expect(start(second)).toBe(`0px ${Math.round((now.x - 40) * 100) / 100}px`);
-    const next = Math.round(springAt("settle", now.x - 40, now.v, SAMPLE_S).x * 100) / 100;
-    expect(second.frames[1].translate).toBe(`0px ${next}px`);
+    expect(start(second)).toBe(`0px ${r2(now.x - 40)}px`);
+    // 下一个采样点：旧轨迹走了一步，这一趟挤出来的 40px 一点没动
+    expect(second.frames[1].translate).toBe(`0px ${r2(springAt("settle", now.x, now.v, SAMPLE_S).x - 40)}px`);
+    expect(second.frames.at(-1)?.translate).toBe("0px -40px");
   });
 
   it("动画播完后登记清掉：再被挤时从静止出发", () => {
@@ -984,7 +996,7 @@ describe("observeReflow：从静止起步等新排布画出来再计时", () => 
     expect(start(callsOn(b)[1])).toBe("0px -40px");
   });
 
-  it("已经在走的途中再被挤：带着速度当场接着走，不再暂停", () => {
+  it("已经在走的途中再被挤：不暂停，旧轨迹接着走、起步时刻钉在文档时间轴此刻，这一趟的位移原样留着（播完也停在末帧）；新排布画出来的下一帧换成从那一刻的位置与速度起步的整段", () => {
     const { a, b } = column();
     place(b, { top: 220 });
     sizes.resize(a, 800);
@@ -992,14 +1004,283 @@ describe("observeReflow：从静止起步等新排布画出来再计时", () => 
     frame();
     expect(first.animation.play).toHaveBeenCalledTimes(1);
     first.animation.currentTime = 50;
+    // performance.now() 比时间轴晚：钉在它上面，旧轨迹要等到那时才接着走，在动的东西先顿一截
+    pinNow();
     place(b, { top: 260 });
     sizes.resize(a, 800);
-    const second = callsOn(b)[1];
+    const held = callsOn(b)[1];
     const now = springAt("settle", -120, 0, 0.05);
-    expect(start(second)).toBe(`0px ${Math.round((now.x - 40) * 100) / 100}px`);
-    expect(second.animation.pause).not.toHaveBeenCalled();
-    expect(second.animation.playState).toBe("running");
-    expect(second.animation.startTime).toBeNull();
+    expect(start(held)).toBe(`0px ${r2(now.x - 40)}px`);
+    expect(held.animation.pause).not.toHaveBeenCalled();
+    expect(held.animation.playState).toBe("running");
+    expect(held.animation.startTime).toBe(timelineTime);
+    expect(held.options.fill).toBe("both");
+    // 尺寸观察起的：新排布就在这一帧画出，下一帧的动画帧回调里换。时间轴走到那一帧，留着的这一截已走了这么久
+    const elapsed = 4 + Math.random() * 40;
+    timelineTime += elapsed;
+    held.animation.currentTime = elapsed;
+    frame();
+    expect(held.animation.cancel).toHaveBeenCalledTimes(1);
+    const whole = callsOn(b)[2];
+    const at = springAt("settle", now.x, now.v, elapsed / 1000);
+    expect(start(whole)).toBe(`0px ${r2(at.x - 40)}px`);
+    expect(whole.frames[1].translate).toBe(`0px ${r2(springAt("settle", at.x - 40, at.v, SAMPLE_S).x)}px`);
+    expect(whole.frames.at(-1)?.translate).toBe("0px 0px");
+    // 起步时刻钉在这一帧的时间上：引擎定的话常在下一帧，接着走的旧轨迹在那一帧停住
+    expect(whole.animation.startTime).toBe(timelineTime);
+    expect(whole.options.fill).toBe("auto");
+    expect(whole.options.composite).toBe("replace");
+    expect(whole.animation.pause).not.toHaveBeenCalled();
+    expect(frameQueue).toHaveLength(0);
+    // 换上的整段照常登记：再被挤时按它算此刻的位置
+    whole.animation.currentTime = 30;
+    place(b, { top: 290 });
+    sizes.resize(a, 800);
+    const after = springAt("settle", at.x - 40, at.v, 0.03);
+    expect(start(callsOn(b)[3])).toBe(`0px ${r2(after.x - 30)}px`);
+    expect(whole.animation.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("增删引起的途中接续（提交后的微任务里，帧与帧之间）：同样钉在文档时间轴此刻；隔两帧，同一趟的几段在同一个回调里换成整段", async () => {
+    const { container, a, b, c } = column();
+    place(b, { top: 220 });
+    place(c, { top: 320 });
+    sizes.resize(a, 800);
+    const [firstB] = callsOn(b);
+    const [firstC] = callsOn(c);
+    frame();
+    const elapsed = 10 + Math.random() * 150;
+    firstB.animation.currentTime = elapsed;
+    firstC.animation.currentTime = elapsed;
+    pinNow();
+    // 上面插进一行：增删观察报在提交后的微任务里，这时时间轴停在上一帧的帧时间上
+    const banner = document.createElement("div");
+    place(banner, { top: 100, parent: container });
+    place(b, { top: 260 });
+    place(c, { top: 360 });
+    container.insertBefore(banner, b);
+    await flushMutations();
+    const [heldB, heldC] = [callsOn(b)[1], callsOn(c)[1]];
+    const now = springAt("settle", -120, 0, elapsed / 1000);
+    expect(start(heldB)).toBe(`0px ${r2(now.x - 40)}px`);
+    expect([heldB.animation.startTime, heldC.animation.startTime]).toEqual([timelineTime, timelineTime]);
+    expect([heldB.options.fill, heldC.options.fill]).toEqual(["both", "both"]);
+    expect([heldB.animation.playState, heldC.animation.playState]).toEqual(["running", "running"]);
+    // 下一帧画的才是新排布：还不换
+    frame();
+    expect([callsOn(b), callsOn(c)].map((list) => list.length)).toEqual([2, 2]);
+    const frameMs = 1000 / 60;
+    timelineTime += 2 * frameMs;
+    heldB.animation.currentTime = 2 * frameMs;
+    heldC.animation.currentTime = 2 * frameMs;
+    expect(frameQueue).toHaveLength(1);
+    frame();
+    const [wholeB, wholeC] = [callsOn(b)[2], callsOn(c)[2]];
+    const at = springAt("settle", now.x, now.v, (2 * frameMs) / 1000);
+    expect([start(wholeB), start(wholeC)]).toEqual([`0px ${r2(at.x - 40)}px`, `0px ${r2(at.x - 40)}px`]);
+    expect([wholeB.animation.startTime, wholeC.animation.startTime]).toEqual([timelineTime, timelineTime]);
+    expect([heldB.animation.cancel, heldC.animation.cancel].map((fn) => fn.mock.calls.length)).toEqual([1, 1]);
+    // 接着走的本来就在播：哪一段都不暂停、不再 play
+    for (const call of [heldB, heldC, wholeB, wholeC]) {
+      expect(call.animation.pause).not.toHaveBeenCalled();
+      expect(call.animation.play).not.toHaveBeenCalled();
+    }
+  });
+
+  it("同一次提交里外层接着走的让位、内层从静止起步的让位：外层这一趟挤出来的位移与内层在同一个回调里起步，外层的旧轨迹照旧走", async () => {
+    const outer = document.createElement("div");
+    document.body.append(outer);
+    place(document.body, {});
+    place(outer, { parent: document.body, clientWidth: 800 });
+    const above = child(outer, 0);
+    const group = child(outer, 100);
+    place(group, { clientWidth: 800 });
+    child(group, 0);
+    const row = child(group, 50);
+    const stopOuter = observeReflow(outer);
+    const stopInner = observeReflow(group);
+    stop = () => {
+      stopOuter();
+      stopInner();
+    };
+    sizes.resize(outer, 800);
+    sizes.resize(group, 800);
+    // 分组先被挤下去 60px，起步走到半路
+    place(group, { top: 160 });
+    sizes.resize(above, 800);
+    const [first] = callsOn(group);
+    frame();
+    const elapsed = 20 + Math.random() * 120;
+    first.animation.currentTime = elapsed;
+    // 同一次提交：上面那项移走，分组被带上去 100px（外层增删）；分组里插进一行，row 被挤下去 40px（内层增删）
+    const added = document.createElement("div");
+    place(added, { top: 50, parent: group });
+    place(row, { top: 90 });
+    place(group, { top: 60 });
+    above.remove();
+    group.insertBefore(added, row);
+    await flushMutations();
+    const held = callsOn(group)[1];
+    const [rowShift] = callsOn(row);
+    const now = springAt("settle", -60, 0, elapsed / 1000);
+    expect(start(held)).toBe(`0px ${r2(now.x + 100)}px`);
+    expect(held.frames.at(-1)?.translate).toBe("0px 100px");
+    expect(held.animation.startTime).toBe(timelineTime);
+    expect(start(rowShift)).toBe("0px -40px");
+    expect(rowShift.animation.playState).toBe("paused");
+    // 新排布画出来的那一帧：内层停在起点，外层只有旧轨迹在走
+    frame();
+    expect(callsOn(group)).toHaveLength(2);
+    expect(rowShift.animation.play).not.toHaveBeenCalled();
+    expect(frameQueue).toHaveLength(1);
+    const frameMs = 1000 / 60;
+    timelineTime += 2 * frameMs;
+    held.animation.currentTime = 2 * frameMs;
+    frame();
+    // 同一个回调：内层开播，外层换成从这一刻起步的整段，两段钉同一个起步时刻（这一帧的时间）
+    expect(rowShift.animation.play).toHaveBeenCalledTimes(1);
+    const whole = callsOn(group)[2];
+    const at = springAt("settle", now.x, now.v, (2 * frameMs) / 1000);
+    expect(start(whole)).toBe(`0px ${r2(at.x + 100)}px`);
+    expect([whole.animation.startTime, rowShift.animation.startTime]).toEqual([timelineTime, timelineTime]);
+    expect(held.animation.cancel).toHaveBeenCalledTimes(1);
+    expect(frameQueue).toHaveLength(0);
+  });
+
+  it("刚开播、时钟还没走（起步时刻还没定）又被挤：按在动的处理，旧的那段照常走、这一趟的位移留着，不并进新的一段重新等", () => {
+    const { a, b } = column();
+    place(b, { top: 220 });
+    sizes.resize(a, 800);
+    const [first] = callsOn(b);
+    frame();
+    expect([first.animation.playState, first.animation.currentTime, first.animation.startTime]).toEqual(["running", 0, null]);
+    // 同一帧又被挤 40px：跟着它一起开播的（任务页的飞行）已在走，它要是并进新的一段重新等两帧，两层就错开
+    place(b, { top: 260 });
+    sizes.resize(a, 800);
+    const held = callsOn(b)[1];
+    expect(start(held)).toBe("0px -160px");
+    expect(held.frames[1].translate).toBe(`0px ${r2(springAt("settle", -120, 0, SAMPLE_S).x - 40)}px`);
+    expect(held.frames.at(-1)?.translate).toBe("0px -40px");
+    expect(held.animation.pause).not.toHaveBeenCalled();
+    expect([held.animation.startTime, held.options.fill]).toEqual([timelineTime, "both"]);
+    frame();
+    expect(callsOn(b)).toHaveLength(3);
+  });
+
+  it("留着位移的那一截先播完（旧轨迹离终点已很近）：停在末帧，登记不清；到期照样换成整段", () => {
+    const { a, b } = column();
+    place(b, { top: 220 });
+    sizes.resize(a, 800);
+    const [first] = callsOn(b);
+    frame();
+    first.animation.currentTime = 50;
+    place(b, { top: 260 });
+    sizes.resize(a, 800);
+    const held = callsOn(b)[1];
+    held.animation.onfinish?.();
+    held.animation.currentTime = Number(held.options.duration);
+    frame();
+    const whole = callsOn(b)[2];
+    expect(held.animation.cancel).toHaveBeenCalledTimes(1);
+    const now = springAt("settle", -120, 0, 0.05);
+    const at = springAt("settle", now.x, now.v, Number(held.options.duration) / 1000);
+    expect(start(whole)).toBe(`0px ${r2(at.x - 40)}px`);
+  });
+
+  it("等着换成整段时又被挤：留着的位移累加，旧轨迹照旧接着走；先挂的那一项到期时不换，后挂的到期时换一次", async () => {
+    const { container, a, b } = column();
+    place(b, { top: 220 });
+    sizes.resize(a, 800);
+    const [first] = callsOn(b);
+    frame();
+    first.animation.currentTime = 50;
+    // 增删引起：等两帧
+    const banner = document.createElement("div");
+    place(banner, { top: 100, parent: container });
+    place(b, { top: 260 });
+    container.insertBefore(banner, b);
+    await flushMutations();
+    const held = callsOn(b)[1];
+    frame();
+    // 新排布画出来的那一帧的渲染步骤里，尺寸观察又报：b 再被挤 30px，等一帧
+    const elapsed = 10 + Math.random() * 10;
+    held.animation.currentTime = elapsed;
+    place(b, { top: 290 });
+    sizes.resize(a, 800);
+    expect(held.animation.cancel).toHaveBeenCalledTimes(1);
+    const again = callsOn(b)[2];
+    const now = springAt("settle", -120, 0, 0.05);
+    const mid = springAt("settle", now.x, now.v, elapsed / 1000);
+    expect(start(again)).toBe(`0px ${r2(mid.x - 70)}px`);
+    expect(again.frames.at(-1)?.translate).toBe("0px -70px");
+    expect(again.options.fill).toBe("both");
+    again.animation.currentTime = 16;
+    frame();
+    expect(callsOn(b)).toHaveLength(4);
+    const whole = callsOn(b)[3];
+    expect(start(whole)).toBe(`0px ${r2(springAt("settle", mid.x, mid.v, 0.016).x - 70)}px`);
+    expect(whole.options.fill).toBe("auto");
+    expect(frameQueue).toHaveLength(0);
+  });
+
+  it("等着换成整段时被落定（容器宽度变了）：当场取消，到期不再换", () => {
+    const { container, a, b } = column();
+    place(b, { top: 220 });
+    sizes.resize(a, 800);
+    const [first] = callsOn(b);
+    frame();
+    first.animation.currentTime = 50;
+    place(b, { top: 260 });
+    sizes.resize(a, 800);
+    const held = callsOn(b)[1];
+    place(container, { clientWidth: 790 });
+    place(b, { top: 300 });
+    sizes.resize(container, 790);
+    expect(held.animation.cancel).toHaveBeenCalledTimes(1);
+    frame();
+    expect(callsOn(b)).toHaveLength(2);
+  });
+
+  it("停止观察时还在等着换成整段的：到期照常换，不会停在留着位移的末帧上", () => {
+    const { a, b } = column();
+    place(b, { top: 220 });
+    sizes.resize(a, 800);
+    const [first] = callsOn(b);
+    frame();
+    first.animation.currentTime = 50;
+    place(b, { top: 260 });
+    sizes.resize(a, 800);
+    stop?.();
+    stop = undefined;
+    frame();
+    expect(callsOn(b)).toHaveLength(3);
+    expect(callsOn(b)[2].frames.at(-1)?.translate).toBe("0px 0px");
+  });
+
+  it("元素自己带 translate（叠加模式）时途中再被挤：两截都按叠加模式写", () => {
+    const { a, b } = column();
+    place(b, { translate: "4px 0px" });
+    place(b, { top: 220 });
+    sizes.resize(a, 800);
+    const [first] = callsOn(b);
+    expect(first.options.composite).toBe("add");
+    frame();
+    first.animation.currentTime = 40;
+    place(b, { top: 260 });
+    sizes.resize(a, 800);
+    const held = callsOn(b)[1];
+    frame();
+    const whole = callsOn(b)[2];
+    expect([held.options.composite, whole.options.composite]).toEqual(["add", "add"]);
+  });
+
+  it("从静止起步的不钉起步时刻、fill 为 auto：等新排布画出来那一帧再定", () => {
+    const { a, b } = column();
+    place(b, { top: 220 });
+    sizes.resize(a, 800);
+    const [fly] = callsOn(b);
+    expect(fly.animation.startTime).toBeNull();
+    expect(fly.options.fill).toBe("auto");
   });
 
   it("走 morph 的（与 framer-motion 的形变同拍）：不暂停，起步时刻钉在建好的此刻，还没走到时停在首帧", () => {
@@ -1612,9 +1893,10 @@ describe("observeReflow：停止", () => {
   });
 });
 
-/** 只有 holdUntilPainted 会碰的几样：暂停、播放与播放状态。 */
+/** 只有 holdUntilPainted 与 followReflow 会碰的几样：暂停、播放、播放状态与起步时刻。 */
 function bare() {
   const animation = {
+    startTime: null as CSSNumberish | null,
     playState: "running" as AnimationPlayState,
     pause: vi.fn(() => {
       animation.playState = "paused";
@@ -1627,6 +1909,89 @@ function bare() {
 }
 
 const hold = (animation: ReturnType<typeof bare>, wait: number) => holdUntilPainted(animation as unknown as Animation, window, wait);
+
+describe("playContinuing", () => {
+  it("关键帧与时长照轨迹，线性；起步时刻钉在文档时间轴此刻，fill 为 both（播完停在末帧），不暂停、不排帧回调", () => {
+    const el = document.createElement("div");
+    document.body.append(el);
+    pinNow();
+    const track = springTrack("settle", 0, 0, -30 - Math.random() * 100, -200 - Math.random() * 400);
+    const animation = playContinuing(el, track) as unknown as FakeAnimation;
+    const [call] = callsOn(el);
+    expect(call.animation).toBe(animation);
+    expect(call.frames).toBe(track.frames);
+    expect([call.options.duration, call.options.easing, call.options.fill]).toEqual([track.duration, "linear", "both"]);
+    expect(animation.startTime).toBe(timelineTime);
+    expect(animation.pause).not.toHaveBeenCalled();
+    expect(frameQueue).toHaveLength(0);
+  });
+
+  it("文档时间轴没有时间（文档不活动）：报错，不留下没钉住的动画", () => {
+    const el = document.createElement("div");
+    document.body.append(el);
+    Object.defineProperty(document, "timeline", { configurable: true, get: () => ({ currentTime: null }) });
+    expect(() => playContinuing(el, springTrack("settle", 0, 0, -40, 0))).toThrow("时间轴");
+    expect(callsOn(el)).toHaveLength(0);
+  });
+});
+
+describe("startWhenPainted", () => {
+  const waits = [1, 2, 3, ...Array.from({ length: 2 }, () => 1 + Math.floor(Math.random() * 8))];
+  it.each(waits)("等 %i 次动画帧回调：第这么多次回调时调，收到这一帧的时间，之后不再排回调", (wait) => {
+    const start = vi.fn();
+    startWhenPainted(start, window, wait);
+    for (let i = 1; i < wait; i++) {
+      frame();
+      expect(start).not.toHaveBeenCalled();
+    }
+    timelineTime += 1000 / 60;
+    frame();
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledWith(timelineTime);
+    expect(frameQueue).toHaveLength(0);
+  });
+
+  it("与同一帧到期的等待在同一个回调里：先调它，再开播停着的；停着的也钉在同一刻", () => {
+    const order: string[] = [];
+    const held = bare();
+    held.play.mockImplementation(() => {
+      order.push("play");
+      held.playState = "running";
+    });
+    hold(held, HOLD_AFTER_MUTATION);
+    frame();
+    const seen: number[] = [];
+    startWhenPainted(
+      (at) => {
+        order.push("start");
+        seen.push(at);
+      },
+      window,
+      HOLD_AFTER_RESIZE,
+    );
+    expect(frameQueue).toHaveLength(1);
+    timelineTime += 1000 / 60;
+    frame();
+    expect(order).toEqual(["start", "play"]);
+    expect([seen, held.startTime]).toEqual([[timelineTime], timelineTime]);
+  });
+
+  it("下一帧才到期的不钉：只有同一帧到期的那一批钉", () => {
+    const later = bare();
+    hold(later, HOLD_AFTER_MUTATION);
+    startWhenPainted(() => undefined, window, HOLD_AFTER_RESIZE);
+    frame();
+    expect(later.play).not.toHaveBeenCalled();
+    frame();
+    expect(later.play).toHaveBeenCalledTimes(1);
+    expect(later.startTime).toBeNull();
+  });
+
+  it.each([0, -1, 1.5, Number.NaN])("等待帧数 %s 不是正整数：报错，不排回调", (wait) => {
+    expect(() => startWhenPainted(() => undefined, window, wait)).toThrow(RangeError);
+    expect(frameQueue).toHaveLength(0);
+  });
+});
 
 describe("holdUntilPainted", () => {
   const waits = [1, 2, 3, ...Array.from({ length: 3 }, () => 1 + Math.floor(Math.random() * 8))];
@@ -1693,6 +2058,210 @@ describe("holdUntilPainted", () => {
   });
 });
 
+/** 跑 run，交回它抛出的异常；没抛就让用例挂掉。 */
+function thrownBy(run: () => void): unknown {
+  try {
+    run();
+  } catch (error) {
+    return error;
+  }
+  throw new Error("预期抛出异常，实际没有抛");
+}
+
+describe("等待队列：到期时的回调抛异常", () => {
+  /** 到期时抛出 error 的 start。 */
+  const failing = (error: unknown) => () => {
+    throw error;
+  };
+
+  it("start 抛的异常从这一帧的回调里原样抛出；之后由尺寸变化挤开的让位照常停在起点、下一帧开播", () => {
+    const boom = new Error("外框的关键帧不是纵向位移");
+    startWhenPainted(failing(boom), window, HOLD_AFTER_RESIZE);
+    expect(thrownBy(frame)).toBe(boom);
+    const { a, b } = column();
+    place(b, { top: 220 });
+    sizes.resize(a, 800);
+    const [lead] = callsOn(b);
+    expect(lead.animation.playState).toBe("paused");
+    expect(frameQueue).toHaveLength(1);
+    frame();
+    expect(lead.animation.play).toHaveBeenCalledTimes(1);
+    expect(frameQueue).toHaveLength(0);
+  });
+
+  it("start 抛异常之后，增删挤开的让位照常隔两帧开播", async () => {
+    startWhenPainted(failing(new Error("建动画失败")), window, HOLD_AFTER_RESIZE);
+    thrownBy(frame);
+    const { container, b, c } = column();
+    const banner = document.createElement("div");
+    place(banner, { top: 100, parent: container });
+    place(b, { top: 140 });
+    place(c, { top: 240 });
+    container.insertBefore(banner, b);
+    await flushMutations();
+    const [lead] = callsOn(b);
+    expect(lead.animation.playState).toBe("paused");
+    frame();
+    expect(lead.animation.play).not.toHaveBeenCalled();
+    frame();
+    expect(lead.animation.play).toHaveBeenCalledTimes(1);
+    expect(frameQueue).toHaveLength(0);
+  });
+
+  it("start 抛异常之后，途中再被挤的让位到期照常换成回到 0 的整段，不停在留着位移的末帧", () => {
+    startWhenPainted(failing(new Error("建动画失败")), window, HOLD_AFTER_RESIZE);
+    thrownBy(frame);
+    const { a, b } = column();
+    place(b, { top: 220 });
+    sizes.resize(a, 800);
+    frame();
+    callsOn(b)[0].animation.currentTime = 20 + Math.random() * 200;
+    place(b, { top: 260 });
+    sizes.resize(a, 800);
+    expect(callsOn(b)).toHaveLength(2);
+    timelineTime += 1000 / 60;
+    frame();
+    expect(callsOn(b)).toHaveLength(3);
+    const whole = callsOn(b)[2];
+    expect(whole.frames.at(-1)?.translate).toBe("0px 0px");
+    expect(whole.animation.startTime).toBe(timelineTime);
+    expect(frameQueue).toHaveLength(0);
+  });
+
+  it("抛异常时还没到期的等待照常排着，到它的帧开播", () => {
+    const wait = 2 + Math.floor(Math.random() * 4);
+    const later = bare();
+    hold(later, wait);
+    startWhenPainted(failing(new Error("建动画失败")), window, HOLD_AFTER_RESIZE);
+    thrownBy(frame);
+    for (let i = 2; i < wait; i++) {
+      frame();
+      expect(later.play).not.toHaveBeenCalled();
+    }
+    frame();
+    expect(later.play).toHaveBeenCalledTimes(1);
+    expect(frameQueue).toHaveLength(0);
+  });
+
+  it("同一批里排在它后面的照做：后面的 start 照调、停着的照常开播，都收到这一批钉的时刻；异常在这一批做完之后抛出", () => {
+    const order: string[] = [];
+    const boom = new Error("外框的关键帧不是纵向位移");
+    const seen: number[] = [];
+    startWhenPainted(() => void order.push("before"), window, HOLD_AFTER_RESIZE);
+    startWhenPainted(
+      () => {
+        order.push("boom");
+        throw boom;
+      },
+      window,
+      HOLD_AFTER_RESIZE,
+    );
+    startWhenPainted(
+      (at) => {
+        order.push("after");
+        seen.push(at);
+      },
+      window,
+      HOLD_AFTER_RESIZE,
+    );
+    const held = bare();
+    held.play.mockImplementation(() => {
+      order.push("play");
+      held.playState = "running";
+    });
+    hold(held, HOLD_AFTER_RESIZE);
+    timelineTime += 1000 / 60;
+    expect(thrownBy(frame)).toBe(boom);
+    expect(order).toEqual(["before", "boom", "after", "play"]);
+    expect([seen, held.startTime]).toEqual([[timelineTime], timelineTime]);
+    expect(frameQueue).toHaveLength(0);
+  });
+
+  it("同一批里有几项抛异常：这一批做完之后合成一个 AggregateError 抛出，按调用顺序带着每一个", () => {
+    const first = new Error("第一个");
+    const second = new TypeError("第二个");
+    const refused = new DOMException("不能开播", "InvalidStateError");
+    startWhenPainted(failing(first), window, HOLD_AFTER_RESIZE);
+    startWhenPainted(failing(second), window, HOLD_AFTER_RESIZE);
+    const stuck = bare();
+    stuck.play.mockImplementation(() => {
+      throw refused;
+    });
+    const other = bare();
+    hold(stuck, HOLD_AFTER_RESIZE);
+    hold(other, HOLD_AFTER_RESIZE);
+    const thrown = thrownBy(frame);
+    if (!(thrown instanceof AggregateError)) throw new Error(`应当抛 AggregateError，实为 ${String(thrown)}`);
+    expect(thrown.errors).toHaveLength(3);
+    expect(thrown.errors[0]).toBe(first);
+    expect(thrown.errors[1]).toBe(second);
+    expect(thrown.errors[2]).toBe(refused);
+    expect(other.play).toHaveBeenCalledTimes(1);
+    expect(frameQueue).toHaveLength(0);
+  });
+
+  it("开播时 play 抛异常：同一批别的照常开播，异常原样抛出，之后挂进来的照常开播", () => {
+    const refused = new DOMException("不能开播", "InvalidStateError");
+    const stuck = bare();
+    stuck.play.mockImplementation(() => {
+      throw refused;
+    });
+    const other = bare();
+    hold(stuck, HOLD_AFTER_MUTATION);
+    hold(other, HOLD_AFTER_MUTATION);
+    frame();
+    expect(thrownBy(frame)).toBe(refused);
+    expect(other.play).toHaveBeenCalledTimes(1);
+    const next = bare();
+    hold(next, HOLD_AFTER_RESIZE);
+    frame();
+    expect(next.play).toHaveBeenCalledTimes(1);
+    expect(frameQueue).toHaveLength(0);
+  });
+
+  it("文档时间轴取不到时间、这一批钉不了：异常抛出，之后挂进来的照常开播", () => {
+    startWhenPainted(() => undefined, window, HOLD_AFTER_RESIZE);
+    Object.defineProperty(document, "timeline", { configurable: true, get: () => ({ currentTime: null }) });
+    expect(String(thrownBy(frame))).toContain("时间轴");
+    Object.defineProperty(document, "timeline", { configurable: true, get: () => ({ currentTime: timelineTime }) });
+    const next = bare();
+    hold(next, HOLD_AFTER_RESIZE);
+    expect(frameQueue).toHaveLength(1);
+    frame();
+    expect(next.play).toHaveBeenCalledTimes(1);
+    expect(frameQueue).toHaveLength(0);
+  });
+
+  it("让位接续到期换成整段时建动画抛异常：同一批从静止起步的让位照常开播、钉同一刻，异常抛出", () => {
+    const { a, b, c } = column();
+    place(b, { top: 220 });
+    sizes.resize(a, 800);
+    frame();
+    callsOn(b)[0].animation.currentTime = 20 + Math.random() * 200;
+    // 同一趟：b 上一段没走完又被挤（接续），c 头一次被挤（从静止起步），同一帧到期
+    place(b, { top: 260 });
+    place(c, { top: 300 });
+    sizes.resize(a, 800);
+    const [lift] = callsOn(c);
+    expect(lift.animation.playState).toBe("paused");
+    const animate = HTMLElement.prototype.animate;
+    const refused = new TypeError("关键帧不合法");
+    Object.defineProperty(HTMLElement.prototype, "animate", {
+      configurable: true,
+      writable: true,
+      value(this: HTMLElement, frames: Keyframe[], options: KeyframeAnimationOptions) {
+        if (this === b) throw refused;
+        return animate.call(this, frames, options);
+      },
+    });
+    timelineTime += 1000 / 60;
+    expect(thrownBy(frame)).toBe(refused);
+    expect(lift.animation.play).toHaveBeenCalledTimes(1);
+    expect(lift.animation.startTime).toBe(timelineTime);
+    expect(frameQueue).toHaveLength(0);
+  });
+});
+
 describe("followReflow", () => {
   const follow = (animation: ReturnType<typeof bare>, leader: HTMLElement, wait: number) => followReflow(animation as unknown as Animation, leader, wait);
   /** 跟随方自己的等待帧数取随机：领头的这一趟在等或当场起步时不看它。 */
@@ -1742,7 +2311,7 @@ describe("followReflow", () => {
     expect(frameQueue).toHaveLength(0);
   });
 
-  it("领头的上一段没走完又被挤、带着速度当场接着走：跟随的也不等，建好就播", () => {
+  it("领头的上一段没走完又被挤、旧轨迹接着走：跟随的停在起点，挂进领头这一趟的等待；到期时领头换成整段、跟随的开播，同一个回调", () => {
     const { a, b } = column();
     place(b, { top: 220 });
     sizes.resize(a, 800);
@@ -1751,25 +2320,83 @@ describe("followReflow", () => {
     first.animation.currentTime = 20 + Math.random() * 200;
     place(b, { top: 260 });
     sizes.resize(a, 800);
-    const second = callsOn(b)[1];
-    expect(second.animation.playState).toBe("running");
+    expect(callsOn(b)[1].animation.playState).toBe("running");
     const follower = bare();
-    follow(follower, b, ownWait());
-    expect(follower.pause).not.toHaveBeenCalled();
-    expect(follower.playState).toBe("running");
+    follow(follower, b, 2 + ownWait());
+    expect(follower.pause).toHaveBeenCalledTimes(1);
+    expect(follower.playState).toBe("paused");
+    expect(follower.startTime).toBeNull();
+    expect(frameQueue).toHaveLength(1);
+    const [only] = frameQueue;
+    frameQueue = [];
+    only(performance.now());
+    expect(callsOn(b)).toHaveLength(3);
+    expect(follower.play).toHaveBeenCalledTimes(1);
+    expect(follower.startTime).toBe(timelineTime);
+    expect(callsOn(b)[2].animation.startTime).toBe(timelineTime);
     expect(frameQueue).toHaveLength(0);
   });
 
-  it("领头的刚在这一帧的回调里开播、时钟还没走：跟随的也不等", () => {
+  it("领头的接续由增删引起（提交后的微任务里）、跟随的在下一帧的尺寸观察回调里才挂：仍认作这一趟，与领头换成整段在同一个回调里开播", async () => {
+    const { container, a, b } = column();
+    place(b, { top: 220 });
+    sizes.resize(a, 800);
+    frame();
+    const [first] = callsOn(b);
+    first.animation.currentTime = 20 + Math.random() * 200;
+    const banner = document.createElement("div");
+    place(banner, { top: 100, parent: container });
+    place(b, { top: 260 });
+    container.insertBefore(banner, b);
+    await flushMutations();
+    const held = callsOn(b)[1];
+    // 下一帧：动画帧回调先跑，时间轴走到这一帧，留着位移的那一截已走了一帧；随后渲染步骤里的尺寸观察回调挂上跟随的
+    frame();
+    const frameMs = 1000 / 60;
+    timelineTime += frameMs;
+    held.animation.currentTime = frameMs;
+    const follower = bare();
+    follow(follower, b, ownWait());
+    expect(follower.pause).toHaveBeenCalledTimes(1);
+    expect(callsOn(b)).toHaveLength(2);
+    timelineTime += frameMs;
+    frame();
+    expect(callsOn(b)).toHaveLength(3);
+    expect(follower.play).toHaveBeenCalledTimes(1);
+    expect([follower.startTime, callsOn(b)[2].animation.startTime]).toEqual([timelineTime, timelineTime]);
+    expect(frameQueue).toHaveLength(0);
+  });
+
+  it("领头的接续刚在这一帧的回调里换成整段、时钟还没走：跟随的也不等，起步时刻钉在领头钉的那一刻", () => {
+    const { a, b } = column();
+    place(b, { top: 220 });
+    sizes.resize(a, 800);
+    frame();
+    callsOn(b)[0].animation.currentTime = 20 + Math.random() * 200;
+    place(b, { top: 260 });
+    sizes.resize(a, 800);
+    timelineTime += 1000 / 60;
+    frame();
+    expect(callsOn(b)).toHaveLength(3);
+    const follower = bare();
+    follow(follower, b, ownWait());
+    expect(follower.pause).not.toHaveBeenCalled();
+    expect(follower.startTime).toBe(timelineTime);
+    expect(frameQueue).toHaveLength(0);
+  });
+
+  it("领头的刚在这一帧的回调里开播、时钟还没走：跟随的也不等；领头的起步时刻交给引擎定，跟随的也不钉", () => {
     const { a, b } = column();
     place(b, { top: 220 });
     sizes.resize(a, 800);
     const [lead] = callsOn(b);
     frame();
     expect(lead.animation.play).toHaveBeenCalledTimes(1);
+    expect(lead.animation.startTime).toBeNull();
     const follower = bare();
     follow(follower, b, ownWait());
     expect(follower.pause).not.toHaveBeenCalled();
+    expect(follower.startTime).toBeNull();
     expect(frameQueue).toHaveLength(0);
   });
 
@@ -1782,6 +2409,21 @@ describe("followReflow", () => {
         sizes.resize(a, 800);
         frame();
         callsOn(b)[0].animation.currentTime = 1 + Math.random() * 200;
+      },
+    ],
+    [
+      "领头的接续是早先一趟的、新排布早已画出，这一趟没挪动它",
+      (b, a) => {
+        place(b, { top: 220 });
+        sizes.resize(a, 800);
+        frame();
+        callsOn(b)[0].animation.currentTime = 20 + Math.random() * 100;
+        place(b, { top: 260 });
+        sizes.resize(a, 800);
+        // 尺寸观察起的接续：下一帧的回调里换成整段，之后它已在走
+        frame();
+        const whole = callsOn(b)[2];
+        whole.animation.currentTime = 1 + Math.random() * 200;
       },
     ],
   ])("%s：跟随的按从静止起步处理，当场暂停，等自己的帧数再播", (_cause, arrange) => {
@@ -1838,6 +2480,23 @@ describe("syncReflow", () => {
     sizes.resize(container, 800);
     expect(calls).toHaveLength(2);
     expect(flyB.animation.cancel).not.toHaveBeenCalled();
+  });
+
+  it("形变节点交来了自己的起步时刻：走 morph 的钉在它上面，不另读此刻；同一趟的几段钉同一刻", () => {
+    const { container, a, b, c } = column("morph");
+    const now = pinNow();
+    // framer-motion 的形变从冲刷那一刻计时，比补跑这一刻早零点几到几毫秒
+    const startedAt = now - (0.1 + Math.round(Math.random() * 90) / 10);
+    place(b, { top: 220 });
+    place(c, { top: 320 });
+    syncReflow(container, startedAt);
+    const [flyB] = callsOn(b);
+    const [flyC] = callsOn(c);
+    expect(start(flyB)).toBe("0px -120px");
+    expect([flyB.animation.startTime, flyC.animation.startTime]).toEqual([startedAt, startedAt]);
+    expect(flyB.options.fill).toBe("backwards");
+    expect(flyB.animation.pause).not.toHaveBeenCalled();
+    expect(callsOn(a)).toHaveLength(0);
   });
 
   it("走 settle：补跑在提交之后、新排布画出来之前，先停在起点，隔两帧再播；尺寸观察在中间那帧报到时不重复", () => {
@@ -1975,6 +2634,23 @@ describe("useReflow", () => {
       seen[0].sync();
       expect(start(callsOn(second.b)[0])).toBe("0px -40px");
       expect(seen[seen.length - 1]).toBe(seen[0]);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  it("sync 收下形变的起步时刻：补跑起的让位钉在它上面", () => {
+    const seen: Reflow[] = [];
+    const view = render(createElement(Probe, { seen, show: true }));
+    try {
+      const { b } = lay(view.container);
+      const now = pinNow();
+      const startedAt = now - (0.1 + Math.round(Math.random() * 90) / 10);
+      place(b, { top: 80 });
+      seen[0].sync(startedAt);
+      const [fly] = callsOn(b);
+      expect(start(fly)).toBe("0px -30px");
+      expect(fly.animation.startTime).toBe(startedAt);
     } finally {
       view.unmount();
     }

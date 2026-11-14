@@ -427,6 +427,26 @@ describe("实例库：筛选、搜索与空状态", () => {
     if (el === undefined) throw new Error("没有加载说明的状态区");
     return el;
   };
+  const SUBTITLE = "共 4 个实例 · 1 个固定在侧栏 · 累计 12 小时";
+  /** 页头副标题那一格里叠着的两层：骨架条那一层没有文字，文字那一层写着副标题。 */
+  const subtitleLayers = () => {
+    const cell = document.querySelector<HTMLElement>("header p > span");
+    if (cell === null) throw new Error("页头副标题行里没有叠放两层的那一格");
+    const layers = [...cell.children].filter((el): el is HTMLElement => el instanceof HTMLElement);
+    return { bar: layers.find((el) => el.textContent === ""), text: layers.find((el) => el.textContent === SUBTITLE) };
+  };
+  /** 网格那一层加载门的骨架层与内容层：骨架层包着骨架网格，内容层是它在同一个根里的兄弟。 */
+  const gridLayers = () => {
+    const skeleton = skeletonGrid()?.parentElement;
+    if (skeleton === null || skeleton === undefined) throw new Error("网格的骨架层不在");
+    const content = [...(skeleton.parentElement?.children ?? [])].find((el): el is HTMLElement => el instanceof HTMLElement && el !== skeleton);
+    if (content === undefined) throw new Error("网格的内容层不在");
+    return { skeleton, content };
+  };
+  const frame = () =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(16);
+    });
 
   it("加载说明在骨架层之外：状态区常驻，骨架显出来时写上「正在读取实例列表」，读到后清空", async () => {
     const list = deferred<InstanceDto[]>();
@@ -458,8 +478,8 @@ describe("实例库：筛选、搜索与空状态", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(300);
     });
-    const bar = subtitle.querySelector<HTMLElement>('[aria-hidden="true"]')?.parentElement;
-    if (bar === null || bar === undefined) throw new Error("骨架显出来时副标题行里没有骨架条");
+    const { bar } = subtitleLayers();
+    if (bar === undefined) throw new Error("骨架显出来时副标题行里没有骨架条");
     // 骨架条从透明淡入，不是一帧出现
     expect(bar.style.opacity).toBe("0");
     await act(async () => {
@@ -471,14 +491,52 @@ describe("实例库：筛选、搜索与空状态", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(200);
     });
-    const text = [...subtitle.querySelectorAll<HTMLElement>("span")].find((el) => el.childElementCount === 0 && el.textContent === "共 4 个实例 · 1 个固定在侧栏 · 累计 12 小时");
+    const { text } = subtitleLayers();
     if (text === undefined) throw new Error("副标题没有换成文字");
     expect(text.style.opacity).toBe("0");
     expect(bar.isConnected).toBe(true);
     expect(bar.style.opacity).toBe("1");
+    // 骨架条的淡出与网格一样等内容画出第一帧才开始：放行的更新排在 act 里，到这一段结束才提交，淡出要下一段才播得完
+    await afterMotion();
     await afterMotion();
     expect(bar.isConnected).toBe(false);
     expect(text.style.opacity).toBe("1");
+  });
+
+  it("页头副标题与网格同一套交叉淡化：内容到达后都等第一帧画出来才起步，之后每一帧都与网格的两层同步", async () => {
+    const list = deferred<InstanceDto[]>();
+    ipc.overrides.set("list_instances", () => list.promise);
+    await mount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+      list.resolve(instances);
+      await settle();
+    });
+    // 骨架停满 300 ms 的那一刻换成内容
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    const grid = gridLayers();
+    const { bar, text } = subtitleLayers();
+    if (bar === undefined || text === undefined) throw new Error("换成内容的那一刻副标题行里没有叠着骨架条与文字");
+    const sample = () => ({ text: text.style.opacity, bar: bar.isConnected ? bar.style.opacity : null, content: grid.content.style.opacity, skeleton: grid.skeleton.isConnected ? grid.skeleton.style.opacity : null });
+    expect(sample()).toEqual({ text: "0", bar: "1", content: "0", skeleton: "1" });
+    // 第一帧画的仍是交叉淡化的起点：提交再短，副标题也不先于这一帧起步
+    await frame();
+    expect(sample()).toEqual({ text: "0", bar: "1", content: "0", skeleton: "1" });
+    const texts: number[] = [];
+    for (let i = 0; i < 30; i++) {
+      await frame();
+      const now = sample();
+      expect({ text: now.text, bar: now.bar }).toEqual({ text: now.content, bar: now.skeleton });
+      texts.push(Number(now.text));
+    }
+    // 真走了一段淡入（中间有半透明的帧），走完时文字不透明、两处的骨架都已撤下
+    expect(texts.some((o) => o > 0 && o < 1)).toBe(true);
+    expect(sample()).toEqual({ text: "1", bar: null, content: "1", skeleton: null });
   });
 
   it("列表 300 ms 内读到：骨架只占位不显出，数据一到直接换成卡片", async () => {

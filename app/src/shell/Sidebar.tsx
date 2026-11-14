@@ -29,7 +29,7 @@ import { useMounted } from "../lib/useMounted";
 import { clamp, isImeComposing } from "../lib/util";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector, useNow } from "../state/launcher";
 import { sameRoute, type Route } from "../state/route";
-import { findInstance, pinnedInstances } from "../state/selectors";
+import { findInstance, importingModpack, pinnedInstances } from "../state/selectors";
 import { showsUpdateDot } from "../state/updater/machine";
 import { useUpdater } from "../state/updater/useUpdater";
 import { Menu, type MenuEntry, type MenuItem, type MenuOpenedBy } from "../ui/Menu";
@@ -1050,6 +1050,9 @@ const PinMenuItems = memo(function PinMenuItems({
   const unsaved = useLauncherSelector((s) => s.unsavedPins);
   const saved = pinIds.filter((id) => !unsaved.includes(id));
   const index = saved.indexOf(instance.id);
+  // 导入中的整合包状态层不改固定（原因见 importingModpack），取消固定按同一个判断禁用。上移下移只重排已落库的项，状态层不拦
+  const importing = useLauncherSelector((s) => importingModpack(s, instance));
+  const unpinBlock = importing ? { disabled: true, disabledReason: SIDEBAR_COPY.unpinImporting } : {};
   const items: MenuEntry[] = [
     pinLaunchItem(entry),
     { label: SIDEBAR_COPY.openDetail, icon: "arrow-right", onSelect: () => go({ page: "instance", id: instance.id, tab: "overview" }) },
@@ -1057,7 +1060,7 @@ const PinMenuItems = memo(function PinMenuItems({
     { kind: "separator" },
     { label: SIDEBAR_COPY.moveUp, icon: "arrow-up", disabled: index <= 0, onSelect: () => onReorder(moveItem(saved, index, index - 1)) },
     { label: SIDEBAR_COPY.moveDown, icon: "arrow-down", disabled: index < 0 || index >= saved.length - 1, onSelect: () => onReorder(moveItem(saved, index, index + 1)) },
-    { label: SIDEBAR_COPY.unpin, icon: "pin-off", onSelect: () => void run(() => actions.togglePin(instance.id), ACTION_ERROR.pin) },
+    { label: SIDEBAR_COPY.unpin, icon: "pin-off", ...unpinBlock, onSelect: () => void run(() => actions.togglePin(instance.id), ACTION_ERROR.pin) },
   ];
   const label = SIDEBAR_COPY.menuLabel(instance.name);
   useLayoutEffect(() => publish({ items, label }));

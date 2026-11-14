@@ -25,9 +25,11 @@ export interface AccountActions {
   refreshing: ReadonlySet<string>;
 }
 
-export function useAccountActions(): AccountActions {
-  const accounts = useLauncherSelector((s) => s.accounts);
-  const currentAccountId = useLauncherSelector((s) => s.currentAccountId);
+/**
+ * accounts 与 currentAccountId 是页面正在画的那份（延后的快照），不在这里另订阅：删除确认的文案按眼前的列表算，
+ * 账户列表一变时页面正文也不会因为这里的订阅在同步提交里跟着重渲染。
+ */
+export function useAccountActions(accounts: readonly Account[], currentAccountId: string | null): AccountActions {
   // 正在运行的游戏用的是哪个账户：删除确认要说明游戏不受影响
   const gameAccount = useLauncherSelector((s) => (busyInstanceId(s) !== null && s.session !== null ? s.session.accountUuid : null));
   const actions = useLauncherActions();

@@ -53,7 +53,7 @@ export function ProgressRing({ value, size = 36, tone = "accent", track, capAt99
   const stroke = RING_STROKE[size];
   const radius = (size - stroke) / 2;
   const circumference = 2 * Math.PI * radius;
-  // 截到 [0, 1]（同 rawFillOffset）：settle 弹簧补满时会略冲过 1，描边偏移变负，弧的起点让出一道缝
+  // 截到 [0, 1]（同 fillOffset）：settle 弹簧补满时会略冲过 1，描边偏移变负，弧的起点让出一道缝
   const dashOffset = useTransform(smooth, (p) => circumference * (1 - clamp(p, 0, 1)));
   const text = useTransform(smooth, (p) => percent(p, capAt99));
   const center = size / 2;

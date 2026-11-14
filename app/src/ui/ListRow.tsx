@@ -21,6 +21,7 @@ import { observeReflow, REFLOW_PAUSED_ATTR } from "../lib/reflow";
 import { playTween } from "../lib/slide";
 import { useInsertItem } from "../lib/useInsertItem";
 import { useMounted } from "../lib/useMounted";
+import { usePaintedOnce } from "../lib/usePaintedOnce";
 import { cx } from "../lib/util";
 import { appendsOnly, EVERY_ROW, measuredRowWindow, ROW_MOTION_LIMIT, rowsInWindow, rowWindow, type RowWindow } from "./ListRow.window";
 import styles from "./ListRow.module.css";
@@ -289,13 +290,20 @@ export function ListRow({
   const present = useIsPresent();
   const motionSet = useInsertItem();
   if (list === null || slot === null) throw new Error("ListRow 必须放在 List 里");
+  // 冻结挂载那一刻的入场方式：List 下一次渲染时这一行已不算新来的，给的 enter 变回 none，放行不能因此提前到画出来之前
+  const [enter] = useState(slot.enter);
+  // 自己入场的行（逐行入场与整批换上的都是）先停在起点，画出第一帧之后才换成目标，与 Appear 的子项同一做法：
+  // 新行挂上的那次提交常常很长（任务页上它与完成、换组落在同一次提交里），入场从提交就计时的话，这次提交连同这一帧的
+  // 样式、布局与绘制都算进了淡入，第一帧画出来时已走掉一截。停着的目标与 initial 是同一个对象，挂载时 framer-motion 不建一段原地不动的动画
+  const painted = usePaintedOnce("row", enter !== "none");
+  const from = enter === "none" ? false : enter === "fade" ? insertItemFade.initial : motionSet.initial;
   // 行自己的进出场。退场时留在原处淡出，这段时间它已经不是列表的一行：不接受指针与焦点，读屏不再读到
   const item = {
     ref: slot.ref,
     className: cx(styles.item, className),
     inert: !present,
-    initial: slot.enter === "none" ? false : slot.enter === "fade" ? insertItemFade.initial : motionSet.initial,
-    animate: motionSet.animate,
+    initial: from,
+    animate: from === false || painted ? motionSet.animate : from,
     exit: list.swapping ? SWAP_EXIT : motionSet.exit,
   } as const;
   // inert 在真机上已经挡住指针；这里再断开回调，连点两下时第二下落在正退场的行上也不会再触发一次

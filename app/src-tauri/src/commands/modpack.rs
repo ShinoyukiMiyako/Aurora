@@ -351,8 +351,11 @@ pub(crate) async fn install_modpack_with(
                 .expect("整合包导入的占用槽锁已中毒")
                 .as_ref()
                 .map(|(name, _)| name.clone());
+            // 占用守卫还留在 reserved 里：清配置时别的命令不能在这个名字下新建实例，清掉的只会是旧引用。
             if let Some(name) = name {
-                discard_failed_import(&petalfall, &name, task_id, &err).await;
+                if discard_failed_import(&petalfall, &name, task_id, &err).await {
+                    forget_discarded_import(facade, petalfall.game_dir(), &name, task_id).await;
+                }
             }
             Err(err)
         }
@@ -363,18 +366,20 @@ pub(crate) async fn install_modpack_with(
 /// 导入的 future 被丢弃、清理代码没机会跑；删目录失败（文件被杀毒软件等占用）。还是删不掉就把未完成
 /// 标记落成这次导入的结局，列表里显示导入已经失败或取消，而不是一直停在进行中，用户可以自己删。
 /// 清理的问题只记日志：返回给前端的仍是导入本身的错误，用户要看到的是导入为什么没成。
+///
+/// 返回半成品目录是否已不在：删掉了或本来就不在为真；删不掉、改记结局时为假，它还列在实例库里。
 async fn discard_failed_import(
     petalfall: &Petalfall,
     name: &str,
     task_id: &str,
     err: &CommandError,
-) {
+) -> bool {
     let cleanup = match petalfall.discard_modpack_import(name).await {
         Ok(true) => {
             tracing::info!(task_id, name, "已删除导入未完成的实例");
-            return;
+            return true;
         }
-        Ok(false) => return,
+        Ok(false) => return true,
         Err(cleanup) => cleanup,
     };
     tracing::error!(task_id, name, error = %cleanup, "删除导入未完成的实例失败，改为记下导入的结局");
@@ -391,6 +396,32 @@ async fn discard_failed_import(
         .await
     {
         tracing::error!(task_id, name, error = %settle, "记录导入未完成标记失败");
+    }
+    false
+}
+
+/// 半成品已不在，去掉配置里对这个名字的引用（侧栏固定、当前选中、固定服务器记住的实例）。导入不会自动固定，这些
+/// 引用是在启动器之外删掉的同名旧实例留下的，或是导入途中记下的；留着的话之后再建或再导入同名实例，它一出现就是
+/// 已固定、已选中。core 的丢弃只处理文件：导入跑在门面快照上，配置只能在门面上改。
+///
+/// 按导入所在的游戏目录 `game_dir` 清：后端不拦导入途中切换当前目录，切走之后那个目录的固定与选中收在
+/// `parked_directories` 里，当前目录里同名的引用是那边另一个实例的。[`Petalfall::forget_moved_instance`]
+/// 正是按这个规则分开处理的。
+///
+/// 落盘失败只记日志，规则同 [`discard_failed_import`]：门面没换进改动，返回给前端的仍是导入本身的错误。
+async fn forget_discarded_import(facade: &Facade, game_dir: &Path, name: &str, task_id: &str) {
+    match facade
+        .update_if_changed(|petalfall| petalfall.forget_moved_instance(name, game_dir))
+        .await
+    {
+        Ok(true) => tracing::info!(task_id, name, "已从配置里去掉导入未完成的实例"),
+        Ok(false) => {}
+        Err(err) => tracing::error!(
+            task_id,
+            name,
+            error = %petalfall_base::error_with_causes(&err),
+            "导入未完成的实例已删掉，配置里对它的引用没能清掉"
+        ),
     }
 }
 
@@ -931,7 +962,10 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::time::{Duration, Instant};
 
-    use petalfall_core::{CoreEvent, DownloadSourcePolicy, Petalfall, PetalfallConfig, Platform};
+    use petalfall_core::{
+        ConfigStore, CoreEvent, DownloadSourcePolicy, ParkedDirectory, Petalfall, PetalfallConfig,
+        Platform,
+    };
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1104,6 +1138,11 @@ mod tests {
 
     /// 只装原版 test、没有远程文件与覆盖文件的本地整合包。
     fn write_vanilla_pack(dest: &Path) {
+        write_vanilla_pack_on(dest, "test");
+    }
+
+    /// 只装原版 `minecraft`、没有远程文件与覆盖文件的本地整合包。
+    fn write_vanilla_pack_on(dest: &Path, minecraft: &str) {
         let mut writer = zip::ZipWriter::new(std::fs::File::create(dest).unwrap());
         writer
             .start_file(
@@ -1113,7 +1152,7 @@ mod tests {
             .unwrap();
         let index = serde_json::json!({
             "formatVersion": 1, "game": "minecraft", "versionId": "1.0.0", "name": "测试包",
-            "files": [], "dependencies": {"minecraft": "test"}
+            "files": [], "dependencies": {"minecraft": minecraft}
         });
         writer.write_all(index.to_string().as_bytes()).unwrap();
         writer.finish().unwrap();
@@ -1411,6 +1450,292 @@ mod tests {
         assert_eq!(locks.activity("导入中"), None);
     }
 
+    /// 版本清单只列原版 test，它的 JSON 迟迟不来：导入停在「实例目录已建好、游戏还没装完」的中途。
+    async fn mount_stalled_vanilla(server: &MockServer) {
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/manifest.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"latest":{{"release":"test","snapshot":"test"}},
+                    "versions":[{{"id":"test","type":"release","url":"{base}/test.json",
+                    "time":"t","releaseTime":"t"}}]}}"#
+            )))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/test.json"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"id":"test","type":"release","mainClass":"M"}"#)
+                    .set_delay(Duration::from_secs(30)),
+            )
+            .mount(server)
+            .await;
+    }
+
+    /// 导入用的门面：游戏目录在 `dir/.minecraft`，版本清单走模拟端点，侧栏固定等其余配置取自 `config`。
+    fn importing_facade(
+        dir: &Path,
+        server: &MockServer,
+        config: PetalfallConfig,
+    ) -> std::sync::Arc<Facade> {
+        let config = PetalfallConfig {
+            game_directory: Some(dir.join(".minecraft")),
+            download_source: DownloadSourcePolicy::OfficialFirst,
+            version_list_source: DownloadSourcePolicy::OfficialFirst,
+            ..config
+        };
+        let petalfall = Petalfall::open(config, dir.to_path_buf(), dir.join("config.json"))
+            .unwrap()
+            .with_manifest_url(format!("{}/manifest.json", server.uri()));
+        std::sync::Arc::new(Facade::new(petalfall))
+    }
+
+    /// 落盘的配置；一次都没写过时为 None。
+    async fn saved_config(dir: &Path) -> Option<PetalfallConfig> {
+        let path = dir.join("config.json");
+        if !path.exists() {
+            return None;
+        }
+        Some(ConfigStore::at(path).load().await.unwrap())
+    }
+
+    /// 导入一个只装原版 `minecraft` 的整合包，实例名 `name`。
+    async fn import_vanilla_as(
+        facade: &Facade,
+        dir: &Path,
+        minecraft: &str,
+        name: &str,
+    ) -> Result<ModpackInstallOutcomeDto, CommandError> {
+        let pack = dir.join("pack.mrpack");
+        write_vanilla_pack_on(&pack, minecraft);
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+        install_modpack_with(
+            facade,
+            &TaskRegistry::default(),
+            &InstanceLocks::default(),
+            "mp-pins",
+            file(&pack.display().to_string()),
+            Some(name),
+            None,
+            &sink,
+        )
+        .await
+    }
+
+    /// 在后台开始导入一个只装原版 test 的整合包（任务 id 为 `task_id`），等它建好实例目录 `name`。
+    async fn start_stalled_import(
+        facade: &std::sync::Arc<Facade>,
+        registry: &std::sync::Arc<TaskRegistry>,
+        dir: &Path,
+        task_id: &'static str,
+        name: &'static str,
+    ) -> tokio::task::JoinHandle<Result<ModpackInstallOutcomeDto, CommandError>> {
+        let pack = dir.join("pack.mrpack");
+        write_vanilla_pack(&pack);
+        let install = tokio::spawn({
+            let (f, r) = (facade.clone(), registry.clone());
+            let source = file(&pack.display().to_string());
+            async move {
+                let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+                install_modpack_with(
+                    &f,
+                    &r,
+                    &InstanceLocks::default(),
+                    task_id,
+                    source,
+                    Some(name),
+                    None,
+                    &sink,
+                )
+                .await
+            }
+        });
+        let instance = dir.join(".minecraft").join("versions").join(name);
+        let marker = petalfall_core::MarkerStore::for_version_dir(&instance);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !marker.path().is_file() {
+            assert!(Instant::now() < deadline, "导入没有建出实例目录");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        install
+    }
+
+    /// 配置里留着与导入同名的旧固定（同名实例早先在启动器之外删掉了），导入失败、半成品删掉后：门面与落盘的配置里
+    /// 这个名字的固定与当前选中都去掉，别的固定原样留着。留着的话之后再建或再导入同名实例，它一出现就是已固定。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_import_forgets_the_old_pin_on_its_name() {
+        let server = MockServer::start().await;
+        mount_stalled_vanilla(&server).await;
+        let dir = tempfile::tempdir().unwrap();
+        let facade = importing_facade(
+            dir.path(),
+            &server,
+            PetalfallConfig {
+                sidebar_pins: vec!["周末联机".to_owned(), "生存".to_owned()],
+                selected_version: Some("周末联机".to_owned()),
+                ..PetalfallConfig::default()
+            },
+        );
+
+        // 清单里没有这个版本：实例目录建好之后装游戏失败。
+        let err = import_vanilla_as(&facade, dir.path(), "no-such-version", "周末联机")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTALL_FAILED);
+        assert!(!dir
+            .path()
+            .join(".minecraft")
+            .join("versions")
+            .join("周末联机")
+            .exists());
+
+        let config = facade.read().await.config().clone();
+        assert_eq!(config.sidebar_pins, ["生存"]);
+        assert_eq!(config.selected_version, None);
+        let saved = saved_config(dir.path()).await.expect("配置有变化，应落盘");
+        assert_eq!(saved.sidebar_pins, ["生存"]);
+        assert_eq!(saved.selected_version, None);
+    }
+
+    /// 同上，导入在实例目录建好之后被取消。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_import_forgets_the_old_pin_on_its_name() {
+        let server = MockServer::start().await;
+        mount_stalled_vanilla(&server).await;
+        let dir = tempfile::tempdir().unwrap();
+        let facade = importing_facade(
+            dir.path(),
+            &server,
+            PetalfallConfig {
+                sidebar_pins: vec!["生存".to_owned(), "导入中".to_owned()],
+                ..PetalfallConfig::default()
+            },
+        );
+        let registry = std::sync::Arc::new(TaskRegistry::default());
+        let install =
+            start_stalled_import(&facade, &registry, dir.path(), "mp-pin", "导入中").await;
+
+        assert!(registry.cancel("mp-pin"));
+        let err = install.await.unwrap().unwrap_err();
+        assert_eq!(err.code, code::CANCELLED);
+        assert!(!dir
+            .path()
+            .join(".minecraft")
+            .join("versions")
+            .join("导入中")
+            .exists());
+
+        assert_eq!(facade.read().await.config().sidebar_pins, ["生存"]);
+        let saved = saved_config(dir.path()).await.expect("固定有变化，应落盘");
+        assert_eq!(saved.sidebar_pins, ["生存"]);
+    }
+
+    /// 名字本来就不在配置里：导入失败后配置不动，也不落盘。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_import_of_an_unpinned_name_leaves_the_config_alone() {
+        let server = MockServer::start().await;
+        mount_stalled_vanilla(&server).await;
+        let dir = tempfile::tempdir().unwrap();
+        let facade = importing_facade(
+            dir.path(),
+            &server,
+            PetalfallConfig {
+                sidebar_pins: vec!["生存".to_owned()],
+                selected_version: Some("生存".to_owned()),
+                ..PetalfallConfig::default()
+            },
+        );
+
+        let err = import_vanilla_as(&facade, dir.path(), "no-such-version", "周末联机")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTALL_FAILED);
+
+        let config = facade.read().await.config().clone();
+        assert_eq!(config.sidebar_pins, ["生存"]);
+        assert_eq!(config.selected_version.as_deref(), Some("生存"));
+        assert!(
+            saved_config(dir.path()).await.is_none(),
+            "配置没有变化，不该落盘"
+        );
+    }
+
+    /// 去掉旧固定时配置落不了盘（配置文件的位置被同名文件夹占着）：返回给前端的仍是导入本身的错误，门面不换进
+    /// 没存上的改动。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_import_whose_pin_cannot_be_saved_still_reports_the_import_error() {
+        let server = MockServer::start().await;
+        mount_stalled_vanilla(&server).await;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("config.json")).unwrap();
+        let facade = importing_facade(
+            dir.path(),
+            &server,
+            PetalfallConfig {
+                sidebar_pins: vec!["周末联机".to_owned(), "生存".to_owned()],
+                ..PetalfallConfig::default()
+            },
+        );
+
+        let err = import_vanilla_as(&facade, dir.path(), "no-such-version", "周末联机")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTALL_FAILED);
+        assert_eq!(
+            facade.read().await.config().sidebar_pins,
+            ["周末联机", "生存"]
+        );
+        assert!(dir.path().join("config.json").is_dir());
+    }
+
+    /// 导入途中切换了当前游戏目录（后端不拦）：只清导入所在目录收起来的那份固定，切过去的目录里同名的固定是那边
+    /// 另一个实例的，原样留着。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn import_cancelled_after_switching_directories_forgets_only_its_own_directory_pin() {
+        let server = MockServer::start().await;
+        mount_stalled_vanilla(&server).await;
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("另一个目录");
+        std::fs::create_dir_all(other.join("versions").join("导入中")).unwrap();
+        let facade = importing_facade(
+            dir.path(),
+            &server,
+            PetalfallConfig {
+                sidebar_pins: vec!["导入中".to_owned(), "生存".to_owned()],
+                parked_directories: vec![ParkedDirectory {
+                    path: other.clone(),
+                    sidebar_pins: vec!["导入中".to_owned()],
+                    selected_version: Some("导入中".to_owned()),
+                }],
+                ..PetalfallConfig::default()
+            },
+        );
+        let registry = std::sync::Arc::new(TaskRegistry::default());
+        let install =
+            start_stalled_import(&facade, &registry, dir.path(), "mp-switch", "导入中").await;
+        crate::commands::config::set_game_directory_with(&facade, &other.display().to_string())
+            .await
+            .unwrap();
+
+        assert!(registry.cancel("mp-switch"));
+        let err = install.await.unwrap().unwrap_err();
+        assert_eq!(err.code, code::CANCELLED);
+
+        let config = facade.read().await.config().clone();
+        assert_eq!(config.sidebar_pins, ["导入中"], "切过去的目录里的固定不动");
+        assert_eq!(config.selected_version.as_deref(), Some("导入中"));
+        let parked = [ParkedDirectory {
+            path: dir.path().join(".minecraft"),
+            sidebar_pins: vec!["生存".to_owned()],
+            selected_version: None,
+        }];
+        assert_eq!(config.parked_directories, parked);
+        let saved = saved_config(dir.path()).await.unwrap();
+        assert_eq!(saved.sidebar_pins, ["导入中"]);
+        assert_eq!(saved.parked_directories, parked);
+    }
+
     /// 导入一个 Fabric 1.20.1 整合包：实例 JSON 还没写出来（原版还在下载）时，盘上已有的原版 1.20.1 与加载器
     /// 版本目录就以「被使用」占着，删除、改名、补全它们都以 instance_busy 拒绝，detail 指出正在用它们的实例；
     /// 另一个用同一加载器的整合包照常导入，两边都只是往这些目录里写同样的东西。导入结束（这里是取消）后放开。
@@ -1548,7 +1873,7 @@ mod tests {
     }
 
     /// 半成品里有文件被别的进程占着、删不掉：导入照样以取消返回、放开实例名，未完成标记落成「已取消」
-    /// 而不是一直停在进行中；占用解除后能正常删除。
+    /// 而不是一直停在进行中；它还列在实例库里，配置里对它的固定也留着；占用解除后能正常删除。
     #[cfg(windows)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn undeletable_half_import_is_settled_instead_of_left_pending() {
@@ -1580,6 +1905,7 @@ mod tests {
             game_directory: Some(dir.path().join(".minecraft")),
             download_source: DownloadSourcePolicy::OfficialFirst,
             version_list_source: DownloadSourcePolicy::OfficialFirst,
+            sidebar_pins: vec!["删不掉".to_owned()],
             ..PetalfallConfig::default()
         };
         let petalfall = Petalfall::open(
@@ -1639,6 +1965,8 @@ mod tests {
         let incomplete = entry.incomplete.as_ref().expect("应带未完成标记");
         assert_eq!(incomplete.kind, "modpack");
         assert_eq!(incomplete.outcome, "cancelled");
+        assert_eq!(facade.read().await.config().sidebar_pins, ["删不掉"]);
+        assert!(saved_config(dir.path()).await.is_none());
 
         drop(held);
         let deleted = delete_instance_with(&facade, &locks, "删不掉", RemoveDir)
@@ -1646,6 +1974,146 @@ mod tests {
             .unwrap();
         assert!(deleted.existed);
         assert!(!instance.exists());
+    }
+
+    /// 导入自己没删掉半成品（取消后清理时文件被占着），占用随后解除：这里接着删掉半成品，并去掉配置里对这个名字的
+    /// 固定、当前选中与固定服务器记住的实例。导入的清理失败时 core 记一条错误日志，借它在这里动手之前放开占用，
+    /// 不靠等时间凑先后。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn half_import_the_import_left_behind_is_deleted_here_and_forgotten() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let server = MockServer::start().await;
+        mount_stalled_vanilla(&server).await;
+        let dir = tempfile::tempdir().unwrap();
+        let facade = importing_facade(
+            dir.path(),
+            &server,
+            PetalfallConfig {
+                sidebar_pins: vec!["生存".to_owned(), "导入中".to_owned()],
+                selected_version: Some("导入中".to_owned()),
+                pinned_servers: vec![petalfall_core::PinnedServer {
+                    name: "晨星".to_owned(),
+                    address: "play.example".to_owned(),
+                    instance: Some("导入中".to_owned()),
+                }],
+                ..PetalfallConfig::default()
+            },
+        );
+        let registry = std::sync::Arc::new(TaskRegistry::default());
+        let instance = dir
+            .path()
+            .join(".minecraft")
+            .join("versions")
+            .join("导入中");
+        let release = ReleaseOnCleanupError::new(&instance);
+        let pack = dir.path().join("pack.mrpack");
+        write_vanilla_pack(&pack);
+        let install = tokio::spawn({
+            let (f, r) = (facade.clone(), registry.clone());
+            let source = file(&pack.display().to_string());
+            let subscriber = tracing_subscriber::registry().with(release.clone());
+            async move {
+                let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+                install_modpack_with(
+                    &f,
+                    &r,
+                    &InstanceLocks::default(),
+                    "mp-late",
+                    source,
+                    Some("导入中"),
+                    None,
+                    &sink,
+                )
+                .await
+            }
+            .with_subscriber(subscriber)
+        });
+        let marker = petalfall_core::MarkerStore::for_version_dir(&instance);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !marker.path().is_file() {
+            assert!(Instant::now() < deadline, "导入没有建出实例目录");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // 不允许别人删除的打开方式：导入自己的 remove_dir_all 删不掉这个文件。
+        release.hold(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .share_mode(0)
+                .open(instance.join("占着.log"))
+                .unwrap(),
+        );
+
+        assert!(registry.cancel("mp-late"));
+        let err = install.await.unwrap().unwrap_err();
+        assert_eq!(err.code, code::CANCELLED);
+        assert_eq!(
+            release.dir_at_release(),
+            Some(true),
+            "导入自己的清理应先失败，那时半成品还在"
+        );
+        assert!(!instance.exists(), "占用解除后这里应删掉半成品");
+
+        let config = facade.read().await.config().clone();
+        assert_eq!(config.sidebar_pins, ["生存"]);
+        assert_eq!(config.selected_version, None);
+        assert_eq!(config.pinned_servers[0].instance, None);
+        let saved = saved_config(dir.path()).await.expect("配置有变化，应落盘");
+        assert_eq!(saved.sidebar_pins, ["生存"]);
+        assert_eq!(saved.selected_version, None);
+        assert_eq!(saved.pinned_servers[0].instance, None);
+    }
+
+    /// 导入自己清理半成品失败时（core 记的那条错误日志）放开测试占着的文件，并记下半成品那一刻还在不在。
+    #[cfg(windows)]
+    #[derive(Clone)]
+    struct ReleaseOnCleanupError {
+        dir: PathBuf,
+        held: std::sync::Arc<Mutex<Option<std::fs::File>>>,
+        dir_at_release: std::sync::Arc<Mutex<Option<bool>>>,
+    }
+
+    #[cfg(windows)]
+    impl ReleaseOnCleanupError {
+        fn new(dir: &Path) -> Self {
+            Self {
+                dir: dir.to_path_buf(),
+                held: std::sync::Arc::default(),
+                dir_at_release: std::sync::Arc::default(),
+            }
+        }
+
+        fn hold(&self, file: std::fs::File) {
+            *self.held.lock().unwrap() = Some(file);
+        }
+
+        fn dir_at_release(&self) -> Option<bool> {
+            *self.dir_at_release.lock().unwrap()
+        }
+    }
+
+    #[cfg(windows)]
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ReleaseOnCleanupError {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let meta = event.metadata();
+            if *meta.level() != tracing::Level::ERROR || meta.target() != "petalfall_core::modpack"
+            {
+                return;
+            }
+            if let Some(file) = self.held.lock().unwrap().take() {
+                drop(file);
+                *self.dir_at_release.lock().unwrap() = Some(self.dir.is_dir());
+            }
+        }
     }
 
     /// 测试里不往用户回收站塞东西：直接删掉。

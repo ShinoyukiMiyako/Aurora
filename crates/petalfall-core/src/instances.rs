@@ -350,8 +350,9 @@ impl Petalfall {
         pins_changed || was_selected || servers_changed
     }
 
-    /// 实例从 `from_game_dir` 移走后去掉配置对它的引用。`from` 是当前目录时同 [`Petalfall::forget_instance`]；
-    /// 否则只改 `parked_directories` 里 `from` 那条的固定与选中（固定服务器记的是当前目录的实例，不动），改完那条
+    /// 实例 `id` 已不在游戏目录 `from_game_dir` 里时，去掉配置在那个目录名下对它的引用：实例移到了别的游戏目录，
+    /// 或整合包导入没成、半成品已删掉，都是这种情况。`from_game_dir` 是当前目录时同 [`Petalfall::forget_instance`]；
+    /// 否则只改 `parked_directories` 里这个目录那条的固定与选中（固定服务器记的是当前目录的实例，不动），改完那条
     /// 固定与选中都空了就整条删掉，同切换目录时收起它们的规则。返回配置是否有变化，有变化时调用方落盘。
     pub fn forget_moved_instance(&mut self, id: &str, from_game_dir: &Path) -> bool {
         if same_path(from_game_dir, self.game_dir()) {

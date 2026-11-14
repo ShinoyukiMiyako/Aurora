@@ -1,11 +1,14 @@
 // @vitest-environment jsdom
 // 导入中的整合包与侧栏固定：导入失败或取消、后端删掉半成品之后固定列表跟着重读；导入进行中状态层不改它的固定。
+// 后端删掉半成品时一并去掉了配置里对这个名字的当前选中与固定服务器记住的实例，这两样同样按盘上重读。
 // 假后端的固定列表照后端的规矩：读的时候只给出还在实例库里的，写的时候每一项都要在。
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { PIN_IMPORTING_COPY } from "../copy/flows";
 import { CANCELLED_ERROR_CODE, IpcError } from "../ipc/errors";
 import type { InstanceDto } from "../ipc/instances";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { bootOverrides, callsOf, deferred, instanceDto, resetRecorder, settle, startedStore, type Deferred } from "../test/launcher";
+import { bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle, startedStore, type Deferred } from "../test/launcher";
+import { resources } from "./resource";
 import type { InstallModpackSpec, LauncherStore } from "./store";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -104,6 +107,45 @@ describe("导入失败或取消、半成品被删掉之后", () => {
     expect(writes()).toEqual([["生存", "创造"]]);
     expect(store.getState().sidebarPins).toEqual(["生存", "创造"]);
   });
+
+  it.each([
+    { ending: "失败", error: new IpcError("download_failed", "下载源暂时不可用") },
+    { ending: "取消", error: new IpcError(CANCELLED_ERROR_CODE, "已取消") },
+  ])("导入$ending：当前选中按盘上重读、固定服务器重取；再导入同名实例后选中它照常写进配置", async ({ error }) => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    // 配置里的当前选中还指着早先在落樱之外删掉的同名实例
+    let selected: string | null = PACK.name;
+    ipc.overrides.set("get_config", () => configDto({ selected_version: selected }));
+    ipc.overrides.set("update_config", (args) => {
+      if ("selectedVersion" in args) selected = args.selectedVersion as string | null;
+      return null;
+    });
+    const fetched: string[] = [];
+    onTestFinished(resources.subscribe("servers:pinned", async () => fetched.push("servers:pinned"), () => undefined));
+    await boot([]);
+    expect(store.getState().settings?.selectedVersion).toBe(PACK.name);
+    await store.actions.installModpack(PACK);
+    await settle();
+    fetched.length = 0;
+
+    // 后端删掉半成品、去掉配置里对这个名字的引用，再报导入的结局
+    selected = null;
+    run.reject(error);
+    await settle();
+    expect(store.getState().settings?.selectedVersion).toBeNull();
+    expect(fetched).toEqual(["servers:pinned"]);
+
+    // 同一会话里再导入同名实例，导入完成后选中它：前端不能还当它已是当前实例而跳过写入
+    run = deferred<unknown>();
+    await store.actions.installModpack(PACK);
+    await settle();
+    instances = [...instances, instanceDto(PACK.name, { loaders: [{ kind: "fabric", version: "0.16.10" }] })];
+    run.resolve({ version_id: PACK.name });
+    await settle();
+    await store.actions.selectInstance(PACK.name);
+    expect(callsOf(ipc, "update_config")).toEqual([{ selectedVersion: PACK.name }]);
+    expect(selected).toBe(PACK.name);
+  });
 });
 
 describe("导入进行中：状态层不改它的固定", () => {
@@ -112,11 +154,11 @@ describe("导入进行中：状态层不改它的固定", () => {
     await store.actions.installModpack(PACK);
     await settle();
     expect(store.getState().instances.find((i) => i.id === PACK.name)).toMatchObject({ placeholder: true, status: "installing" });
-    await expect(store.actions.togglePin(PACK.name)).rejects.toThrow(`整合包「${PACK.name}」还在导入，导入完成后才能固定`);
+    await expect(store.actions.togglePin(PACK.name)).rejects.toThrow(PIN_IMPORTING_COPY.pin);
 
     // 半成品目录建好之后后端认这个名字，写得进去；导入失败或取消时它又会被删掉，留下一条指向不存在实例的固定
     await scannedHalfway();
-    await expect(store.actions.togglePin(PACK.name)).rejects.toThrow(`整合包「${PACK.name}」还在导入，导入完成后才能固定`);
+    await expect(store.actions.togglePin(PACK.name)).rejects.toThrow(PIN_IMPORTING_COPY.pin);
     expect(writes()).toEqual([]);
     expect(store.getState().sidebarPins).toEqual(["生存"]);
 
@@ -136,7 +178,7 @@ describe("导入进行中：状态层不改它的固定", () => {
     await scannedHalfway();
     expect(store.getState().sidebarPins).toEqual(["生存", PACK.name]);
 
-    await expect(store.actions.togglePin(PACK.name)).rejects.toThrow(`整合包「${PACK.name}」还在导入，导入完成后才能取消固定`);
+    await expect(store.actions.togglePin(PACK.name)).rejects.toThrow(PIN_IMPORTING_COPY.unpin);
     expect(writes()).toEqual([]);
     expect(store.getState().sidebarPins).toEqual(["生存", PACK.name]);
   });

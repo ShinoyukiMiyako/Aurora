@@ -98,7 +98,8 @@ describe("Field 关联", () => {
     expect((control.parentElement as HTMLElement).dataset.invalid).toBe("true");
     act(() => (document.querySelector("button:not([aria-label])") as HTMLButtonElement).click());
     expect(control.hasAttribute("aria-invalid")).toBe(false);
-    expect(message.textContent).toBe("最多 32 个字");
+    // 换下去的错误带 inert 留在原处淡出，jsdom 里退场播不完：只认在场的那一块
+    expect([...message.querySelectorAll(":scope > :not([inert])")].map((layer) => layer.textContent)).toEqual(["最多 32 个字"]);
   });
 
   it("挂载时就有的错误不单独入场；之后出现的错误从透明淡入", async () => {
@@ -109,13 +110,16 @@ describe("Field 关联", () => {
         </Field>
       );
     }
-    const errorOf = () => (document.querySelector("[aria-live]") as HTMLElement).firstElementChild as HTMLElement | null;
+    // 撤掉的错误带 inert 留在原处淡出：只认在场的那一块
+    const errorOf = () => document.querySelector<HTMLElement>("[aria-live] > :not([inert])");
     const first = render(<Named error="名称不能为空" />);
     view = first;
     expect(errorOf()?.textContent).toBe("名称不能为空");
     expect(errorOf()?.style.opacity).toBe("1");
     first.rerender(<Named />);
     expect(errorOf()).toBeNull();
+    // 淡出途中又出错的话是同一块从当前透明度淡回去；等它淡完移除，再出现的才是新的一块
+    await waitForFrames(() => expect(document.querySelector("[aria-live]")?.childNodes.length).toBe(0));
     first.rerender(<Named error="已有同名整合包" />);
     expect(errorOf()?.textContent).toBe("已有同名整合包");
     expect(errorOf()?.style.opacity).toBe("0");

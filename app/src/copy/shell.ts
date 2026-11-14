@@ -1,7 +1,7 @@
 // 外壳自己的文案：标题栏、状态岛、下载快览、账户胶囊、侧栏、命令面板、通知容器与错误兜底。
 // 与流程共用的词（阶段名、按钮动词、任务状态）从 flows.ts 取，不在这里另写一份。
 
-import { joinMixed, LAUNCH_COPY, PAGE_LABEL, TASK_STATUS_LABEL, TASK_TOAST } from "./flows";
+import { joinMixed, LAUNCH_COPY, PAGE_LABEL, PIN_IMPORTING_COPY, TASK_STATUS_LABEL, TASK_TOAST } from "./flows";
 import { MAX_PARALLEL_TASKS } from "../domain/limits";
 import { APP_NAME } from "../lib/app-info";
 import type { ConfigEnumField } from "../ipc/config";
@@ -79,6 +79,8 @@ export const SIDEBAR_COPY = {
   moveUp: "上移",
   moveDown: "下移",
   unpin: "取消固定",
+  /** 导入中的实例本来就已固定（配置里留着同名的旧固定）：状态层不改它的固定，取消固定禁用。与实例库卡片、头图的原因同一句。 */
+  unpinImporting: PIN_IMPORTING_COPY.unpin,
   waitingInstall: LAUNCH_COPY.queuedTitle,
 } as const;
 

@@ -147,7 +147,7 @@ function ProgressRingOverlay({ size, tone, progress, track, appear }: { size: In
   // 启动走完进入运行：环在淡出的同时补满，不带着缺口消失；失败、取消时停在原处淡出
   const completed = !present && next !== undefined && next.type === "badge" && next.tone === "ok";
   // 最少显示长度落在平滑的终点上，环上直接用平滑值：从 0 起步时弧一帧帧长出来，不在第一帧冒出那一截。
-  // 仍截到 [0, 1]（同 rawFillOffset）：settle 弹簧补满时会略冲过 1，描边偏移变负，弧的起点让出一道缝
+  // 仍截到 [0, 1]（同 fillOffset）：settle 弹簧补满时会略冲过 1，描边偏移变负，弧的起点让出一道缝
   const { smooth, target } = useSmoothProgress(completed ? 1 : progress, track, MIN_VISIBLE_PROGRESS);
   const dashOffset = useTransform(smooth, (p) => length * (1 - clamp(p, 0, 1)));
   return (

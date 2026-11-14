@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { act, type ReactNode } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { springAt } from "../lib/motion";
 import { HOLD_AFTER_MUTATION, HOLD_AFTER_RESIZE, holdUntilPainted } from "../lib/reflow";
 import { playTrack, springTrack } from "../lib/slide";
@@ -483,8 +483,25 @@ describe("Card 外框跟随（reflowEdge）", () => {
     expect(edgePlays).toEqual([[{ frame: 2, callback: 2 }], [{ frame: 2, callback: 2 }]]);
   });
 
-  it("途中又变：按弹簧算出此刻的下沿与速度，带着速度当场接着走，旧的那段取消", () => {
+  /** 桩上文档时间轴（jsdom 没有 Web Animations）：旧轨迹走了多久就是相对它读的，接续按它钉起步时刻。返回改它的入口。 */
+  function stubTimeline(): { now(): number; advance(ms: number): void } {
+    let time = 500 + Math.round(Math.random() * 1e5) / 10;
+    Object.defineProperty(document, "timeline", { configurable: true, get: () => ({ currentTime: time }) });
+    onTestFinished(() => {
+      Reflect.deleteProperty(document, "timeline");
+    });
+    return {
+      now: () => time,
+      advance: (ms) => {
+        time += ms;
+      },
+    };
+  }
+  const pinned = (animation: object) => (animation as { startTime?: unknown }).startTime;
+
+  it("途中又变：旧的那段取消；新的一段先接着旧轨迹走、这次的高度差原样留着（起步时刻钉在文档时间轴此刻，播完停在末帧）；下一帧换成从那一刻的下沿与速度起步的整段，钉在那一帧的时间上", () => {
     const waapi = stubSpanAnimations();
+    const timeline = stubTimeline();
     const { frame } = edgeCard(600, 291);
     resize(frame, 600, 251);
     const shrink = waapi.running(frame, "scale");
@@ -494,13 +511,100 @@ describe("Card 外框跟随（reflowEdge）", () => {
     shrinkCorners.currentTime = 50;
     resize(frame, 600, 291);
     expect([shrink.cancelled, shrinkCorners.cancelled]).toEqual([true, true]);
-    const back = waapi.running(frame, "scale");
-    expect(radii(waapi.running(frame, "borderRadius").frames[0])[1]).toBeCloseTo(18 / scaleY(back.frames[0]), 3);
+    const held = waapi.running(frame, "scale");
+    const heldCorners = waapi.running(frame, "borderRadius");
     const now = springAt("settle", 40, 0, 0.05);
-    expect(scaleY(back.frames[0])).toBeCloseTo((291 + now.x - 40) / 291, 4);
-    expect(scaleY(back.frames[6])).toBeCloseTo((291 + springAt("settle", now.x - 40, now.v, 6 / 120).x) / 291, 4);
-    // 在动的接着走，不再停一帧
-    expect(back.playState).toBe("running");
+    expect(scaleY(held.frames[0])).toBeCloseTo((291 + now.x - 40) / 291, 4);
+    // 只有旧轨迹在走：这次长高的 40px 一点没动，末帧停在留着的高度差上
+    expect(scaleY(held.frames[6])).toBeCloseTo((291 - 40 + springAt("settle", now.x, now.v, 6 / 120).x) / 291, 4);
+    expect(scaleY(held.frames[held.frames.length - 1])).toBeCloseTo(251 / 291, 4);
+    expect(radii(heldCorners.frames[6])[1]).toBeCloseTo(18 / scaleY(held.frames[6]), 3);
+    // 在动的不停：新建的动画要到下一帧才定起步时刻，不钉的话外框在那一帧停在起点上，卡内的行还在走
+    expect([held.playState, heldCorners.playState]).toEqual(["running", "running"]);
+    expect([pinned(held), pinned(heldCorners)]).toEqual([timeline.now(), timeline.now()]);
+    expect([held.options.fill, heldCorners.options.fill]).toEqual(["both", "both"]);
+    expect([held.options.duration, held.options.easing]).toEqual([heldCorners.options.duration, "linear"]);
+
+    const elapsed = 4 + Math.random() * 30;
+    timeline.advance(elapsed);
+    held.currentTime = elapsed;
+    heldCorners.currentTime = elapsed;
+    nextFrame();
+    expect([held.cancelled, heldCorners.cancelled]).toEqual([true, true]);
+    const whole = waapi.running(frame, "scale");
+    const wholeCorners = waapi.running(frame, "borderRadius");
+    const at = springAt("settle", now.x, now.v, elapsed / 1000);
+    expect(scaleY(whole.frames[0])).toBeCloseTo((291 + at.x - 40) / 291, 4);
+    expect(scaleY(whole.frames[6])).toBeCloseTo((291 + springAt("settle", at.x - 40, at.v, 6 / 120).x) / 291, 4);
+    expect(whole.frames.at(-1)).toEqual({ scale: "1 1" });
+    expect(radii(wholeCorners.frames[0])[1]).toBeCloseTo(18 / scaleY(whole.frames[0]), 3);
+    // 整段钉在这一帧的时间上（与同一个回调里开播的卡内行同一刻）
+    expect([pinned(whole), pinned(wholeCorners)]).toEqual([timeline.now(), timeline.now()]);
+    expect([whole.options.duration, whole.options.easing]).toEqual([wholeCorners.options.duration, "linear"]);
+    expect(frameQueue).toHaveLength(0);
+  });
+
+  it("途中又变、卡内被挤开的行从静止起步：外框留着的这次高度差与行在同一个动画帧回调里起步", () => {
+    const waapi = stubSpanAnimations();
+    const timeline = stubTimeline();
+    const { frame } = edgeCard(600, 291);
+    resize(frame, 600, 251);
+    nextFrame();
+    const shrink = waapi.running(frame, "scale");
+    shrink.currentTime = 50;
+    waapi.running(frame, "borderRadius").currentTime = 50;
+    // 同一轮尺寸观察：卡内的行从静止起步挂进等待，外框又变
+    const row = rowShift();
+    const rowPlays = trackPlays(row);
+    holdUntilPainted(row, window, HOLD_AFTER_RESIZE);
+    resize(frame, 600, 291);
+    const held = waapi.running(frame, "scale");
+    expect(frameQueue).toHaveLength(1);
+    timeline.advance(16);
+    held.currentTime = 16;
+    const before = waapi.played.length;
+    nextFrame();
+    expect(rowPlays).toEqual([{ frame: 2, callback: 2 }]);
+    expect(waapi.played.length - before).toBe(2);
+    // 同一批：外框的整段与从静止起步的行钉同一刻
+    expect([pinned(waapi.running(frame, "scale")), pinned(row)]).toEqual([timeline.now(), timeline.now()]);
+    expect(frameQueue).toHaveLength(0);
+  });
+
+  it("外框刚开播、时钟还没走又变：按在动的处理，旧的那段照常走、这次的高度差留着，不并进新的一段重新等", () => {
+    const waapi = stubSpanAnimations();
+    const timeline = stubTimeline();
+    const { frame } = edgeCard(600, 291);
+    resize(frame, 600, 251);
+    const shrink = waapi.running(frame, "scale");
+    nextFrame();
+    expect([shrink.playState, shrink.currentTime]).toEqual(["running", 0]);
+    // 同一帧又长回去：卡内跟着它一起开播的行已在走
+    resize(frame, 600, 291);
+    const held = waapi.running(frame, "scale");
+    expect(scaleY(held.frames[0])).toBeCloseTo(1, 4);
+    expect(scaleY(held.frames[6])).toBeCloseTo((291 - 40 + springAt("settle", 40, 0, 6 / 120).x) / 291, 4);
+    expect([held.playState, pinned(held), held.options.fill]).toEqual(["running", timeline.now(), "both"]);
+    nextFrame();
+    expect(held.cancelled).toBe(true);
+    expect(waapi.running(frame, "scale").frames.at(-1)).toEqual({ scale: "1 1" });
+  });
+
+  it("途中又变之后、下一帧之前宽度变了：留着的那一截当场落定，到期不再换", () => {
+    const waapi = stubSpanAnimations();
+    stubTimeline();
+    const { frame } = edgeCard(600, 291);
+    resize(frame, 600, 251);
+    nextFrame();
+    waapi.running(frame, "scale").currentTime = 50;
+    waapi.running(frame, "borderRadius").currentTime = 50;
+    resize(frame, 600, 291);
+    const held = [waapi.running(frame, "scale"), waapi.running(frame, "borderRadius")];
+    resize(frame, 520, 291);
+    expect(held.map((a) => a.cancelled)).toEqual([true, true]);
+    const count = waapi.played.length;
+    nextFrame();
+    expect(waapi.played).toHaveLength(count);
   });
 
   it("宽度变了（窗口缩放、换档）：一步到位，还在走的当场落定", () => {

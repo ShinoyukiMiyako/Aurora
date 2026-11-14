@@ -173,17 +173,24 @@ function StepPane({ ref, direction, enter, onKeyDown, children }: StepPaneProps)
  *   减少动画时让位一步到位，不用等。
  * - 退：Appear 当场把它抽出布局（popLayout），「取消」立刻滑进来，从淡出中的它上面压过去。这里留在布局里淡完才拿掉，
  *   「取消」等拿掉那一刻（增删观察报上来）再滑回来。
+ * - 退到一半被拉回（点了上一步又马上点下一步）：framer-motion 让同一格回到 animate，再带入场延迟就停在半透明上干等。
+ *   这时「取消」一直没动（这一格还在布局里），不用等，从当前的不透明度直接淡回 1。插进来还没开始淡入就退场的，
+ *   两个值都已在退场的终点上，退场当场播完、这一格随即拿掉，再点下一步是新插进来的一格，照旧等。
  * 退场中带 inert：点不到、聚焦不到；焦点正在它上面时由新的一步接管（StepPane）。
  */
 function BackSlot({ children }: { children: ReactNode }) {
   const present = useIsPresent();
   const reduced = useReducedMotionConfig() === true;
+  // 开始退场过就记下，只增不减：之后回到在场都是被拉回
+  const [exited, setExited] = useState(false);
+  if (!present && !exited) setExited(true);
   const item = reduced ? insertItemFade : insertItem;
   // 单列了过渡的值（opacity）不继承外层的 delay，两层都要写
   const { transition } = insertItem.animate;
-  const animate = reduced
-    ? insertItemFade.animate
-    : { ...insertItem.animate, transition: { ...transition, delay: BACK_ENTER_DELAY, opacity: { ...transition.opacity, delay: BACK_ENTER_DELAY } } };
+  const animate =
+    reduced || exited
+      ? item.animate
+      : { ...insertItem.animate, transition: { ...transition, delay: BACK_ENTER_DELAY, opacity: { ...transition.opacity, delay: BACK_ENTER_DELAY } } };
   return (
     <motion.div className={styles.footItem} inert={!present} initial={item.initial} animate={animate} exit={item.exit}>
       {children}

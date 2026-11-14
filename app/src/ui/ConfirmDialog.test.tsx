@@ -6,7 +6,7 @@ import { MotionConfig, motion, visualElementStore } from "framer-motion";
 import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { render, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
+import { drainFrames, render, stepFrames, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
 import { ConfirmDialog } from "./ConfirmDialog";
 import confirmStyles from "./ConfirmDialog.module.css";
 
@@ -31,16 +31,34 @@ vi.mock("../lib/reflow", async (orig) => {
 });
 
 let view: Rendered | undefined;
+/** 这个用例的帧跟着假时钟走（startFrameClock）：收尾先卸载、再在假时钟上把帧循环排空，才换回真实计时器。 */
+let frameClock = false;
 
 beforeEach(() => {
   stubResizeObserver();
 });
 
-afterEach(() => {
+afterEach(async () => {
   view?.unmount();
   view = undefined;
+  if (frameClock) await drainFrames();
+  frameClock = false;
   vi.useRealTimers();
 });
+
+/**
+ * 断言动画在某一刻的值（提交那一刻的起点、途中逐帧的值）的用例让帧跟着假时钟走，用 stepFrames 逐帧推进。
+ * 按真实时间走的话，机器满载时 await act 让出的那一下就可能先跑掉一两帧，量到的已经不是起点；逐帧采样也会漏帧。
+ * 换之前先在真实计时器上把帧循环排空（见 test/dom 的 drainFrames）。
+ */
+async function startFrameClock() {
+  await drainFrames();
+  vi.useFakeTimers();
+  frameClock = true;
+}
+
+/** 弹窗的入场与 morph 形变（时长约 350 ms 的弹簧）在这么多帧（约 1 秒）之内都落定。 */
+const SETTLE_FRAMES = 60;
 
 function mount(ui: ReactNode) {
   view = render(
@@ -201,6 +219,22 @@ const translateX = (el: HTMLElement) => {
   return Number(m[1]);
 };
 
+/**
+ * 布局节点此刻画出来的左右缘。桩上的矩形就是布局框，framer-motion 在它上面先 translate3d 再 scale，
+ * 缩放原点在 transform-origin 横向的百分比处。只在形变途中用：没有形变时 framer 不写原点。
+ */
+const paintedEdges = (el: HTMLElement) => {
+  const box = el.getBoundingClientRect();
+  const originPercent = /^(-?[\d.]+)% /.exec(el.style.transformOrigin);
+  if (originPercent === null) throw new Error(`没有缩放原点：${el.style.transformOrigin}`);
+  const shift = /translate3d\((-?[\d.]+(?:e-?\d+)?)px/.exec(el.style.transform);
+  const scale = /scale\((-?[\d.]+(?:e-?\d+)?), /.exec(el.style.transform);
+  const origin = box.left + (box.width * Number(originPercent[1])) / 100;
+  const tx = shift === null ? 0 : Number(shift[1]);
+  const sx = scale === null ? 1 : Number(scale[1]);
+  return { left: origin + tx + (box.left - origin) * sx, right: origin + tx + (box.right - origin) * sx };
+};
+
 describe("ConfirmDialog 确认键换文案", () => {
   // 「取消」走 DOM 让位（Web Animations，下一帧才起步）、确认键走 framer-motion 的布局动画（提交时就起算）时，
   // 两边差着一个长帧，途中间距忽大忽小；确认键的形变被正文换外形打断重起时，「取消」照原轨迹走，反过来领先
@@ -220,13 +254,16 @@ describe("ConfirmDialog 确认键换文案", () => {
   });
 
   it("被顶替换了文案：确认键从旧宽度形变到新宽度（右缘不动），文字不随之拉伸，「取消」在同一次布局动画里从旧位置滑过去", async () => {
+    await startFrameClock();
     mount(<Commanded />);
     const { confirm, cancel } = stubFooterRects("切换并重下", "取消");
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]') as HTMLElement;
-    await waitForFrames(() => expect(dialog.style.transform).toBe("none"));
+    await stepFrames(SETTLE_FRAMES);
+    expect(dialog.style.transform).toBe("none");
     expect(confirm.style.transform).toBe("");
     const track = trackOf("切换并重下");
 
+    // 假时钟不推进，提交之后一帧也没走：下面量到的是形变的起点
     await act(async () => handles.set?.(REMOVE));
     expect(morphOf("删除实例")).toBe(confirm);
     const scale = /scale\(([\d.]+), ([\d.]+)\)/.exec(confirm.style.transform);
@@ -242,15 +279,25 @@ describe("ConfirmDialog 确认键换文案", () => {
     // 「取消」的左缘从 760 - 102 - 82 = 576 移到 760 - 88 - 82 = 590：起点在旧位置，差 -14
     expect(morphOf("取消")).toBe(cancel);
     expect(translateX(cancel)).toBeCloseTo(-14, 1);
-    await waitForFrames(() => {
-      expect(confirm.style.transform).toMatch(/^(none|)$/);
-      expect(cancel.style.transform).toMatch(/^(none|)$/);
-    });
+    // 途中逐帧看：两边同一个时钟、同一条弹簧，确认键右缘一直在 760，左缘与「取消」右缘一直隔着 10
+    for (let i = 0; i < 4; i++) {
+      await stepFrames(1);
+      const key = paintedEdges(confirm);
+      const shifted = translateX(cancel);
+      expect(shifted).toBeGreaterThan(-14);
+      expect(shifted).toBeLessThan(0);
+      expect(key.right).toBeCloseTo(760, 6);
+      expect(key.left - paintedEdges(cancel).right).toBeCloseTo(10, 6);
+    }
+    await stepFrames(SETTLE_FRAMES);
+    expect(confirm.style.transform).toMatch(/^(none|)$/);
+    expect(cancel.style.transform).toMatch(/^(none|)$/);
   });
 
   // 形变是外层布局节点的 transform 缩放，圆角画在里面的按钮上：framer-motion 只校正布局节点自己样式里的值，
   // 按钮的四角跟着外层被压成横 10 × scaleX、纵 10 的椭圆角
   it("确认键形变途中按钮读到的圆角按缩放反向校正：乘上此刻的缩放横纵都还是原来的像素，落定后回到像素值", async () => {
+    await startFrameClock();
     // jsdom 不加载模块样式：按钮算好的圆角由这条规则给
     const sheet = document.createElement("style");
     sheet.textContent = '[role="dialog"] button[data-variant="danger"] { border-top-left-radius: 10px; }';
@@ -260,21 +307,27 @@ describe("ConfirmDialog 确认键换文案", () => {
       const { confirm } = stubFooterRects("切换并重下", "取消");
       const button = buttonOf("切换并重下");
       const dialog = document.querySelector<HTMLElement>('[role="dialog"]') as HTMLElement;
-      await waitForFrames(() => expect(dialog.style.transform).toBe("none"));
+      await stepFrames(SETTLE_FRAMES);
+      expect(dialog.style.transform).toBe("none");
       // 按钮的圆角改读形变节点上的值；静止时那就是按钮自己算好的圆角，外观不变
       expect(button.style.borderRadius).toBe("var(--confirm-key-radius, 10px)");
       expect(confirm.style.getPropertyValue("--confirm-key-radius")).toBe("10px");
 
       await act(async () => handles.set?.(REMOVE));
       expect(buttonOf("删除实例")).toBe(button);
-      const scale = /scale\(([\d.]+), ([\d.]+)\)/.exec(confirm.style.transform);
-      if (scale === null) throw new Error(`确认键没有形变：${confirm.style.transform}`);
-      const radius = /^([\d.]+)% \/ ([\d.]+)%$/.exec(confirm.style.getPropertyValue("--confirm-key-radius"));
-      if (radius === null) throw new Error(`圆角没有按缩放校正：${confirm.style.getPropertyValue("--confirm-key-radius")}`);
-      // 新文案 4 个字：布局宽 32 + 14 × 4 = 88、高 36；百分比按按钮自己的盒子折回像素，再乘上外层此刻的缩放
-      expect((Number(radius[1]) / 100) * 88 * Number(scale[1])).toBeCloseTo(10, 1);
-      expect((Number(radius[2]) / 100) * 36 * Number(scale[2])).toBeCloseTo(10, 1);
-      await waitForFrames(() => expect(confirm.style.getPropertyValue("--confirm-key-radius")).toBe("10px"));
+      // 起点与途中几帧各看一次：缩放逐帧在变，校正跟着它变
+      for (let i = 0; i < 4; i++) {
+        const scale = /scale\(([\d.]+), ([\d.]+)\)/.exec(confirm.style.transform);
+        if (scale === null) throw new Error(`确认键没有形变：${confirm.style.transform}`);
+        const radius = /^([\d.]+)% \/ ([\d.]+)%$/.exec(confirm.style.getPropertyValue("--confirm-key-radius"));
+        if (radius === null) throw new Error(`圆角没有按缩放校正：${confirm.style.getPropertyValue("--confirm-key-radius")}`);
+        // 新文案 4 个字：布局宽 32 + 14 × 4 = 88、高 36；百分比按按钮自己的盒子折回像素，再乘上外层此刻的缩放
+        expect((Number(radius[1]) / 100) * 88 * Number(scale[1])).toBeCloseTo(10, 6);
+        expect((Number(radius[2]) / 100) * 36 * Number(scale[2])).toBeCloseTo(10, 6);
+        await stepFrames(1);
+      }
+      await stepFrames(SETTLE_FRAMES);
+      expect(confirm.style.getPropertyValue("--confirm-key-radius")).toBe("10px");
       expect(button.style.borderRadius).toBe("var(--confirm-key-radius, 10px)");
     } finally {
       sheet.remove();
@@ -315,6 +368,7 @@ describe("ConfirmDialog 确认键换文案", () => {
   });
 
   it("减少动画：按钮不形变、「取消」不滑，下一帧直接到位；文案照样交叉淡化", async () => {
+    await startFrameClock();
     mount(
       <MotionConfig reducedMotion="always">
         <Commanded />
@@ -322,7 +376,8 @@ describe("ConfirmDialog 确认键换文案", () => {
     );
     const { confirm, cancel } = stubFooterRects("切换并重下", "取消");
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]') as HTMLElement;
-    await waitForFrames(() => expect(dialog.style.opacity).toBe("1"));
+    await stepFrames(SETTLE_FRAMES);
+    expect(dialog.style.opacity).toBe("1");
 
     await act(async () => handles.set?.(REMOVE));
     expect(layersOf("删除实例").map(({ text, leaving }) => ({ text, leaving }))).toEqual([
@@ -330,19 +385,26 @@ describe("ConfirmDialog 确认键换文案", () => {
       { text: "删除实例", leaving: false },
     ]);
     expect(layersOf("删除实例")[1].el.style.opacity).toBe("0");
-    // 布局动画在减少动画下是瞬时的：提交那一帧还画着旧的外形，下一帧就是新的，中间没有过渡帧。
-    // 照常播 morph 弹簧（约 350 ms）的话，逐帧会看到一串不同的中间值
-    const seen = { confirm: new Set<string>(), cancel: new Set<string>() };
-    await waitForFrames(() => {
-      seen.confirm.add(confirm.style.transform);
-      seen.cancel.add(cancel.style.transform);
-      expect(confirm.style.transform).toMatch(/^(none|)$/);
-      expect(cancel.style.transform).toMatch(/^(none|)$/);
-    });
-    const moving = (values: Set<string>) => [...values].filter((t) => !/^(none|)$/.test(t));
-    expect(moving(seen.confirm).length).toBeLessThanOrEqual(1);
-    expect(moving(seen.cancel).length).toBeLessThanOrEqual(1);
-    await waitForFrames(() => expect(layersOf("删除实例").map(({ text }) => text)).toEqual(["删除实例"]));
+    // 布局动画在减少动画下是瞬时的：提交那一帧还画着旧的外形，下一帧就是新的，之后每一帧都不再有过渡。
+    // 照常播 morph 弹簧（约 350 ms）的话，下一帧起逐帧是一串不同的中间值
+    const still = /^(none|)$/;
+    await stepFrames(1);
+    expect(confirm.style.transform).toMatch(still);
+    expect(cancel.style.transform).toMatch(still);
+    // 文案的淡入淡出不归减少动画管：这一帧旧字还在淡出、新字正在淡入
+    const crossing = layersOf("删除实例");
+    expect(crossing.map(({ text }) => text)).toEqual(["切换并重下", "删除实例"]);
+    for (const { el } of crossing) {
+      expect(Number(el.style.opacity)).toBeGreaterThan(0);
+      expect(Number(el.style.opacity)).toBeLessThan(1);
+    }
+    for (let i = 1; i < SETTLE_FRAMES; i++) {
+      await stepFrames(1);
+      expect(confirm.style.transform).toMatch(still);
+      expect(cancel.style.transform).toMatch(still);
+    }
+    expect(layersOf("删除实例").map(({ text }) => text)).toEqual(["删除实例"]);
+    expect(layersOf("删除实例")[0].el.style.opacity).toBe("1");
   });
 
   // jsdom 不算样式，这几条直接读样式表：写错了在真窗口里才露出来（文字被压扁、旧字挤在新字旁边、伸出按钮）
@@ -387,6 +449,7 @@ describe("ConfirmDialog 正文变高时的确认键", () => {
         />
       );
     }
+    await startFrameClock();
     mount(<Swapping />);
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]') as HTMLElement;
     const wrapper = morphOf("删除实例");
@@ -407,7 +470,8 @@ describe("ConfirmDialog 正文变高时的确认键", () => {
     };
     const track = trackOf("删除实例");
     track.getBoundingClientRect = wrapper.getBoundingClientRect;
-    await waitForFrames(() => expect(dialog.style.transform).toBe("none"));
+    await stepFrames(SETTLE_FRAMES);
+    expect(dialog.style.transform).toBe("none");
     const layoutTop = (el: HTMLElement) => visualElementStore.get(el)?.projection?.layout?.layoutBox.y.min;
 
     await act(async () => local.set?.(long));
@@ -418,7 +482,8 @@ describe("ConfirmDialog 正文变高时的确认键", () => {
     // 文字的位置节点被顶替时也不换，跟着这一次量到新位置
     expect(trackOf("删除实例")).toBe(track);
     expect(layoutTop(track)).toBe(404);
-    await waitForFrames(() => expect(dialog.style.transform).toBe("none"));
+    await stepFrames(SETTLE_FRAMES);
+    expect(dialog.style.transform).toBe("none");
     expect(wrapper.style.transform).toMatch(/^(none|)$/);
   });
 
@@ -429,6 +494,7 @@ describe("ConfirmDialog 正文变高时的确认键", () => {
       local.grow = () => setBody("长长长长长长长长长长");
       return <ConfirmDialog open requestKey={1} title="删除「生存」？" body={body} confirmLabel="删除实例" tone="danger" onConfirm={() => undefined} onClose={() => undefined} />;
     }
+    await startFrameClock();
     mount(<Growing />);
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]') as HTMLElement;
     const wrapper = morphOf("删除实例");
@@ -449,14 +515,16 @@ describe("ConfirmDialog 正文变高时的确认键", () => {
     };
     wrapper.getBoundingClientRect = buttonRect;
     track.getBoundingClientRect = buttonRect;
-    await waitForFrames(() => expect(dialog.style.transform).toBe("none"));
+    await stepFrames(SETTLE_FRAMES);
+    expect(dialog.style.transform).toBe("none");
     const layoutTop = (el: HTMLElement) => visualElementStore.get(el)?.projection?.layout?.layoutBox.y.min;
 
     await act(async () => local.grow?.());
     expect(dialog.style.transform).toMatch(/scale\(/);
     expect(layoutTop(wrapper)).toBe(404);
     expect(layoutTop(track)).toBe(404);
-    await waitForFrames(() => expect(dialog.style.transform).toBe("none"));
+    await stepFrames(SETTLE_FRAMES);
+    expect(dialog.style.transform).toBe("none");
   });
 });
 
@@ -522,6 +590,7 @@ describe("ConfirmDialog 内容晚到", () => {
   });
 
   it("传了 layoutKey：只在它变的那次量布局、播形变；正文变高而 layoutKey 不变时不量", async () => {
+    await startFrameClock();
     mount(<Updating />);
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]') as HTMLElement;
     dialog.getBoundingClientRect = () => {
@@ -529,7 +598,8 @@ describe("ConfirmDialog 内容晚到", () => {
       const top = (720 - height) / 2;
       return { left: 200, top, width: 420, height, x: 200, y: top, right: 620, bottom: top + height, toJSON: () => ({}) } as DOMRect;
     };
-    await waitForFrames(() => expect(dialog.style.transform).toBe("none"));
+    await stepFrames(SETTLE_FRAMES);
+    expect(dialog.style.transform).toBe("none");
     await act(async () => updates.set?.({ ...LOADING, body: "长长长长长" }));
     expect(dialog.style.transform).toBe("none");
     await act(async () => updates.set?.(READY));
@@ -537,7 +607,8 @@ describe("ConfirmDialog 内容晚到", () => {
     const scale = /scale\(([\d.]+), ([\d.]+)\)/.exec(dialog.style.transform);
     if (scale === null) throw new Error(`面板没有形变：${dialog.style.transform}`);
     expect(Number(scale[2])).toBeCloseTo(150 / 200, 2);
-    await waitForFrames(() => expect(dialog.style.transform).toBe("none"));
+    await stepFrames(SETTLE_FRAMES);
+    expect(dialog.style.transform).toBe("none");
   });
 
   // 正文里的数据在子组件内部晚到（加载门到点、骨架换正文），确认框这一层没有重渲染：面板也要跟着形变
@@ -554,6 +625,7 @@ describe("ConfirmDialog 内容晚到", () => {
         </motion.div>
       );
     }
+    await startFrameClock();
     mount(<ConfirmDialog open requestKey={1} layoutKey="1:0" title="删除「生存」？" body={<LateBody />} confirmLabel="删除实例" tone="danger" onConfirm={() => undefined} onClose={() => undefined} />);
     const dialog = document.querySelector<HTMLElement>('[role="dialog"]') as HTMLElement;
     dialog.getBoundingClientRect = () => {
@@ -561,12 +633,14 @@ describe("ConfirmDialog 内容晚到", () => {
       const top = (720 - height) / 2;
       return { left: 200, top, width: 420, height, x: 200, y: top, right: 620, bottom: top + height, toJSON: () => ({}) } as DOMRect;
     };
-    await waitForFrames(() => expect(dialog.style.transform).toBe("none"));
+    await stepFrames(SETTLE_FRAMES);
+    expect(dialog.style.transform).toBe("none");
     await act(async () => local.grow?.());
     const scale = /scale\(([\d.]+), ([\d.]+)\)/.exec(dialog.style.transform);
     if (scale === null) throw new Error(`面板没有形变：${dialog.style.transform}`);
     // 起点是原来的高度：110 / 260
     expect(Number(scale[2])).toBeCloseTo(110 / 260, 2);
-    await waitForFrames(() => expect(dialog.style.transform).toBe("none"));
+    await stepFrames(SETTLE_FRAMES);
+    expect(dialog.style.transform).toBe("none");
   });
 });

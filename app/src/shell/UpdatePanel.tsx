@@ -9,7 +9,7 @@ import { isValidElement, useEffect, useLayoutEffect, useMemo, useRef, useState, 
 import { PetalMark } from "../art/PetalMark";
 import { downloadFailureCopy, sourceSwitchedCopy, UPDATE_COPY, updateChannelNote } from "../copy/updater";
 import { formatBytes, formatDate } from "../domain/format";
-import { insertItem } from "../lib/motion";
+import { groupSwapOut, insertItem } from "../lib/motion";
 import { useDisplayCount } from "../lib/progress-display";
 import { useReflow } from "../lib/reflow";
 import { useMounted } from "../lib/useMounted";
@@ -108,8 +108,9 @@ const MAIN_KEY = { [MAIN_KEY_ATTR]: "" };
 
 /**
  * 底栏的按钮行。换阶段时整组换掉（开始下载：「跳过此版本」「稍后」「下载更新」换成「后台下载」「取消下载」）不在同一帧硬切：
- * 每个键各包一层（ui/Appear），退场的抽出布局、在原处淡出，新的在终点淡入，交接的那几帧两组叠着交叉淡化，
- * 换字、变宽、左缘移动都不是一帧跳过去的。key 跨阶段认同一个动作：留着的键（开始安装时的那两个、下载失败后的「稍后」）
+ * 每个键各包一层（ui/Appear），退场的抽出布局、在原处淡出，新的在终点淡入，换字、变宽、左缘移动都不是一帧跳过去的。
+ * 两组的键不同宽、不同左缘，交接时两组都还实着就叠成错位的两行字：退场走 groupSwapOut，旧组先掉下去，新组的淡入照常起步。
+ * key 跨阶段认同一个动作：留着的键（开始安装时的那两个、下载失败后的「稍后」）
  * 还是原来那个节点，焦点不丢，被挤动时沿让位滑到新位置。让位走 morph：底栏随面板沿 morph 形变，键的横移与形变同一刻起步。
  *
  * 焦点停在退场的键上（键盘按下它换了阶段，或下载完成时焦点停在下载中的键上）时，它一带上 inert，浏览器就把焦点落回 body，
@@ -138,8 +139,8 @@ function FooterRow({ start, end }: { start: ReactNode; end: ReactNode[] }) {
   }, [keys]);
   return (
     <div ref={attach} className={s.footerRow}>
-      <Appear itemClassName={s.footerStart}>{start}</Appear>
-      <Appear itemClassName={s.footerItem}>{end}</Appear>
+      <Appear itemClassName={s.footerStart} exitTransition={groupSwapOut}>{start}</Appear>
+      <Appear itemClassName={s.footerItem} exitTransition={groupSwapOut}>{end}</Appear>
     </div>
   );
 }

@@ -2,6 +2,7 @@
 // @module-tag heavy-page
 // 启动胶囊的焦点：键盘按了面上的按钮，换上的新面接住焦点，不随旧面一起丢到 body；
 // 按钮在进行中变成不可用时保持可聚焦，焦点留在按钮上。以及换面时的组装与文字槽。
+import { frameData } from "framer-motion";
 import { act, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
@@ -45,7 +46,7 @@ let showSecond: (on: boolean) => void = () => {
   throw new Error("Host 还没挂载");
 };
 /** 交给第一枚胶囊的 onMorphStart；用例自己装，收尾清掉。 */
-let morphStart: (() => void) | undefined;
+let morphStart: ((startedAt: number) => void) | undefined;
 
 function Host() {
   launcher = useLauncher();
@@ -673,5 +674,27 @@ describe("形变起步的回调", () => {
       await vi.advanceTimersByTimeAsync(200);
     });
     expect(calls).toBe(1);
+  });
+
+  it("onMorphStart 收到形变的起步时刻：framer-motion 冲刷布局时写下的帧时间，不是回调这一刻另读的 performance.now()", async () => {
+    // 每读一次时钟往前走一点：回调里另读的时刻必定晚于冲刷时写下的帧时间，两者分得开
+    let clock = 5000 + Math.random() * 1000;
+    const now = vi.spyOn(performance, "now").mockImplementation(() => (clock += 0.3 + Math.random()));
+    onTestFinished(() => now.mockRestore());
+    const seen: { startedAt: number; timestamp: number; processing: boolean; readAfter: number }[] = [];
+    morphStart = (startedAt) => {
+      seen.push({ startedAt, timestamp: frameData.timestamp, processing: frameData.isProcessing, readAfter: performance.now() });
+    };
+    sizedCapsule();
+    act(() => buttonByText(LAUNCH_COPY.launch).click());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(seen).toHaveLength(1);
+    const [call] = seen;
+    // 回调在 framer 处理这一帧的途中：形变的 startTime 取的就是这时的帧时间
+    expect(call.processing).toBe(true);
+    expect(call.startedAt).toBe(call.timestamp);
+    expect(call.startedAt).toBeLessThan(call.readAfter);
   });
 });

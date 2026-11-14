@@ -458,61 +458,88 @@ describe("TabPanel 入场", () => {
     expect(panel().style.transform).toBe("translateY(6px)");
   });
 
-  it.each([
-    ["换标签", "never"],
-    ["换标签", "always"],
-    ["弹窗里第一次挂载", "never"],
-  ] as const)("%s时面板先停在起点，画出第一帧之后才开始入场，挂载那一帧再长也不吃掉入场的开头（减少动画 %s）", async (how, reducedMotion) => {
-    function Panes() {
-      const id = useId();
-      const [value, setValue] = useState<Pane>("overview");
-      return (
-        <MotionConfig reducedMotion={reducedMotion}>
-          <Tabs id={id} value={value} items={PANES} ariaLabel="资源详情" onChange={setValue} />
-          <TabPanel tabsId={id} value={value}>
-            {value}
-          </TabPanel>
-        </MotionConfig>
-      );
+  function Panes({ reducedMotion }: { reducedMotion: "never" | "always" }) {
+    const id = useId();
+    const [value, setValue] = useState<Pane>("overview");
+    return (
+      <MotionConfig reducedMotion={reducedMotion}>
+        <Tabs id={id} value={value} items={PANES} ariaLabel="资源详情" onChange={setValue} />
+        <TabPanel tabsId={id} value={value}>
+          {value}
+        </TabPanel>
+      </MotionConfig>
+    );
+  }
+
+  /** 面板正在入场的半路上：透明度在 0 与 1 之间；减少动画时位移一步到位，只有透明度在走。 */
+  function expectMidEntrance(reducedMotion: "never" | "always") {
+    const opacity = Number(panel().style.opacity);
+    expect(opacity).toBeGreaterThan(0);
+    expect(opacity).toBeLessThan(1);
+    if (reducedMotion === "always") {
+      expect(panel().style.transform).toBe("none");
+      return;
     }
-    // 换到假时钟之前把真实计时器上排着的帧走完，否则假时钟下帧循环推不动（见 test/dom 的 drainFrames）
-    await drainFrames();
-    vi.useFakeTimers();
-    try {
-      view = render(<Panes />);
-      if (how === "换标签") {
+    const shift = /^translateY\((.+)px\)$/.exec(panel().style.transform);
+    if (shift === null) throw new Error(`面板没有在上移的半路上：${panel().style.transform}`);
+    expect(Number(shift[1])).toBeGreaterThan(0);
+    expect(Number(shift[1])).toBeLessThan(6);
+  }
+
+  it.each(["never", "always"] as const)(
+    "不归页面管的第一次挂载（弹窗里）先停在起点，画出第一帧之后才开始入场，挂载那一帧再长也不吃掉入场的开头（减少动画 %s）",
+    async (reducedMotion) => {
+      // 换到假时钟之前把真实计时器上排着的帧走完，否则假时钟下帧循环推不动（见 test/dom 的 drainFrames）
+      await drainFrames();
+      vi.useFakeTimers();
+      try {
+        view = render(<Panes reducedMotion={reducedMotion} />);
+        // 第一帧画的是起点：挂载与这一帧的渲染花多久，入场都还没开始计时
+        await stepFrames(1);
+        expect(panel().style.opacity).toBe("0");
+        expect(panel().style.transform).toBe("translateY(6px)");
+        // 第一帧之后放行（放行排在绘制之后的任务里，假时钟要再推进一帧才到点），入场从头走起
+        await stepFrames(2);
+        expectMidEntrance(reducedMotion);
+        await stepFrames(60);
+        expect(panel().style.opacity).toBe("1");
+        expect(panel().style.transform).toBe("none");
+      } finally {
+        view?.unmount();
+        view = undefined;
+        await drainFrames();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["never", "always"] as const)(
+    "换标签时新面板不等画：旧面板在换的那次提交里撤掉，之后的第一帧新面板已在入场，内容区不空一帧（减少动画 %s）",
+    async (reducedMotion) => {
+      await drainFrames();
+      vi.useFakeTimers();
+      try {
+        view = render(<Panes reducedMotion={reducedMotion} />);
+        // 先让第一次挂载的入场走完，换标签时屏上是一块完整的旧面板
+        await stepFrames(60);
+        expect(panel().style.opacity).toBe("1");
         act(() => selectedTab()?.focus());
         keydown(document.activeElement as Element, "ArrowRight");
+        expect(document.querySelectorAll('[role="tabpanel"]')).toHaveLength(1);
         expect(panel().textContent).toBe("mods");
-      }
-      // 第一帧画的是起点：挂载与这一帧的渲染花多久，入场都还没开始计时
-      await stepFrames(1);
-      expect(panel().style.opacity).toBe("0");
-      expect(panel().style.transform).toBe("translateY(6px)");
-      // 第一帧之后放行（放行排在绘制之后的任务里，假时钟要再推进一帧才到点），入场从头走起
-      await stepFrames(2);
-      const opacity = Number(panel().style.opacity);
-      expect(opacity).toBeGreaterThan(0);
-      expect(opacity).toBeLessThan(1);
-      if (reducedMotion === "always") {
-        // 减少动画时位移一步到位，只有透明度在走
+        await stepFrames(1);
+        expectMidEntrance(reducedMotion);
+        await stepFrames(60);
+        expect(panel().style.opacity).toBe("1");
         expect(panel().style.transform).toBe("none");
-      } else {
-        const shift = /^translateY\((.+)px\)$/.exec(panel().style.transform);
-        if (shift === null) throw new Error(`面板没有在上移的半路上：${panel().style.transform}`);
-        expect(Number(shift[1])).toBeGreaterThan(0);
-        expect(Number(shift[1])).toBeLessThan(6);
+      } finally {
+        view?.unmount();
+        view = undefined;
+        await drainFrames();
+        vi.useRealTimers();
       }
-      await stepFrames(60);
-      expect(panel().style.opacity).toBe("1");
-      expect(panel().style.transform).toBe("none");
-    } finally {
-      view?.unmount();
-      view = undefined;
-      await drainFrames();
-      vi.useRealTimers();
-    }
-  });
+    },
+  );
 });
 
 type Loader = "all" | "fabric" | "forge" | "quilt";

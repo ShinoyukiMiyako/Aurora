@@ -17,6 +17,7 @@ import {
   isCrashCategory,
   MSA_CLIENT_ID_MISSING,
   NEXT_LAUNCH_SUFFIX,
+  PIN_IMPORTING_COPY,
   TASK_INTERRUPTED_CODE,
   TASK_TEXT,
   TASK_TOAST,
@@ -2276,6 +2277,12 @@ export class LauncherStore {
         Promise.all([this.fetchInstances((raw) => this.withoutLanding(raw, id)).finally(() => this.endLanding(id)), this.fetchPins()]),
       );
     }
+    // 整合包导入删掉半成品时，后端连同固定一起去掉了配置里对这个名字的当前选中与固定服务器记住的实例。手里的设置不重读，
+    // 同一会话里再导入同名实例后，选中它会因与旧值相同而跳过写入，后端记下的当前实例一直是空的
+    if (before.spec.command === "install_modpack") {
+      this.background(BOOT_SLICE_ERROR.settings, this.fetchSettings());
+      invalidateResources("servers");
+    }
     // 组合任务停下之前做完的那几项已经落盘，Mod 列表与数目不能停在任务开始前
     if (COMPOSITE_TASKS.has(before.spec.command) && before.instanceId !== null) {
       this.modsChanged(before.instanceId);
@@ -2690,12 +2697,14 @@ export class LauncherStore {
   /**
    * 登录或添加账户成功后关掉对应弹窗并发通知；由启动拦截触发的，通知正文改为「正在启动」并继续这次启动。
    * 只关同一种登录的弹窗：从向导等别处直接添加账户时，不误关此刻开着的其他登录弹窗。
+   * 接着的启动不并进添加动作：添加在这里就已做完，调用方等启动回来的话，启动的失败会按「没能添加离线账户」这类标题报，
+   * 与账户已经加上的事实相反。所以启动转到后台，失败按启动自己的标题报。
    */
-  private async afterAccountAdded(kind: LoginState["kind"], intent: LoginIntent, toast: { title: string; body?: string }): Promise<void> {
+  private afterAccountAdded(kind: LoginState["kind"], intent: LoginIntent, toast: { title: string; body?: string }): void {
     if (this.raw.login !== null && this.raw.login.kind === kind) this.set({ login: null });
     if (intent.kind === "launch") {
       this.pushToast("success", toast.title, TOAST_COPY.continuingLaunch(intent.instanceId));
-      await this.requestLaunch(intent.instanceId, intent.quickPlay);
+      this.background(ACTION_ERROR.launch(intent.instanceId), this.requestLaunch(intent.instanceId, intent.quickPlay));
       return;
     }
     this.pushToast("success", toast.title, toast.body);
@@ -2939,7 +2948,7 @@ export class LauncherStore {
         if (check.level === "error") throw new Error(check.message);
         const account = accountFromDto(await accountsIpc.createOfflineAccount(name));
         await store.fetchAccounts();
-        await store.afterAccountAdded("offline", store.loginIntent("offline"), { title: TOAST_COPY.offlineAdded(account.name) });
+        store.afterAccountAdded("offline", store.loginIntent("offline"), { title: TOAST_COPY.offlineAdded(account.name) });
         return account;
       },
       async openLogin(kind, intent = MANUAL_LOGIN) {
@@ -2987,7 +2996,7 @@ export class LauncherStore {
             const login = store.raw.login;
             if (gen !== store.loginGen || login === null || login.kind !== "microsoft") return;
             if (login.intent.kind === "launch") {
-              await store.afterAccountAdded("microsoft", login.intent, { title: TOAST_COPY.loggedIn(account.name) });
+              store.afterAccountAdded("microsoft", login.intent, { title: TOAST_COPY.loggedIn(account.name) });
               return;
             }
             store.set({ login: { ...login, device: { status: "success", account, updated: existing.has(account.uuid) } } });
@@ -3027,13 +3036,13 @@ export class LauncherStore {
         }
         const account = accountFromDto(result.account);
         await store.fetchAccounts();
-        await store.afterAuthlib(account);
+        store.afterAuthlib(account);
         return { status: "logged_in", account };
       },
       async selectAuthlibProfile(pendingId, profileUuid) {
         const account = accountFromDto(await accountsIpc.selectAuthlibProfile(pendingId, profileUuid));
         await store.fetchAccounts();
-        await store.afterAuthlib(account);
+        store.afterAuthlib(account);
         return account;
       },
       async relogin(accountUuid, intent) {
@@ -3062,10 +3071,10 @@ export class LauncherStore {
           const state = store.getState();
           // 侧栏显示的固定项含安装中自动固定的新实例，上限按显示的算
           const shown = state.sidebarPins;
-          // 导入中的整合包不改固定（原因见 importingModpack）。界面上的入口按同一个判断禁用，这里兜住没禁用的入口
+          // 导入中的整合包不改固定（原因见 importingModpack）。界面上的入口按同一个判断禁用，这里兜住没禁用的入口，报的是入口上同一句原因
           const inst = findInstance(state, id);
           if (inst !== undefined && importingModpack(state, inst)) {
-            throw new Error(`整合包「${id}」还在导入，导入完成后才能${shown.includes(id) ? "取消固定" : "固定"}`);
+            throw new Error(shown.includes(id) ? PIN_IMPORTING_COPY.unpin : PIN_IMPORTING_COPY.pin);
           }
           if (!shown.includes(id) && shown.length >= SIDEBAR_PIN_LIMIT) {
             store.pushToast("warning", TOAST_COPY.pinLimit);
@@ -3773,11 +3782,11 @@ export class LauncherStore {
     await run;
   }
 
-  private async afterAuthlib(account: Account): Promise<void> {
+  private afterAuthlib(account: Account): void {
     if (account.authServer === null) throw new Error(`外置登录账户 ${account.name} 缺少服务器名`);
     invalidateResources(`skin:${account.uuid}`);
     const copy = TOAST_COPY.authlibAdded(account.name, account.authServer);
-    await this.afterAccountAdded("authlib", this.loginIntent("authlib"), copy);
+    this.afterAccountAdded("authlib", this.loginIntent("authlib"), copy);
   }
 
   /**

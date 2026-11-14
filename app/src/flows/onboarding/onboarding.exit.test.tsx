@@ -114,20 +114,37 @@ async function stepForward(): Promise<Stepped> {
   }
 }
 
-/** 第二步点「直接开始」收尾，等向导整体退场播完；返回根元素退场期间写过的样式。 */
-async function finishFromStepTwo(): Promise<{ opacity: string; transform: string }[]> {
+interface FinishFrame {
+  /** 向导根的透明度与 transform。 */
+  opacity: string;
+  rootTransform: string;
+  /** 面板与铺底晕染的 transform。 */
+  panel: string;
+  ambience: string;
+}
+
+/** 第二步点「直接开始」收尾，等向导整体退场播完；根、面板、晕染任一写样式时三者此刻的样式各记一行。 */
+async function finishFromStepTwo(): Promise<FinishFrame[]> {
   act(() => button("下一步").click());
   await waitForFrames(() => expect(presentTitle()).toBe("看看这台电脑上的 Java"));
-  const root = document.querySelector<HTMLElement>("[role='group'][aria-label='首次启动设置']")?.parentElement;
-  if (root === null || root === undefined) throw new Error("没有向导根");
-  const record = recordStyle(root);
+  const panel = document.querySelector<HTMLElement>("[role='group'][aria-label='首次启动设置']");
+  const root = panel?.parentElement;
+  if (panel === null || root === null || root === undefined) throw new Error("没有向导根");
+  const ambience = root.querySelector<HTMLElement>(":scope > [class*='_ambience_']");
+  if (ambience === null) throw new Error("向导根下没有晕染层");
+  const frames: FinishFrame[] = [];
+  // 帧循环在同一帧里把三者的样式写完才回到微任务，回调里读到的是同一帧的值
+  const watcher = new MutationObserver(() =>
+    frames.push({ opacity: root.style.opacity, rootTransform: root.style.transform, panel: panel.style.transform, ambience: ambience.style.transform }),
+  );
+  for (const el of [root, panel, ambience]) watcher.observe(el, { attributes: true, attributeFilter: ["style"] });
   try {
     act(() => button("直接开始").click());
     await flush();
     await waitForFrames(() => expect(root.isConnected).toBe(false));
-    return record.writes;
+    return frames;
   } finally {
-    record.stop();
+    watcher.disconnect();
   }
 }
 
@@ -173,25 +190,32 @@ describe("换步的退场", () => {
 });
 
 describe("收尾的退场", () => {
-  it("整体淡出并放大到 1.02，缩放与透明度走同一段 fade.out：透明度到 0 时缩放也已到位，外壳不必再等弹簧静止", async () => {
+  it("整体淡出、面板与晕染放大到 1.02，缩放与透明度走同一段 fade.out：透明度到 0 时缩放也已到位，外壳不必再等弹簧静止", async () => {
     await mount(false);
     const writes = await finishFromStepTwo();
-    const frames = writes.flatMap(({ opacity, transform }) => {
-      const scale = SCALE.exec(transform);
-      return scale === null || opacity === "" ? [] : [{ opacity: Number(opacity), scale: Number(scale[1]) }];
+    // 放大不落在根上：根在外壳的滚动容器里撑满一格，放大它会撑出滚动条、根随之变窄，面板在退场途中一帧左移
+    expect(writes.filter(({ rootTransform }) => rootTransform.includes("scale"))).toEqual([]);
+    const frames = writes.flatMap(({ opacity, panel, ambience }) => {
+      const scale = SCALE.exec(panel);
+      const backdrop = SCALE.exec(ambience);
+      return scale === null || backdrop === null || opacity === "" ? [] : [{ opacity: Number(opacity), scale: Number(scale[1]), backdrop: Number(backdrop[1]) }];
     });
     expect(frames.length).toBeGreaterThan(1);
     expect(Math.max(...frames.map((f) => f.scale))).toBeGreaterThan(1.015);
     expect(Math.max(...frames.map((f) => f.scale))).toBeLessThanOrEqual(1.02);
     expect(Math.min(...frames.map((f) => f.opacity))).toBeLessThan(0.5);
-    // 同一条补间：每一帧里放大走过的比例与透明度走过的比例相同
-    for (const { opacity, scale } of frames) expect(Math.abs((scale - 1) / 0.02 - (1 - opacity))).toBeLessThan(0.02);
+    for (const { opacity, scale, backdrop } of frames) {
+      // 同一条补间：每一帧里放大走过的比例与透明度走过的比例相同
+      expect(Math.abs((scale - 1) / 0.02 - (1 - opacity))).toBeLessThan(0.02);
+      // 晕染与面板同步放大，合起来与整体放大一样
+      expect(backdrop).toBe(scale);
+    }
   });
 
   it("减少动画时只淡出，不放大：缩放在那里是一步到位的，面板会先整体跳大一下", async () => {
     await mount(true);
     const writes = await finishFromStepTwo();
     expect(writes.some(({ opacity }) => opacity !== "" && Number(opacity) < 1)).toBe(true);
-    expect(writes.filter(({ transform }) => transform.includes("scale"))).toEqual([]);
+    expect(writes.filter(({ rootTransform, panel, ambience }) => [rootTransform, panel, ambience].some((t) => t.includes("scale")))).toEqual([]);
   });
 });

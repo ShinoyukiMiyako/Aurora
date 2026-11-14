@@ -1,8 +1,13 @@
 // jsdom 不做布局，这里直接读样式表核对：开局选项的说明行里有后端原文（读不到默认设置、开局 Mod 查不到），
 // 其中的 Windows 路径没有空格可断，右栏又裁掉横向溢出，不放开折行后半截就看不见了。
 import { readFileSync } from "node:fs";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { STEP_ORDER } from "./model";
+import buttonStyles from "../../ui/Button.module.css";
+import styles from "./create.module.css";
+import { STEP_ORDER, type StepId } from "./model";
+import { StepNav } from "./Rail";
 
 const css = readFileSync(new URL("./create.module.css", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
 
@@ -151,7 +156,13 @@ describe("步骤导航", () => {
     expect(glyph).toMatch(/(^|[\s;])width:\s*var\(--cr-step-glyph\)/);
     expect(glyph).toMatch(/(^|[\s;])height:\s*var\(--cr-step-glyph\)/);
     expect(glyph).toMatch(/line-height:\s*var\(--cr-step-glyph\)/);
-    expect(glyph).toMatch(/place-items:\s*center/);
+    // 居中不在 .stepGlyph 里写：格子就是步骤圆里的图标位（GlyphSlot），同一个元素带着它的 glyphSlot 类，
+    // 各层按自身尺寸居中由那条规则给（ui/Button.test.tsx 钉着它的 place-items）。不经 GlyphSlot 的话格子不居中
+    const values = Object.fromEntries(STEP_ORDER.map((id) => [id, null])) as Record<StepId, string | null>;
+    const html = renderToStaticMarkup(createElement(StepNav, { visible: STEP_ORDER, current: STEP_ORDER[0], reached: 0, values, onJump: () => {} }));
+    const cells = [...html.matchAll(/class="([^"]*)"/g)].map((m) => m[1].split(" ")).filter((names) => names.includes(styles.stepGlyph));
+    expect(cells).toHaveLength(STEP_ORDER.length);
+    for (const names of cells) expect(names).toContain(buttonStyles.glyphSlot);
   });
 
   it("文字列是定位基准：值行退场时抽出布局，跟着让位滑动的文字列一起走，不按外层重新定位", () => {

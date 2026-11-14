@@ -159,9 +159,8 @@ export default function LibraryPage() {
   const pickDirectory = knownDirs.length > 1;
   const toolSlide = { layout: "position", layoutDependency: pickDirectory, transition: { layout: springs.settle } } as const;
 
-  // 与网格同一个加载门：网格还在等的时候这里也不先给结论（目录列表没回来时不先说「还没有实例」）
-  const subtitle =
-    gate.view !== "content" || !ready ? null : all.length === 0 ? LIBRARY_COPY.subtitleEmpty : LIBRARY_COPY.subtitle(all.length, pinCount, totalPlaytime(all));
+  // 与网格同一个加载门：网格还在等的时候这里也不先给结论（目录列表没回来时不先说「还没有实例」）。读取失败时空着
+  const subtitle = () => (!ready ? null : all.length === 0 ? LIBRARY_COPY.subtitleEmpty : LIBRARY_COPY.subtitle(all.length, pinCount, totalPlaytime(all)));
 
   return (
     <Page aria-labelledby={titleId}>
@@ -430,27 +429,16 @@ function InstanceGrid({ shown, now, showCreate, onCreate }: { shown: readonly In
 }
 
 /**
- * 页头副标题：骨架条与文字叠在同一格里交叉淡化，与下面网格的加载态同一个门、同一手感。副标题在 <p> 里，
- * Loadable 的 div 放不进去，这里用 span 照它画：等待期这一行空着（行高由页头常驻），骨架显出来时骨架条淡入；
- * 读到时文字淡入，显出来过的骨架条叠在下面淡出。挂载时就有的文字跟着页面入场，不另外淡入。
+ * 页头副标题：骨架条与文字叠在同一格里交叉淡化。副标题在 <p> 里，用 span 版的 Loadable，与下面网格同一个加载门、
+ * 同一套交叉淡化：两层都等内容画出第一帧才起步，与网格的两层同一帧开始。等待期骨架条不可见地占着这一行，
+ * 骨架显出来时淡入；读到时文字淡入，显出来过的骨架条叠在下面淡出。挂载时就有的文字跟着页面入场，不另外淡入。
+ * 两层叠放与根排成块都靠 .subtitleSwap 的网格：span 的根留在行内的话，退场的那一层抽不出布局。
  */
-function SubtitleSwap({ view, text }: { view: LoadingView; text: string | null }) {
-  const mounted = useMounted();
+function SubtitleSwap({ view, text }: { view: LoadingView; text: () => string | null }) {
   return (
-    <span className={styles.subtitleSwap}>
-      <AnimatePresence>
-        {view === "skeleton" && (
-          <motion.span key="skeleton" initial={{ opacity: 0 }} animate={{ opacity: 1, transition: fade.in }} exit={{ opacity: 0, transition: fade.out }}>
-            <Skeleton shape="text" width={260} />
-          </motion.span>
-        )}
-        {text !== null && (
-          <motion.span key="text" initial={mounted.current ? { opacity: 0 } : false} animate={{ opacity: 1, transition: fade.in }} exit={{ opacity: 0, transition: fade.out }}>
-            {text}
-          </motion.span>
-        )}
-      </AnimatePresence>
-    </span>
+    <Loadable as="span" view={view} skeleton={<Skeleton shape="text" width={260} />} className={styles.subtitleSwap}>
+      {text}
+    </Loadable>
   );
 }
 
