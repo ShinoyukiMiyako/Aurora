@@ -43,10 +43,17 @@ describe("版本列表", () => {
     expect(declarations("listArea")).toMatch(/overflow:\s*hidden/);
   });
 
-  it("给读屏的加载说明绝对定位、裁成一像素：不进步骤的弹性布局，不多出一道间距", () => {
-    const sr = declarations("srOnly");
-    expect(sr).toMatch(/position:\s*absolute/);
-    expect(sr).toMatch(/clip-path:\s*inset\(50%\)/);
+  it("加载慢的说明叠在骨架层里、贴住列表区的下沿：列表区不因它变矮，骨架层退场抽出布局时也不挪位置", () => {
+    const note = declarations("skeletonNote");
+    expect(note).toMatch(/position:\s*sticky/);
+    expect(note).toMatch(/bottom:\s*0/);
+    expect(note).toMatch(/opacity:\s*0/);
+    expect(note).toMatch(/background:\s*var\(--sk-surface\)/);
+    expect(block(".skeletonNote[data-shown]")).toMatch(/opacity:\s*1/);
+  });
+
+  it("给读屏的加载说明交给 Loadable 的 busyLabel：步骤样式表里不再自带一份视觉隐藏规则", () => {
+    expect(css).not.toMatch(/clip-path:\s*inset\(50%\)/);
   });
 
   it("筛选行不折行，计数在余下的宽度里靠右、放不下出省略号", () => {
@@ -55,6 +62,12 @@ describe("版本列表", () => {
     expect(count).toMatch(/flex:\s*1 1 0/);
     expect(count).toMatch(/text-overflow:\s*ellipsis/);
     expect(block(".filterCount[data-pending]")).toMatch(/opacity:\s*0/);
+  });
+});
+
+describe("步骤标题", () => {
+  it("换步后焦点兜底落到标题上不画聚焦框：标题只是程序落点，键盘换步后照样匹配 :focus-visible", () => {
+    expect(block(".stepTitle:focus-visible")).toMatch(/outline:\s*none/);
   });
 });
 
@@ -95,10 +108,35 @@ describe("步骤导航", () => {
     expect(block('.stepButton[data-state="current"] .stepDot')).not.toMatch(/background|box-shadow/);
   });
 
+  it("圆点里的序号与勾号叠在定死的 12 × 12 格子里居中：序号换成勾号时格子不变高变矮", () => {
+    const glyph = declarations("stepGlyph");
+    expect(glyph).toMatch(/--cr-step-glyph:\s*12px/);
+    expect(glyph).toMatch(/(^|[\s;])width:\s*var\(--cr-step-glyph\)/);
+    expect(glyph).toMatch(/(^|[\s;])height:\s*var\(--cr-step-glyph\)/);
+    expect(glyph).toMatch(/line-height:\s*var\(--cr-step-glyph\)/);
+    expect(glyph).toMatch(/place-items:\s*center/);
+  });
+
+  it("文字列是定位基准：值行退场时抽出布局，跟着让位滑动的文字列一起走，不按外层重新定位", () => {
+    expect(declarations("stepText")).toMatch(/position:\s*relative/);
+  });
+
   it("当前步的底色是一块垫在各行之下的滑块，不是各行自己的底色", () => {
     expect(declarations("stepMark")).toMatch(/position:\s*absolute/);
     expect(declarations("stepMark")).toMatch(/z-index:\s*-1/);
     expect(css).not.toMatch(/\.stepButton\[data-state="current"\]\s*\{[^}]*background/);
+  });
+});
+
+describe("外观色样", () => {
+  it("晚一拍补上的卡面铺满定位的画面格、垫在方块下面，只淡入透明度", () => {
+    expect(declarations("swatchArt")).toMatch(/position:\s*relative/);
+    const cover = declarations("swatchCover");
+    expect(cover).toMatch(/position:\s*absolute/);
+    expect(cover).toMatch(/inset:\s*0/);
+    expect(cover).toMatch(/animation:\s*swatchReveal var\(--sk-dur-in\) var\(--sk-ease-out\)/);
+    expect(css).toMatch(/@keyframes swatchReveal\s*\{\s*from\s*\{\s*opacity:\s*0;\s*\}\s*\}/);
+    expect(declarations("swatchBlock")).toMatch(/position:\s*relative/);
   });
 });
 
@@ -107,7 +145,12 @@ describe("底栏", () => {
     expect(declarations("footHint")).toMatch(/display:\s*inline-grid/);
     expect(declarations("footHintLine")).toMatch(/grid-area:\s*1 \/ 1/);
     expect(block(".primaryButton,\n.primaryGhost")).toMatch(/grid-area:\s*1 \/ 1/);
-    expect(block(".primaryGhost")).toMatch(/visibility:\s*hidden/);
+  });
+
+  it("隐形的创建按钮整层透明，不靠 visibility 藏：它里面的定宽文案槽把当前那条显式设成 visible，会压在「下一步」上露出来", () => {
+    const ghost = block(".primaryGhost");
+    expect(ghost).toMatch(/opacity:\s*0/);
+    expect(ghost).not.toMatch(/visibility/);
   });
 
   it("按钮行占满提示之外的宽度：宽度不随按钮增减变化，让位才接得住", () => {

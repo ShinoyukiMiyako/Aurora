@@ -20,7 +20,7 @@ import { cx } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
-import { useSkinInfo } from "../../state/queries/home";
+import { skinSource, useSkinInfo } from "../../state/queries/home";
 import { activeAccount, activeTasks } from "../../state/selectors";
 import type { SliceStatus } from "../../state/store";
 import { Appear } from "../../ui/Appear";
@@ -73,12 +73,14 @@ export function GreetingCard({ span, play }: GreetingCardProps) {
   });
 
   const skin = useSkinInfo(account === null ? null : account.uuid);
+  const figure = skinSource(skin);
+  const silhouette = figure === null;
   const skinError = skin.status === "error" ? skin.error : null;
   useEffect(() => {
     // 皮肤拿不到时画剪影立绘是既定的回落，不弹通知（网络失败、没有皮肤后端已经折成「没有皮肤」）；
-    // 走到这里的是账户库读取一类的真错误，原因留在控制台，便于排查
-    if (skinError !== null) console.warn("[home] 当前账户的皮肤信息读不出来，立绘显示剪影", skinError);
-  }, [skinError]);
+    // 走到这里的是账户库读取一类的真错误，原因留在控制台，便于排查。写明画的是剪影还是上一次的皮肤
+    if (skinError !== null) console.warn(`[home] 当前账户的皮肤信息读不出来，立绘${silhouette ? "显示剪影" : "沿用上次读到的皮肤"}`, skinError);
+  }, [skinError, silhouette]);
 
   // 出错、没有账户与账户标签三种互换时（重试成功、账户被移除）旧的原地淡出、新的淡入，各给一个 key
   const accountLine = () => {
@@ -189,7 +191,7 @@ export function GreetingCard({ span, play }: GreetingCardProps) {
           <Tooltip key="figure" content={HOME_COPY.manageAccount} sub={accountKindLabel(shown.kind, shown.authServer)} side="left">
             <button type="button" className={s.figureButton} aria-label={HOME_COPY.manageAccount} onClick={() => go({ page: "accounts" })}>
               <PetalGround className={s.figureGround} />
-              <AccountFigure uuid={shown.uuid} skin={skin.status === "ready" ? skin.data : null} scale={tier === "compact" ? 5 : 6} interactive className={s.figure} />
+              <AccountFigure uuid={shown.uuid} skin={figure} scale={tier === "compact" ? 5 : 6} interactive className={s.figure} />
             </button>
           </Tooltip>
         )}

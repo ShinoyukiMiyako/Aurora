@@ -6,7 +6,7 @@ import { act } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { SIDEBAR_COPY } from "../copy/shell";
-import { LauncherProvider } from "../state/launcher";
+import { LauncherProvider, useLauncherActions } from "../state/launcher";
 import { keydown, render, stubMatchMedia, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, instanceDto, resetRecorder } from "../test/launcher";
@@ -39,6 +39,12 @@ vi.mock("../launch/useLaunch", async (importOriginal) => {
 
 const chrome: ChromeApi = { scrollContentToTop: vi.fn(), focusContent: vi.fn() };
 let view: Rendered | undefined;
+let launcher: ReturnType<typeof useLauncherActions>;
+
+function Probe() {
+  launcher = useLauncherActions();
+  return null;
+}
 
 /** 真实时间下让挂起的命令与回调跑完。 */
 const flush = () =>
@@ -51,6 +57,7 @@ async function mount() {
     <LauncherProvider>
       <ShellProvider>
         <ChromeProvider value={chrome}>
+          <Probe />
           <Sidebar />
           <OverlayRoot />
         </ChromeProvider>
@@ -93,8 +100,8 @@ it("菜单关上并播完退场后，菜单槽卸掉，不再挂着启动入口"
   expect(live).toEqual(["生存"]);
 
   keydown(window, "Escape");
-  // 关上的那一刻面板还在播退场，槽留着
-  expect(menuOf("生存")?.closest("[data-exiting]")).not.toBeNull();
+  // 关上的那一刻面板还在播退场，槽留着。面板不在时可选链得到 undefined，not.toBeNull 照样通过，所以断言拿到的是元素
+  expect(menuOf("生存")?.closest("[data-exiting]")).toBeInstanceOf(HTMLElement);
   expect(live).toEqual(["生存"]);
   await waitForFrames(() => {
     expect(menuOf("生存")).toBeUndefined();
@@ -119,4 +126,26 @@ it("指针右键换到另一项：旧菜单播完退场后它的槽卸掉，新�
     expect(live).toEqual(["创造"]);
   });
   expect(menuOf("创造")?.closest("[data-exiting]")).toBeNull();
+});
+
+it("开着菜单的实例被删掉：启动入口当场撤下，面板播完退场才卸掉槽，焦点不随退场的行掉回 body", async () => {
+  await mount();
+  act(() => item("pin:生存").focus());
+  keydown(item("pin:生存"), "ContextMenu");
+  await flush();
+  expect(live).toEqual(["生存"]);
+
+  ipc.overrides.set("list_instances", () => [instanceDto("创造")]);
+  await act(async () => {
+    await launcher.refreshInstances();
+  });
+  // 实例没了，按 id 取实例的启动入口不能再挂着；面板用删掉前的条目还在退场
+  expect(live).toEqual([]);
+  expect(menuOf("生存")?.closest("[data-exiting]")).toBeInstanceOf(HTMLElement);
+  expect(document.activeElement).toBe(item("pin:创造"));
+  await waitForFrames(() => {
+    expect(menuOf("生存")).toBeUndefined();
+    expect(document.querySelector("[data-sidebar-item='pin:生存']")).toBeNull();
+  });
+  expect(document.activeElement).toBe(item("pin:创造"));
 });

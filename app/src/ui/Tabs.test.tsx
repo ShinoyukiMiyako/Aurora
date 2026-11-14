@@ -10,7 +10,9 @@ import { Badge } from "./Badge";
 import { Card } from "./Card";
 import { Page, PageArrivalProvider } from "./Page";
 import { SEGMENT_THUMB_RADIUS, SegmentedControl, type SegmentOption } from "./SegmentedControl";
+import segmentStyles from "./SegmentedControl.module.css";
 import { INDICATOR_RADIUS, TabPanel, Tabs, tabDomId, type TabItem } from "./Tabs";
+import tabStyles from "./Tabs.module.css";
 
 let view: Rendered | undefined;
 let observers: ResizeObserverStub;
@@ -207,6 +209,36 @@ describe("Tabs", () => {
     const wrapper = document.querySelector("b")?.parentElement as HTMLElement;
     expect(wrapper.style.opacity).toBe("0");
     expect(wrapper.style.transform).toBe(transform);
+  });
+
+  function MotionTabs({ reducedMotion, value }: { reducedMotion: "always" | "never"; value: Section }) {
+    return (
+      <MotionConfig reducedMotion={reducedMotion}>
+        <Tabs id="m" value={value} items={SECTIONS} ariaLabel="实例详情" onChange={() => undefined} />
+      </MotionConfig>
+    );
+  }
+  const indicators = () => [...document.querySelectorAll<HTMLElement>(`.${tabStyles.indicator}`)];
+
+  it("减少动画时指示块不从旧标签瞬移过来，而是在新标签上从透明淡入；挂载时就在的那一块不淡入", async () => {
+    view = render(<MotionTabs reducedMotion="always" value="overview" />);
+    expect(indicators()).toHaveLength(1);
+    expect(indicators()[0].style.opacity).not.toBe("0");
+    view.rerender(<MotionTabs reducedMotion="always" value="logs" />);
+    const [moved] = indicators();
+    expect(indicators()).toHaveLength(1);
+    expect(selectedTab()?.textContent).toBe("日志与历史");
+    expect(selectedTab()?.contains(moved)).toBe(true);
+    expect(moved.style.opacity).toBe("0");
+    await waitForFrames(() => expect(moved.style.opacity).toBe("1"));
+  });
+
+  it("不减少动画时指示块照旧滑过去，新标签上的那一块不从透明起", () => {
+    view = render(<MotionTabs reducedMotion="never" value="overview" />);
+    view.rerender(<MotionTabs reducedMotion="never" value="logs" />);
+    const [moved] = indicators();
+    expect(selectedTab()?.contains(moved)).toBe(true);
+    expect(moved.style.opacity).not.toBe("0");
   });
 
   it("徽标传空串或布尔值时不包徽标层（空层也会吃掉内容间距、撑宽标签）；数字 0 照常显示", () => {
@@ -536,6 +568,36 @@ describe("SegmentedControl", () => {
     // 布局动画把投影写在 transform 上，按压缩放不能占用它
     expect(ruleOf(css, ".item:active:not(:disabled) .thumb")).not.toContain("transform");
     expect(ruleOf(css, ":global([data-sk-reduced]) .item:active .thumb")).toContain("scale: none;");
+  });
+
+  function MotionFilter({ reducedMotion, value }: { reducedMotion: "always" | "never"; value: Loader }) {
+    return (
+      <MotionConfig reducedMotion={reducedMotion}>
+        <SegmentedControl value={value} options={LOADERS} ariaLabel="按加载器筛选" onChange={() => undefined} />
+      </MotionConfig>
+    );
+  }
+  const thumbs = () => [...document.querySelectorAll<HTMLElement>(`.${segmentStyles.thumb}`)];
+
+  it("减少动画时选中块不从旧项瞬移过来，而是在新项里从透明淡入；挂载时就在的那一块不淡入", async () => {
+    view = render(<MotionFilter reducedMotion="always" value="all" />);
+    expect(thumbs()).toHaveLength(1);
+    expect(thumbs()[0].style.opacity).not.toBe("0");
+    view.rerender(<MotionFilter reducedMotion="always" value="quilt" />);
+    const [moved] = thumbs();
+    expect(thumbs()).toHaveLength(1);
+    expect(checked()?.getAttribute("aria-label")).toBe("Quilt，1 个");
+    expect(checked()?.contains(moved)).toBe(true);
+    expect(moved.style.opacity).toBe("0");
+    await waitForFrames(() => expect(moved.style.opacity).toBe("1"));
+  });
+
+  it("不减少动画时选中块照旧滑过去，新项里的那一块不从透明起", () => {
+    view = render(<MotionFilter reducedMotion="never" value="all" />);
+    view.rerender(<MotionFilter reducedMotion="never" value="quilt" />);
+    const [moved] = thumbs();
+    expect(checked()?.contains(moved)).toBe(true);
+    expect(moved.style.opacity).not.toBe("0");
   });
 
   it("选项少于 2 个或多于 6 个直接抛错", () => {

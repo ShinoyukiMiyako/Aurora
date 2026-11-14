@@ -513,15 +513,24 @@ describe("实例设置：外观卡的动效与占位", () => {
     return layer;
   };
 
-  it("卡面背景的说明槽：跟随时只有跟随说明，平铺说明占位；切到渐变花瓣没有说明，两条都占位，这一行不变高", async () => {
+  it("卡面背景的说明槽：四种背景各写一条说明；跟随与平铺两条不是当前这条时始终在槽里占位，这一行不变高", async () => {
+    // 已经有背景图：点「我的图片」直接切过去，不弹选图
+    settings = { ...settings, background_image: BG_FILE };
+    patchInstance({ background_image: BG_KEY });
     await openSettings();
     const follow = "跟随设置里「外观」选的默认背景，现在是「方块平铺」。";
     const texture = "平铺封面方块的侧面材质，本机读不到材质时画渐变花瓣。";
-    expect(textOf(noteSlot())).toBe(follow);
-    expect([noteSlot().dataset.reserveA, noteSlot().dataset.reserveB]).toEqual([texture, undefined]);
+    /** 当前显示的说明与两条备用占位。 */
+    const slotState = () => [textOf(noteSlot()), noteSlot().dataset.reserveA, noteSlot().dataset.reserveB];
+    expect(slotState()).toEqual([follow, texture, undefined]);
     await click(radio("渐变花瓣"));
-    expect(textOf(noteSlot())).toBe("");
-    expect([noteSlot().dataset.reserveA, noteSlot().dataset.reserveB]).toEqual([follow, texture]);
+    expect(slotState()).toEqual(["按封面方块的色调画丘陵，花瓣位置每个实例各不相同。", follow, texture]);
+    await click(radio("方块平铺"));
+    expect(slotState()).toEqual([texture, follow, undefined]);
+    await click(radio("我的图片"));
+    expect(slotState()).toEqual(["用你自己的图片铺满卡面，读不出来时先画渐变花瓣。", follow, texture]);
+    expect(vi.mocked(pickFile)).not.toHaveBeenCalled();
+    expect(written().map((s) => s.background)).toEqual(["art", "texture", "image"]);
   });
 
   it("背景图片一行：导入成功后淡入落位；移除后原地淡出、不可交互；它与方块行都自己画分隔线", async () => {

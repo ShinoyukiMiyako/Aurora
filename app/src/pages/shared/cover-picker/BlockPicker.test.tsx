@@ -457,4 +457,23 @@ describe("方块格的按压反馈（读样式表）", () => {
     expect(reduced).toMatch(/opacity:\s*0\.85/);
     expect(reduced).toMatch(/transition:\s*none/);
   });
+
+  it("选中框画在常驻的 ::after 叠层上，与描边、底色同一时长同一曲线淡入淡出；选中规则本身不加 outline 与阴影", () => {
+    const selected = rule('.cell[aria-selected="true"]');
+    expect(selected).not.toMatch(/outline|box-shadow/);
+    expect(selected).toMatch(/border-color:\s*var\(--sk-accent\)/);
+    // 叠层盖住整个边框盒、圆角随格子，内收 2px 的主色线压在 1px 描边上读作 2px 的框
+    expect(rule(".cell")).toMatch(/--cell-selected-ring:\s*inset 0 0 0 2px var\(--sk-accent\);/);
+    const ring = rule(".cell::after");
+    expect(ring).toMatch(/position:\s*absolute;/);
+    expect(ring).toMatch(/inset:\s*-1px;/);
+    expect(ring).toMatch(/border-radius:\s*inherit;/);
+    expect(ring).toMatch(/box-shadow:\s*var\(--cell-selected-ring\);/);
+    expect(ring).toMatch(/opacity:\s*0;/);
+    expect(ring).toMatch(/pointer-events:\s*none;/);
+    expect(ring).toMatch(/transition:\s*opacity var\(--sk-dur-hover\) var\(--sk-ease\);/);
+    expect(rule('.cell[aria-selected="true"]::after')).toMatch(/opacity:\s*1;/);
+    expect(rule(".cell")).toMatch(/border-color var\(--sk-dur-hover\) var\(--sk-ease\)/);
+    expect(rule(".cell")).toMatch(/background-color var\(--sk-dur-hover\) var\(--sk-ease\)/);
+  });
 });

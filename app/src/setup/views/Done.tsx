@@ -1,6 +1,6 @@
 import { motion } from "framer-motion";
 import { Icon } from "../../art/Icon";
-import { fade, springs } from "../../lib/motion";
+import { successMark } from "../../lib/motion";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
 import type { Channel, InstallMode } from "../contract";
@@ -36,7 +36,7 @@ export function Done({ copy, mode, switching, version, keptData, elevated, openi
       title={
         <span className={styles.title}>
           {/* 装好了的落点：徽记从小处弹出来。减少动画时根部 MotionConfig 关掉缩放，只剩淡入 */}
-          <motion.span className={styles.mark} aria-hidden="true" initial={{ opacity: 0, scale: 0.6 }} animate={{ opacity: 1, scale: 1, transition: { ...springs.base, opacity: fade.in } }}>
+          <motion.span className={styles.mark} aria-hidden="true" {...successMark}>
             <Icon name="check" size={18} />
           </motion.span>
           {modeTitle(copy, text.title, mode, switching, version)}

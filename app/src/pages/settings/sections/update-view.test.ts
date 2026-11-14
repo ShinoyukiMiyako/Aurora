@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { mulberry32 } from "../../../art/illustrations/seed";
 import { INITIAL_UPDATER_STATE, type UpdateInfo, type UpdaterChannels, type UpdaterPhase, type UpdaterState } from "../../../state/updater/machine";
-import { channelChangeCost, channelChoice, downloadSub, updateCardView, versionCore, type CardContext, type CardView } from "./update-view";
+import { aroundPercent, channelChangeCost, channelChoice, downloadSub, PERCENT_SLOT, updateCardView, versionCore, type CardContext, type CardView } from "./update-view";
 
 const UPDATE: UpdateInfo = { version: "0.3.0", current_version: "0.2.0", notes: null, date: new Date(2026, 9, 28, 12).getTime(), channel: "stable" };
 const NOW = new Date(2026, 9, 31, 12).getTime();
@@ -53,7 +53,10 @@ describe("更新卡各阶段", () => {
 
   it("下载中：次句不在纯函数里定稿，交出原始字节与总量；拼句子用调用方给的已下大小，主句的百分比仍按上报的原值", () => {
     const view = updateCardView(state({ kind: "downloading", update: UPDATE, taskId: "t", bytes: 12 * 1024 * 1024, totalBytes: 16 * 1024 * 1024, source: null }), CTX);
-    expect([view.sub, view.progress]).toEqual([null, { bytes: 12 * 1024 * 1024, totalBytes: 16 * 1024 * 1024, switched: null }]);
+    expect([view.sub, view.progress]).toEqual([
+      null,
+      { bytes: 12 * 1024 * 1024, totalBytes: 16 * 1024 * 1024, switched: null, percent: { value: 0.75, track: "t:0", before: "正在下载 0.3.0 · ", after: "" } },
+    ]);
     expect(view.title).toBe("正在下载 0.3.0 · 75%");
     if (view.progress === null) throw new Error("下载中应当给出次句素材");
     expect(downloadSub({ ...view.progress, bytes: 3 * 1024 * 1024 })).toBe("3.0 MB / 16.0 MB");
@@ -110,6 +113,31 @@ describe("更新卡各阶段", () => {
     expect(progressSub(downloading({ index: 3, count: 4, name: "github" }, null))).toBe("4.0 MB · 已换用备用下载源（4/4）");
     expect(progressSub(downloading({ index: 0, count: 4, name: "cn" }, 16 * 1024 * 1024))).toBe("4.0 MB / 16.0 MB");
     expect(progressSub(downloading(null, 16 * 1024 * 1024))).toBe("4.0 MB / 16.0 MB");
+  });
+
+  it("下载中主句的百分数：总量已知才有；平滑按任务与源分段，换任务或换源从新值起算，还没报过源算第一个源", () => {
+    const MB = 1024 * 1024;
+    const percentOf = (taskId: string, bytes: number, totalBytes: number | null, source: { index: number; count: number; name: string } | null) => {
+      const { progress } = updateCardView(state({ kind: "downloading", update: UPDATE, taskId, bytes, totalBytes, source }), CTX);
+      if (progress === null) throw new Error("下载中应当给出次句素材");
+      return progress.percent;
+    };
+    expect(percentOf("a", 4 * MB, 16 * MB, null)).toEqual({ value: 0.25, track: "a:0", before: "正在下载 0.3.0 · ", after: "" });
+    expect(percentOf("a", 4 * MB, 16 * MB, { index: 0, count: 4, name: "cn" })?.track).toBe("a:0");
+    for (const index of [1, 2, 3]) {
+      expect(percentOf("a", 2 * MB, 16 * MB, { index, count: 4, name: "hk" })).toEqual({ value: 0.125, track: `a:${index}`, before: "正在下载 0.3.0 · ", after: "" });
+    }
+    expect(percentOf("b", 4 * MB, 16 * MB, null)?.track).toBe("b:0");
+    // 重传超出声明大小时截到 100%，与进度条一致
+    expect(percentOf("a", 17 * MB, 16 * MB, null)?.value).toBe(1);
+    expect([percentOf("a", 4 * MB, null, null), percentOf("a", 0, 0, null)]).toEqual([null, null]);
+  });
+
+  it("主句按百分数的占位切成前后两段，占位不是恰好一处就报错", () => {
+    expect(aroundPercent(`正在下载 0.3.0 · ${PERCENT_SLOT}`)).toEqual(["正在下载 0.3.0 · ", ""]);
+    expect(aroundPercent(`已完成${PERCENT_SLOT}，请稍候`)).toEqual(["已完成", "，请稍候"]);
+    expect(() => aroundPercent("正在下载 0.3.0")).toThrow("百分数应当恰好出现一次，实为 0 次");
+    expect(() => aroundPercent(`${PERCENT_SLOT} · ${PERCENT_SLOT}`)).toThrow("百分数应当恰好出现一次，实为 2 次");
   });
 
   it("试过多个下载源、全都败在网络层：次句说所有下载源，逐源原文另放一行", () => {

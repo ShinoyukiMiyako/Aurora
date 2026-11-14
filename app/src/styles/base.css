@@ -67,3 +67,15 @@ textarea,
   background: var(--sk-scroll-thumb-hover);
   background-clip: padding-box;
 }
+
+/* 只给读屏的文字（状态播报、读屏用的标题）：不占位、看不见，但仍在无障碍树里，所以不能用 display: none 或 visibility: hidden。
+ * 放在全局基底、不在各组件模块里各写一份：主窗口与引导程序都引入这份文件，引导程序只有 Tailwind 预检，没有它的 sr-only 工具类。
+ * 不写 margin、padding、border：预检已经归零，绝对定位也不占流内位置。 */
+.sk-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

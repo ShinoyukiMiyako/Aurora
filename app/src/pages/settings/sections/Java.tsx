@@ -2,12 +2,12 @@
 // 手动下载运行时，以及让游戏用独立显卡。
 
 import { useReducedMotionConfig } from "framer-motion";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Icon } from "../../../art/Icon";
 import { JAVA_AUTO, type InstanceSummary } from "../../../domain/adapt";
 import { runtimeComplete } from "../../../domain/rules";
 import { useLoadingGate } from "../../../lib/loading-gate";
-import { observeReflow, useReflow } from "../../../lib/reflow";
+import { useReflow } from "../../../lib/reflow";
 import { cssVars } from "../../../lib/util";
 import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
@@ -222,20 +222,8 @@ function RuntimeList({ runtimes, autoDownload }: { runtimes: readonly JavaInstal
   const notes = javaNotes(write.value, runtimes, instances, autoDownload);
   // 列表、手动记录、提醒三块之间互相让位：提醒换了、记录增删时下面的块滑过去
   const reflow = useReflow<HTMLDivElement>();
+  // RadioTile 不收 ref：「重新选择」从外层这一格里找单选块。块增减时其余块的让位由 RadioTile 自己挂，这里不再挂
   const listRef = useRef<HTMLDivElement | null>(null);
-  // 单选块网格由 RadioTile 画，它不收 ref：从外层这一格取它的根挂让位。重新扫描、添加或移除后运行时增减，
-  // 说明随开关变高变矮时，其余单选块从原位置滑到新位置
-  const attachList = useCallback((el: HTMLDivElement | null) => {
-    listRef.current = el;
-    if (el === null) return;
-    const grid = el.firstElementChild;
-    if (!(grid instanceof HTMLElement)) throw new Error("默认 Java 列表里没有单选块网格");
-    const stop = observeReflow(grid);
-    return () => {
-      listRef.current = null;
-      stop();
-    };
-  }, []);
   // 不完整的运行时被禁用了，焦点落不上去；全是这种时没有可重新选的，只剩改回自动选择
   const pickable = sorted.some((runtime) => selectableAsDefault(runtime, write.value));
   // 「重新选择」不替用户挑：把焦点放到第一个能选的运行时上（「自动选择」恒在最前），方向键或点击即可选定。
@@ -243,7 +231,8 @@ function RuntimeList({ runtimes, autoDownload }: { runtimes: readonly JavaInstal
   const pickAgain = () => {
     const host = listRef.current;
     if (host === null) throw new Error("默认 Java 列表还没挂载，不能重新选择");
-    const first = host.querySelectorAll<HTMLElement>('[role="radio"]:not(:disabled)')[1];
+    // 刚被移除的块还在原位淡出（inert，聚焦不上），可能排在第一个在场的运行时前面：先滤掉它们
+    const first = [...host.querySelectorAll<HTMLElement>('[role="radio"]:not(:disabled)')].filter((radio) => radio.closest("[inert]") === null)[1];
     if (first === undefined) throw new Error("默认 Java 列表里没有可选的运行时");
     first.focus({ preventScroll: true });
     first.scrollIntoView({ block: "nearest", behavior: reduced ? "auto" : "smooth" });
@@ -254,7 +243,7 @@ function RuntimeList({ runtimes, autoDownload }: { runtimes: readonly JavaInstal
       {sorted.length === 0 ? (
         <EmptyState compact icon="java" title={JAVA_COPY.emptyTitle} body={autoDownload ? JAVA_COPY.emptyAuto : JAVA_COPY.emptyManual} />
       ) : (
-        <div ref={attachList}>
+        <div ref={listRef}>
           <RadioTile<string>
             className={s.javaList}
             ariaLabel={JAVA_COPY.defaultJava}

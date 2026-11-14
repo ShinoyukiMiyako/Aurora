@@ -8,12 +8,13 @@ import { MotionConfig } from "framer-motion";
 import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
+import { PHASE_LABEL } from "../copy/flows";
 import { LAUNCH_PHASE_EVENT } from "../ipc/launch";
 import { COMPLETION_HOLD_S } from "../lib/progress-display";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { bootOverrides, deferred, emit, instanceDto, resetRecorder, settle } from "../test/launcher";
+import { bootOverrides, cancelledError, deferred, emit, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { OverlayRoot } from "./overlay";
 import { ShellProvider } from "./shell";
 import { StatusIsland } from "./StatusIsland";
@@ -91,8 +92,28 @@ function barOffset(): number | null {
   return m === null ? 0 : Number(m[1]);
 }
 
+/** 底边进度条此刻的进度（整数百分数），与胶囊上的百分数同一种取整。 */
+function barPercent(): number {
+  const offset = barOffset();
+  if (offset === null) throw new Error("进度条已经撤下");
+  return Math.round(100 + offset);
+}
+
+/** 胶囊第二段里显示的那一行（不含占宽的候选），按 DOM 顺序：退场中的旧行在前，新行在后。 */
+function faces(): HTMLElement[] {
+  return [...islandButton().querySelectorAll<HTMLElement>(`.${styles.face}`)];
+}
+
+/** 一行里的百分数。 */
+function facePercent(face: HTMLElement): number {
+  const text = face.textContent;
+  const m = text === null ? null : /(\d+)%$/.exec(text);
+  if (m === null) throw new Error(`这一行没有百分数：${text}`);
+  return Number(m[1]);
+}
+
 /** 推一条阶段事件；只有下载阶段带进度快照（共 10 个文件，已完成 finished 个）。 */
-const emitPhase = (taskId: string, phase: "downloading" | "launching" | "running", stageIndex: number, finished = 0) =>
+const emitPhase = (taskId: string, phase: "preparing" | "downloading" | "launching" | "running", stageIndex: number, finished = 0) =>
   act(() =>
     emit(LAUNCH_PHASE_EVENT, {
       task_id: taskId,
@@ -172,4 +193,120 @@ it("胶囊上的百分数跟底边进度条一起逐帧走过去，不当场跳�
   expect(seen.at(-1)).toBe("39%");
   expect(seen.filter((t) => t !== "30%" && t !== "39%").length).toBeGreaterThan(0);
   expect(barOffset()).toBeCloseTo(-61, 1);
+});
+
+it("阶段文字一变，新行从底边进度条此刻的位置起步，逐帧与条同数；退场中的旧行停在旧值", async () => {
+  // regular 档才写阶段文字，阶段一变整行换掉
+  vi.stubGlobal("innerWidth", 1280);
+  mount();
+  const taskId = await launch();
+  // 不需要下载的启动：准备阶段走到 20% 停稳，接着直接进启动阶段的起点 75%
+  emitPhase(taskId, "preparing", 3);
+  await stepFrames(40);
+  const [preparing] = faces();
+  expect(preparing.textContent).toBe(`${PHASE_LABEL.preparing}20%`);
+  expect(barPercent()).toBe(20);
+
+  emitPhase(taskId, "launching", 5);
+  const launching = faces().at(-1);
+  if (launching === undefined || launching === preparing) throw new Error("阶段文字变了应换上新行");
+  // 这一刻还没出帧：条还在 20%，新行也写 20%，不先报出 75%
+  expect(launching.textContent).toBe(`${PHASE_LABEL.launching}20%`);
+
+  const frames: { text: number; bar: number }[] = [];
+  const leaving: string[] = [];
+  for (let i = 0; i < 40; i++) {
+    await stepFrames(1);
+    frames.push({ text: facePercent(launching), bar: barPercent() });
+    if (preparing.isConnected) leaving.push(`${preparing.textContent}`);
+  }
+  // 字与条从同一处、以同一条弹簧走向同一个目标：每一帧都是同一个数，中间值一个个出现，最后一起停在 75%
+  expect(frames.filter((f) => f.text !== f.bar)).toEqual([]);
+  expect(new Set(frames.map((f) => f.text)).size).toBeGreaterThan(2);
+  expect(frames.at(-1)).toEqual({ text: 75, bar: 75 });
+  // 旧行淡出的那几帧还在 DOM 里，一直写着「准备中 20%」，不跟着新的进度走
+  expect(leaving.length).toBeGreaterThan(0);
+  expect([...new Set(leaving)]).toEqual([`${PHASE_LABEL.preparing}20%`]);
+});
+
+it("条正在走的时候换阶段：新行读的就是底边条那个值，换行那一帧及之后逐帧与条同数；退场中的旧行冻结在换行时的数", async () => {
+  vi.stubGlobal("innerWidth", 1280);
+  mount();
+  const taskId = await launch();
+  // 准备阶段推到 20%，只走几帧：条还带着速度往上走
+  emitPhase(taskId, "preparing", 3);
+  await stepFrames(3);
+  const [preparing] = faces();
+  const before = facePercent(preparing);
+  expect(before).toBe(barPercent());
+  expect(before).toBeGreaterThan(0);
+  expect(before).toBeLessThan(20);
+
+  emitPhase(taskId, "launching", 5);
+  const launching = faces().at(-1);
+  if (launching === undefined || launching === preparing) throw new Error("阶段文字变了应换上新行");
+  expect(facePercent(launching)).toBe(barPercent());
+
+  const frames: { text: number; bar: number }[] = [];
+  const leaving: string[] = [];
+  for (let i = 0; i < 40; i++) {
+    await stepFrames(1);
+    frames.push({ text: facePercent(launching), bar: barPercent() });
+    if (preparing.isConnected) leaving.push(`${preparing.textContent}`);
+  }
+  expect(frames.filter((f) => f.text !== f.bar)).toEqual([]);
+  expect(new Set(frames.map((f) => f.text)).size).toBeGreaterThan(2);
+  expect(frames.at(-1)).toEqual({ text: 75, bar: 75 });
+  expect(leaving.length).toBeGreaterThan(0);
+  expect([...new Set(leaving)]).toEqual([`${PHASE_LABEL.preparing}${before}%`]);
+});
+
+it("停下的一局还留在岛上时再启动：新的一局从 0% 起步，字与条都不从上一局停下的位置往回走", async () => {
+  vi.stubGlobal("innerWidth", 1280);
+  const first = deferred<never>();
+  ipc.overrides.set("launch_game", () => first.promise);
+  ipc.overrides.set("cancel_task", () => {
+    first.reject(cancelledError());
+    return true;
+  });
+  mount();
+  const a = await launch();
+  emitPhase(a, "downloading", 4, 0);
+  await stepFrames(40);
+  expect(barPercent()).toBe(30);
+  await act(async () => {
+    await launcher.actions.stop();
+    await settle();
+  });
+  expect(launcher.state.session).toMatchObject({ phase: "stopped", stopReason: "cancelled" });
+  // 进度条淡出撤下；停下的这一局还要在岛上留一会儿，岛不退场
+  await stepFrames(20);
+  expect(barOffset()).toBeNull();
+
+  ipc.overrides.set("launch_game", () => deferred<never>().promise);
+  const b = await launch();
+  expect(b).not.toBe(a);
+  const face = faces().at(-1);
+  if (face === undefined) throw new Error("新的一局应有显示的行");
+  expect(face.textContent).toBe(`${PHASE_LABEL.preparing}0%`);
+  const frames: { text: number; bar: number }[] = [];
+  for (let i = 0; i < 20; i++) {
+    await stepFrames(1);
+    frames.push({ text: facePercent(face), bar: barPercent() });
+  }
+  expect(frames.filter((f) => f.text !== 0 || f.bar !== 0)).toEqual([]);
+});
+
+it("减少动画：阶段文字一变，新行直接写目标值，与直接到位的进度条同数", async () => {
+  vi.stubGlobal("innerWidth", 1280);
+  mount((node) => <MotionConfig reducedMotion="always">{node}</MotionConfig>);
+  const taskId = await launch();
+  emitPhase(taskId, "preparing", 3);
+  await stepFrames(5);
+  expect(barPercent()).toBe(20);
+
+  emitPhase(taskId, "launching", 5);
+  expect(faces().at(-1)?.textContent).toBe(`${PHASE_LABEL.launching}75%`);
+  await stepFrames(1);
+  expect(barPercent()).toBe(75);
 });

@@ -17,7 +17,7 @@ import { useLoadingGate } from "../../lib/loading-gate";
 import { fade } from "../../lib/motion";
 import { useReflow } from "../../lib/reflow";
 import { useMounted } from "../../lib/useMounted";
-import { cx } from "../../lib/util";
+import { cssVars, cx } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { describeError } from "../../state/errors";
@@ -26,7 +26,6 @@ import { useGameDirectories } from "../../state/queries/catalog";
 import { useInstanceContent } from "../../state/queries/instance";
 import { findInstance, gameDirectoryBusy } from "../../state/selectors";
 import type { SliceStatus } from "../../state/store";
-import { Appear } from "../../ui/Appear";
 import { Button } from "../../ui/Button";
 import { Card, type ResponsiveValue } from "../../ui/Card";
 import { Cover } from "../../ui/Cover";
@@ -74,7 +73,7 @@ export function ContinueCard({ span, target }: ContinueCardProps) {
   const gate = useLoadingGate(outcome === null && retryingFrom === null);
   return (
     <Card span={span} padding="none" clip className={s.rowOne}>
-      <Loadable view={gate.view} skeleton={<HeroSkeleton slow={gate.slow} />} className={s.heroLoadable} contentClassName={s.heroLoaded}>
+      <Loadable view={gate.view} skeleton={<HeroSkeleton />} className={s.heroLoadable} contentClassName={s.heroLoaded}>
         {() => {
           const drawn = outcome !== null ? outcome : retryingFrom;
           if (drawn === null) throw new Error("实例列表或设置还在加载，却要画大卡内容");
@@ -85,6 +84,7 @@ export function ContinueCard({ span, target }: ContinueCardProps) {
           );
         }}
       </Loadable>
+      <HeroSlowHint slow={gate.slow} />
     </Card>
   );
 }
@@ -175,49 +175,73 @@ function NoInstances() {
   useEffect(() => refreshDirs(), [refreshDirs]);
 
   return (
-    <Loadable view={gate.view} skeleton={<HeroSkeleton slow={gate.slow} />} className={s.heroLoadable} contentClassName={s.heroLoaded}>
-      {() => {
-        // 目录列表读不出时这里只是少一个切换入口，错误由设置页的游戏目录卡片原位呈现
-        const suggestion = dirs.data === undefined ? null : switchSuggestion(dirs.data);
-        // 紧凑空状态：正文折成两行也落在第一排的最小高度之内，不把整排撑高
-        return (
-          <div className={s.heroCentered}>
-            <EmptyState
-              scene="sapling"
-              compact
-              title={suggestion === null ? HOME_COPY.continueEmptyTitle : GAME_DIR_SWITCH_COPY.emptyTitle}
-              body={suggestion === null ? HOME_COPY.continueEmptyBody : GAME_DIR_SWITCH_COPY.emptyBody(suggestion.dir.name, suggestion.versions)}
-              action={
-                <div className={s.emptyActions}>
-                  {suggestion !== null && (
-                    <Button
-                      variant="primary"
-                      icon="folder-open"
-                      disabledReason={gameDirSwitchReason(busy, suggestion.dir.available)}
-                      onClick={() => void switchTo(suggestion.dir.path, suggestion.dir.name)}
-                    >
-                      {GAME_DIR_SWITCH_COPY.emptyAction(suggestion.dir.name)}
+    <>
+      <Loadable view={gate.view} skeleton={<HeroSkeleton />} className={s.heroLoadable} contentClassName={s.heroLoaded}>
+        {() => {
+          // 目录列表读不出时这里只是少一个切换入口，错误由设置页的游戏目录卡片原位呈现
+          const suggestion = dirs.data === undefined ? null : switchSuggestion(dirs.data);
+          // 紧凑空状态：正文折成两行也落在第一排的最小高度之内，不把整排撑高
+          return (
+            <div className={s.heroCentered}>
+              <EmptyState
+                scene="sapling"
+                compact
+                title={suggestion === null ? HOME_COPY.continueEmptyTitle : GAME_DIR_SWITCH_COPY.emptyTitle}
+                body={suggestion === null ? HOME_COPY.continueEmptyBody : GAME_DIR_SWITCH_COPY.emptyBody(suggestion.dir.name, suggestion.versions)}
+                action={
+                  <div className={s.emptyActions}>
+                    {suggestion !== null && (
+                      <Button
+                        variant="primary"
+                        icon="folder-open"
+                        disabledReason={gameDirSwitchReason(busy, suggestion.dir.available)}
+                        onClick={() => void switchTo(suggestion.dir.path, suggestion.dir.name)}
+                      >
+                        {GAME_DIR_SWITCH_COPY.emptyAction(suggestion.dir.name)}
+                      </Button>
+                    )}
+                    <Button variant={suggestion === null ? "primary" : "secondary"} icon="plus" onClick={() => openCreateInstance()}>
+                      {HOME_COPY.createInstance}
                     </Button>
-                  )}
-                  <Button variant={suggestion === null ? "primary" : "secondary"} icon="plus" onClick={() => openCreateInstance()}>
-                    {HOME_COPY.createInstance}
-                  </Button>
-                </div>
-              }
-            />
-          </div>
-        );
-      }}
-    </Loadable>
+                  </div>
+                }
+              />
+            </div>
+          );
+        }}
+      </Loadable>
+      <HeroSlowHint slow={gate.slow} />
+    </>
+  );
+}
+
+/**
+ * 「比平时慢一些」：画在骨架顶行实例「上次游玩」那一格上，但不放进骨架层（骨架层整层对读屏隐藏，放在里面读屏就读不到）。
+ * 绝对定位，以卡片（没有实例时以外层加载区，两者同一块）为基准，出现时不占流内高度，不把标题与胶囊往上顶。
+ * 内容的顶行在同一格里画「上次游玩」，所以提示不挂退场：跟着骨架淡出就会与淡入的「上次游玩」叠字。
+ * slow 在加载结束的那次渲染就变回假；能到 slow 的加载早已让骨架停满最短停留，同一轮同步刷新里就换成内容，
+ * 提示在内容开始淡入的那一帧之前已经离开 DOM。
+ */
+function HeroSlowHint({ slow }: { slow: boolean }) {
+  if (!slow) return null;
+  return (
+    <span
+      className={s.heroSlowHint}
+      style={cssVars({ "--hero-hint-start": `${SKELETON_SIZE.continueTag}px`, "--hero-hint-end": `${SKELETON_SIZE.switchButton}px`, "--hero-hint-height": `${SKELETON_SIZE.buttonSm}px` })}
+    >
+      <motion.span className={cx(s.slowHint, s.ellipsis)} initial={{ opacity: 0 }} animate={{ opacity: 1, transition: fade.in }}>
+        {SLOW_LOADING_HINT}
+      </motion.span>
+    </span>
   );
 }
 
 /**
  * 大卡骨架，逐行对着 HeroContent 画：顶行是标签加「换一个」的小按钮（行高由按钮撑到 30）；底部的标题区是名称、标签、信息行三行；
  * 再下面是胶囊。标题区与胶囊靠 margin-top: auto 压在底边，骨架与内容在同一张卡里的落点一致。
- * 慢提示放在顶行里实例「上次游玩」那一格：行高不变，出现时不把标题与胶囊往上顶。
+ * 顶行标签与按钮之间那一格留给慢提示（HeroSlowHint），它不在骨架层里。
  */
-function HeroSkeleton({ slow }: { slow: boolean }) {
+function HeroSkeleton() {
   const { tier } = useShell();
   const block = tier === "compact" ? 96 : 128;
   return (
@@ -225,13 +249,6 @@ function HeroSkeleton({ slow }: { slow: boolean }) {
       <div className={s.heroInner}>
         <div className={s.heroTop}>
           <Skeleton shape="block" width={SKELETON_SIZE.continueTag} height={SKELETON_SIZE.tagSm} radius="pill" />
-          <Appear itemClassName={s.heroSlow}>
-            {slow && (
-              <span key="slow" className={cx(s.slowHint, s.ellipsis)}>
-                {SLOW_LOADING_HINT}
-              </span>
-            )}
-          </Appear>
           <span className={s.grow} />
           <Skeleton shape="block" width={SKELETON_SIZE.switchButton} height={SKELETON_SIZE.buttonSm} radius="sm" />
         </div>

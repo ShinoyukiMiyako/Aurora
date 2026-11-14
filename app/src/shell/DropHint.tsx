@@ -19,7 +19,7 @@ const HINT: Readonly<Record<Exclude<FileDropHint, null>, { text: string; icon: I
 export function DropHint({ hint }: { hint: FileDropHint }) {
   return (
     <>
-      <span className={styles.announcer} role="status" data-hint={hint ?? undefined}>
+      <span className="sk-sr-only" role="status" data-hint={hint ?? undefined}>
         {hint !== null && HINT[hint].text}
       </span>
       <AnimatePresence>

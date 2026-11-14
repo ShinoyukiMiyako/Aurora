@@ -19,10 +19,10 @@
   /* 日历当日详情的最小宽与实例列表的最大高 */
   --home-day-detail-min: 150px;
   --home-day-list-max: 168px;
-  /* 近 7 天柱的柱槽与选中描边 */
+  /* 近 7 天柱的柱槽与选中描边。描边在槽内：外 1px 强调色、内 1px 表面色，填充是强调色渐变（今天）时也分得出边 */
   --home-bar-track-width: 14px;
   --home-bar-track-height: 58px;
-  --home-picked-ring: 0 0 0 2px var(--sk-accent-line);
+  --home-picked-ring: inset 0 0 0 1px var(--sk-accent-strong), inset 0 0 0 2px var(--sk-surface);
   /* 服务器信号格：4 格依次增高 */
   --home-signal-height: 16px;
   --home-signal-bar-width: 4px;
@@ -276,10 +276,20 @@
   min-width: 0;
 }
 
-/* 骨架顶行里的慢提示：占「上次游玩」那一格，放不下时截断，不换行撑高 */
-.heroSlow {
+/*
+ * 慢提示压在骨架顶行标签与按钮之间那一格上（「上次游玩」的位置）：绝对定位，不占流内高度；
+ * 上沿与左右照大卡内容区的内边距和顶行的间距，标签宽、按钮宽、行高由组件按骨架尺寸给出。放不下时截断，不换行
+ */
+.heroSlowHint {
+  position: absolute;
+  top: var(--sk-space-20);
+  right: calc(var(--sk-space-24) + var(--hero-hint-end) + var(--sk-space-10));
+  left: calc(var(--sk-space-24) + var(--hero-hint-start) + var(--sk-space-10));
+  z-index: 1;
   display: flex;
-  min-width: 0;
+  align-items: center;
+  height: var(--hero-hint-height);
+  pointer-events: none;
 }
 
 .emptyActions {
@@ -725,8 +735,23 @@ button.bar:not(:disabled):hover .barTrack {
   background: var(--sk-bg-3);
 }
 
-.bar[data-picked] .barTrack {
+/*
+ * 选中环：柱槽要裁出填充、外扩的环画不出来，改画在槽内常驻的 ::after 叠层上（DOM 末位，压在填充之上），
+ * 只过渡透明度，不随选中增删 box-shadow
+ */
+.barTrack::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
   box-shadow: var(--home-picked-ring);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--sk-dur-hover) var(--sk-ease);
+}
+
+.bar[data-picked] .barTrack::after {
+  opacity: 1;
 }
 
 /* 填充是整根柱高的胶囊，从底下推上来、由柱槽裁出：不用 scaleY，那会把顶端的圆头与今日柱的渐变一起压扁 */

@@ -17,6 +17,7 @@ import { FOOTER_COPY, STEP_COPY } from "./flows/onboarding/copy";
 import { mockInvoke, resetMocks } from "./ipc/mock";
 import { ACCOUNT_COPY, PAGE_ERROR_COPY, PALETTE_COPY, SIDEBAR_COPY } from "./copy/shell";
 import { ACCOUNTS_COPY } from "./pages/accounts/copy";
+import homeStyles from "./pages/home/home.module.css";
 import { DETAIL_COPY, IMPORT_COPY, SEARCH_COPY } from "./pages/discover/copy";
 import { SETTINGS_COPY } from "./pages/instance/copy";
 import { ABOUT_COPY } from "./pages/settings/copy";
@@ -24,6 +25,7 @@ import { tierOf, type Tier } from "./shell/tier";
 import { DEFAULT_APPEARANCE } from "./state/appearance";
 import type { AppearanceMode } from "./domain/types";
 import { INSTANCE_TABS, PAGE_IDS, SETTINGS_SECTIONS, type PageId } from "./state/route";
+import { DEFAULT_UI_SHAPE, type UiShape } from "./state/ui-shape";
 import { stubMatchMedia, stubResizeObserver } from "./test/dom";
 import type { IpcRecorder } from "./test/fake-bridge";
 import { resetRecorder } from "./test/launcher";
@@ -62,6 +64,8 @@ let visited: PageId[];
 /** 这一轮的窗口宽度与外观。 */
 let windowWidth = 1024;
 let mode: AppearanceMode = "day";
+/** 启动时读到的界面形状；冒烟各轮按没记过启动。 */
+let uiShape: UiShape = DEFAULT_UI_SHAPE;
 
 function mount(): void {
   // 测试不处理 CSS 模块。外壳与页面之间有一条靠样式成立的约定：内容区是纵向滚动容器（发现页据此找吸顶与预取的滚动根），
@@ -81,7 +85,7 @@ function mount(): void {
   vi.stubGlobal("innerWidth", windowWidth);
   root = createRoot(host);
   // 花瓣画布依赖真实的 2D 上下文与帧循环，冒烟测试只关心页面能否渲染
-  root.render(<App appearance={{ ...DEFAULT_APPEARANCE, mode, petals: false }} />);
+  root.render(<App appearance={{ ...DEFAULT_APPEARANCE, mode, petals: false }} uiShape={uiShape} />);
 }
 
 /** 分档与明暗确实按这一轮的设定生效了，否则整轮测的不是想测的那一档。 */
@@ -243,6 +247,7 @@ beforeEach(() => {
   Element.prototype.scrollIntoView = function scrollIntoView() {};
   consoleError = vi.spyOn(console, "error");
   visited = [];
+  uiShape = DEFAULT_UI_SHAPE;
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
   vi.spyOn(console, "info").mockImplementation(() => undefined);
 });
@@ -433,5 +438,22 @@ describe.each(MATRIX)("应用冒烟：$tier 档（$width px）· $mode", ({ tier
     expect(finished[0].args.gameDir).toBe(config.game_dir);
     expectFrame(tier);
     expectNoFailures();
+  }, 60_000);
+});
+
+describe("启动时读到的界面形状", () => {
+  it("经 App 交给页面：实例列表还在读时，主页的最近游玩按记下的张数占位", async () => {
+    windowWidth = 1600;
+    uiShape = { recentCards: 2, repairBanner: false };
+    ipc.overrides.set("is_first_run", () => false);
+    ipc.overrides.set("list_instances", () => new Promise(() => undefined));
+    await prepareApp();
+    mount();
+    const skeletons = await vi.waitFor(() => {
+      const grid = content().querySelector(`section[aria-labelledby="home-recent-title"] [aria-hidden="true"] > .${homeStyles.recentGrid}`);
+      if (grid === null) throw new Error("主页的最近游玩还没有骨架");
+      return grid.children.length;
+    }, WAIT);
+    expect(skeletons).toBe(2);
   }, 60_000);
 });

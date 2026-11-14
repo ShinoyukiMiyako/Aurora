@@ -13,6 +13,7 @@ import { OverlayRoot } from "../shell/overlay";
 import { ShellProvider } from "../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
+import { DEFAULT_UI_SHAPE, UiShapeProvider } from "../state/ui-shape";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcArgs, IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, configDto, emit, instanceDto, resetRecorder, settle } from "../test/launcher";
@@ -149,21 +150,23 @@ const flush = () =>
 async function mount(page: ReactNode) {
   view = render(
     <AppearanceProvider initial={DEFAULT_APPEARANCE}>
-      <LauncherProvider>
-        <ShellProvider>
-          <RemoteImageProvider resolve={async (url) => url}>
-            <PickFolderProvider value={async () => null}>
-              <Probe />
-              <div style={{ overflowY: "auto" }}>
-                <Profiler id="page" onRender={() => void (commits += 1)}>
-                  {page}
-                </Profiler>
-              </div>
-            </PickFolderProvider>
-          </RemoteImageProvider>
-          <OverlayRoot />
-        </ShellProvider>
-      </LauncherProvider>
+      <UiShapeProvider initial={DEFAULT_UI_SHAPE}>
+        <LauncherProvider>
+          <ShellProvider>
+            <RemoteImageProvider resolve={async (url) => url}>
+              <PickFolderProvider value={async () => null}>
+                <Probe />
+                <div style={{ overflowY: "auto" }}>
+                  <Profiler id="page" onRender={() => void (commits += 1)}>
+                    {page}
+                  </Profiler>
+                </div>
+              </PickFolderProvider>
+            </RemoteImageProvider>
+            <OverlayRoot />
+          </ShellProvider>
+        </LauncherProvider>
+      </UiShapeProvider>
     </AppearanceProvider>,
   );
   await flush();

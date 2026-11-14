@@ -222,7 +222,7 @@ export function MoveInstanceModal({ inst, lockReason, onRename, onClose }: MoveI
               </Loadable>
               {/* 骨架里的「正在检查」对读屏隐藏：播报区随这一块预先挂好、先空着，加载态亮出（含摆着上一份结果时）才写字，
                   读屏才念得出来；回得快时不播，与看得见的骨架同一时机 */}
-              <div role="status" className={styles.status}>
+              <div role="status" className="sk-sr-only">
                 {checkGate.view === "skeleton" ? MOVE_COPY.checking : ""}
               </div>
             </section>

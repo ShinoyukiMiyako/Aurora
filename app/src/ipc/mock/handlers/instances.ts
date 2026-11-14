@@ -125,6 +125,7 @@ type DerivedField =
   | "dir_error"
   | "mod_count"
   | "world_count"
+  | "resource_pack_count"
   | "isolated"
   | "modpack"
   | "modpack_error"
@@ -757,6 +758,8 @@ function toDto(instance: MockInstance): InstanceDto {
     // 与 list_mods 数的是同一份文件表，两边不会对不上。
     mod_count: ready ? mockModFileCount(instance.dto.id) : null,
     world_count: ready ? instance.content.worlds.length : null,
+    // 数的是 list_instance_content 给出的同一份资源包表，概览按它占位的行数与读到之后的行数对得上
+    resource_pack_count: ready ? instance.content.resource_packs.length : null,
     isolated: ready ? isolatedOf(instance) : null,
     modpack: instance.modpack,
     modpack_error: null,

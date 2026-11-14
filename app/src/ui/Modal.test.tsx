@@ -6,7 +6,6 @@ import { fileURLToPath } from "node:url";
 import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LOADING_DELAY_MS } from "../domain/limits";
-import { REFLOW_SKIP_ATTR } from "../lib/reflow";
 import { FOCUS_FALLBACK_ATTR, OverlayProvider, OverlayRoot } from "../shell/overlay";
 import { keydown, render, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
 import { Button } from "./Button";
@@ -444,23 +443,25 @@ describe("ConfirmDialog", () => {
     expect(body?.style.opacity).toMatch(FADING);
   });
 
-  // 「切换并重下」换成「删除实例」：确认键变窄，底栏右对齐，左边的「取消」一帧横移
-  it("开着时被顶替：确认键的新文案淡入；「取消」所在的按钮行撑满底栏、挂着让位，确认键自己不参与让位", () => {
+  // 「切换并重下」换成「删除实例」：确认键变窄，底栏右对齐，左边的「取消」随之横移
+  it("开着时被顶替：确认键的新文案淡入；两个按钮各在按钮行的一层布局节点里，「取消」随布局动画横移，按钮行不挂 DOM 让位", () => {
     mount(<Commanded />);
     const cancel = byText("取消");
-    const row = cancel.closest("[data-tooltip-host]")?.parentElement as HTMLElement;
-    expect(reflowed.has(row)).toBe(true);
-    expect(row.contains(byText("切换并重下"))).toBe(true);
+    const row = cancel.closest("[data-tooltip-host]")?.parentElement?.parentElement as HTMLElement;
     expect(row.className).toBe(confirmStyles.actions);
-    expect(cancel.hasAttribute(REFLOW_SKIP_ATTR)).toBe(false);
-    expect(byText("切换并重下").hasAttribute(REFLOW_SKIP_ATTR)).toBe(true);
+    expect(reflowed.has(row)).toBe(false);
+    // 按钮行的直接子项是两个按钮各自的形变层
+    const itemOf = (text: string) => [...row.children].find((child) => child.contains(byText(text))) as HTMLElement;
+    expect(itemOf("取消").className).toBe(confirmStyles.cancel);
+    expect(itemOf("切换并重下").className).toBe(confirmStyles.confirm);
+    expect(visualElementStore.get(itemOf("取消"))?.projection?.options.layout).toBe(true);
     const labelOf = (text: string) => [...byText(text).querySelectorAll<HTMLElement>("span")].find((s) => s.textContent === text && s.children.length === 0);
     // 打开时就在的文案跟着弹窗入场，自己不淡入
     expect(labelOf("切换并重下")?.style.opacity).toBe("1");
 
     act(() => confirmHandles.set?.(REMOVE));
     expect(labelOf("删除实例")?.style.opacity).toMatch(/^0(\.\d+)?$/);
-    expect(byText("删除实例").hasAttribute(REFLOW_SKIP_ATTR)).toBe(true);
+    expect(itemOf("删除实例").className).toBe(confirmStyles.confirm);
   });
 
   it("按钮行撑满底栏、靠右排：行宽不随确认键的文案变", () => {
@@ -479,7 +480,7 @@ describe("ConfirmDialog", () => {
     expect(live()?.textContent).toBe("删除「生存」？ 第 2 个请求");
     act(() => confirmHandles.set?.(ENDGAME));
     expect(live()?.textContent).toBe("结束游戏？ 第 3 个请求");
-    expect(live()?.className).toBe(confirmStyles.announce);
+    expect(live()?.className).toBe("sk-sr-only");
   });
 
   it("关上之后再来的请求：换一层新的框，标题随弹窗入场、不单独淡入", async () => {
@@ -598,7 +599,7 @@ describe("弹窗随内容改变尺寸", () => {
     expect(dialog.style.transform).toBe("none");
   });
 
-  // 资源详情这类满版主体默认不留槽位：正显示着滚动条时藏起它，内容横移 10px，比途中冒出滚动条更糟
+  // 满版主体默认不留槽位（资讯这类头图贴着右边的弹窗）：正显示着滚动条时藏起它，内容横移 10px，比途中冒出滚动条更糟
   it("没留槽位的满版主体：正显示着滚动条时形变不打标记，没有滚动条时照打；跟的是面板投影节点的开始与结束", () => {
     mount(
       <Modal open onClose={() => undefined} ariaLabel="资源详情" padded={false}>

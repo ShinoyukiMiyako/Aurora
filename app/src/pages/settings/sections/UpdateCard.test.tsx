@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
-// 更新卡的状态行：下载中的已下大小与更新面板按同一个节拍换字，主句里的百分比照每条进度事件走。
+// 更新卡的状态行：下载中的已下大小与更新面板按同一个节拍换字，主句里的百分数与进度条同一条平滑逐帧走。
 // 更新通道选项块：选了就写、连按方向键每次都写，下载中与已下好时先确认，写失败回到原值。
+import { MotionConfig } from "framer-motion";
 import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SPEED_REFRESH_MS } from "../../../lib/progress-display";
 import { OverlayProvider, OverlayRoot } from "../../../shell/overlay";
 import { INITIAL_UPDATER_STATE, type DownloadSource, type UpdateInfo } from "../../../state/updater/machine";
 import { deferred, type Deferred } from "../../../test/launcher";
-import { drainFrames, keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
+import { drainFrames, keydown, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
 import s from "../settings.module.css";
 import { ChannelPicker, StatusLine } from "./UpdateCard";
 import { updateCardView, type CardContext, type ChannelChangeCost, type ChannelId } from "./update-view";
@@ -64,38 +65,91 @@ function textOf(className: string): string | null {
 const title = () => textOf(s.updateTitle);
 const sub = () => textOf(s.mutedText);
 
+/** 主句里单独成节点、随平滑逐帧换字的百分数；主句不带百分数时为 null。 */
+function percentNode(): string | null {
+  const nodes = view?.container.querySelectorAll(`.${s.updateTitle} > span`);
+  if (nodes === undefined) throw new Error("还没有挂载");
+  if (nodes.length > 1) throw new Error(`主句里应当至多一个百分数节点，实为 ${nodes.length} 个`);
+  return nodes.length === 0 ? null : nodes[0].textContent;
+}
+
+/** settle 弹簧约 0.26 s 停稳；走 1 s 的帧足够它落到目标上。 */
+const SETTLE_FRAMES = 60;
+
 describe("更新卡下载中的次句", () => {
-  it("每 100 ms 一条进度：主句百分比条条都换，已下大小每 500 ms 才换一次；进度停下后最后一条到点补上", () => {
+  it("每 100 ms 一条进度：从 0 开始传的第一条立即换上，不停在 0 B；之后已下大小每 500 ms 才换一次，进度停下后最后一条到点补上", () => {
     view = render(line(0));
     expect([title(), sub()]).toEqual(["正在下载 0.3.0 · 0%", "0 B / 10.0 MB"]);
-    for (let i = 1; i <= 4; i++) {
+    act(() => void vi.advanceTimersByTime(100));
+    view.rerender(line(MB));
+    expect(sub()).toBe("1.0 MB / 10.0 MB");
+    for (let i = 2; i <= 5; i++) {
       act(() => void vi.advanceTimersByTime(100));
       view.rerender(line(i * MB));
-      expect([title(), sub()]).toEqual([`正在下载 0.3.0 · ${i * 10}%`, "0 B / 10.0 MB"]);
+      expect(sub()).toBe("1.0 MB / 10.0 MB");
     }
-    // 间隔满的那一刻换上最近报上来的 4 MB，紧接着到的 5 MB 等下一个间隔
+    // 换上 1 MB 之后间隔满的那一刻换上最近报上来的 5 MB，紧接着到的 6 MB 等下一个间隔
     act(() => void vi.advanceTimersByTime(100));
-    expect(sub()).toBe("4.0 MB / 10.0 MB");
-    view.rerender(line(5 * MB));
-    expect([title(), sub()]).toEqual(["正在下载 0.3.0 · 50%", "4.0 MB / 10.0 MB"]);
-    act(() => void vi.advanceTimersByTime(SPEED_REFRESH_MS - 1));
-    expect(sub()).toBe("4.0 MB / 10.0 MB");
-    act(() => void vi.advanceTimersByTime(1));
     expect(sub()).toBe("5.0 MB / 10.0 MB");
+    view.rerender(line(6 * MB));
+    expect(sub()).toBe("5.0 MB / 10.0 MB");
+    act(() => void vi.advanceTimersByTime(SPEED_REFRESH_MS - 1));
+    expect(sub()).toBe("5.0 MB / 10.0 MB");
+    act(() => void vi.advanceTimersByTime(1));
+    expect(sub()).toBe("6.0 MB / 10.0 MB");
   });
 
-  it("换源后从 0 重来立即换上、带上换源说明；传到总量立即换上，不差一截", () => {
+  it("换源后从 0 重来与重来后的第一条都立即换上、带上换源说明，主句在总量未知时不带百分数；传到总量立即换上，不差一截", async () => {
     const hk: DownloadSource = { index: 1, count: 4, name: "hk" };
     view = render(line(6 * MB));
     act(() => void vi.advanceTimersByTime(100));
     view.rerender(line(0, null, hk));
-    expect(sub()).toBe("0 B · 已换用备用下载源（2/4）");
+    expect([title(), percentNode(), sub()]).toEqual(["正在下载 0.3.0", null, "0 B · 已换用备用下载源（2/4）"]);
     act(() => void vi.advanceTimersByTime(100));
     view.rerender(line(3 * MB, TOTAL, hk));
-    expect(sub()).toBe("0 B / 10.0 MB · 已换用备用下载源（2/4）");
+    expect(sub()).toBe("3.0 MB / 10.0 MB · 已换用备用下载源（2/4）");
+    act(() => void vi.advanceTimersByTime(100));
+    view.rerender(line(4 * MB, TOTAL, hk));
+    expect(sub()).toBe("3.0 MB / 10.0 MB · 已换用备用下载源（2/4）");
     act(() => void vi.advanceTimersByTime(100));
     view.rerender(line(TOTAL, TOTAL, hk));
-    expect([title(), sub()]).toEqual(["正在下载 0.3.0 · 100%", "10.0 MB / 10.0 MB · 已换用备用下载源（2/4）"]);
+    expect(sub()).toBe("10.0 MB / 10.0 MB · 已换用备用下载源（2/4）");
+    await stepFrames(SETTLE_FRAMES);
+    expect(title()).toBe("正在下载 0.3.0 · 100%");
+  });
+});
+
+describe("更新卡下载中的主句", () => {
+  it("百分数与进度条同一条平滑：新进度到了不当场换字，逐帧走过去，停在上报的值上", async () => {
+    view = render(line(0));
+    expect([title(), percentNode()]).toEqual(["正在下载 0.3.0 · 0%", "0%"]);
+    view.rerender(line(4 * MB));
+    // 进度事件约 100 ms 一条，照原样换字一秒跳十次；字等帧走起来才动
+    expect(title()).toBe("正在下载 0.3.0 · 0%");
+    await stepFrames(3);
+    const node = percentNode();
+    if (node === null) throw new Error("主句里没有百分数节点");
+    const midway = Number.parseInt(node, 10);
+    expect(midway).toBeGreaterThan(0);
+    expect(midway).toBeLessThan(40);
+    await stepFrames(SETTLE_FRAMES);
+    expect([title(), percentNode()]).toEqual(["正在下载 0.3.0 · 40%", "40%"]);
+  });
+
+  it("换源与新源的第一条进度在同一次渲染里到：百分数从新源的进度起算，不停在上一个源下到的位置", async () => {
+    view = render(line(8 * MB));
+    expect(percentNode()).toBe("80%");
+    view.rerender(line(MB / 2, TOTAL, { index: 1, count: 4, name: "hk" }));
+    await stepFrames(2);
+    expect(title()).toBe("正在下载 0.3.0 · 5%");
+  });
+
+  it("减少动画：百分数不走平滑，下一帧就是上报的值", async () => {
+    const reduced = (node: ReactNode) => <MotionConfig reducedMotion="always">{node}</MotionConfig>;
+    view = render(reduced(line(0)));
+    view.rerender(reduced(line(4 * MB)));
+    await stepFrames(1);
+    expect(title()).toBe("正在下载 0.3.0 · 40%");
   });
 });
 

@@ -3,7 +3,8 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
-import { INSTANCE_NAME_ERROR, SLOW_LOADING_HINT } from "../../copy/flows";
+import { DEFAULT_COVER } from "../../art/iso/covers";
+import { coverLabel, INSTANCE_NAME_ERROR, SLOW_LOADING_HINT } from "../../copy/flows";
 import { SLOW_HINT_MS } from "../../domain/limits";
 // 版本清单、加载器版本、Java 这几条查询落到假后端。静态引入让假后端在首个查询之前就加载完：
 // 几条查询同时触发桥里的动态引入时，后到的会拿到还没执行完的模块。
@@ -34,13 +35,46 @@ const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }))
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
 // 直接调 observeReflow 挂让位的容器记在这里；照常转给真的实现（jsdom 里它什么也不做）
 const reflowed = vi.hoisted(() => new Set<HTMLElement>());
+// 经 useReflow 挂让位的容器各走哪条弹簧：jsdom 不做布局，让位本身测不了，只核对它挂的弹簧；挂载照常交给真实现
+const reflowSprings = vi.hoisted(() => new Map<Element, string>());
 vi.mock("../../lib/reflow", async (orig) => {
   const real = await orig<typeof import("../../lib/reflow")>();
+  const { useCallback } = await import("react");
   return {
     ...real,
     observeReflow: (container: HTMLElement, spring?: Parameters<typeof real.observeReflow>[1]) => {
       reflowed.add(container);
       return real.observeReflow(container, spring);
+    },
+    useReflow: <T extends HTMLElement>(spring: Parameters<typeof real.useReflow>[0] = "settle") => {
+      const attach = real.useReflow<T>(spring);
+      return useCallback(
+        (el: T | null) => {
+          if (el !== null) reflowSprings.set(el, spring);
+          return attach(el);
+        },
+        [attach, spring],
+      );
+    },
+  };
+});
+
+// 外观步色样的卡面每次渲染时文档里已经挂着几个色样、几块方块：色样的装饰层要晚于色样本身，jsdom 里只能这样看出先后。
+// 渲染照常交给真实现
+const swatchCoverRenders = vi.hoisted(() => [] as { swatches: number; blocks: number }[]);
+vi.mock("../../ui/Cover", async (orig) => {
+  const real = await orig<typeof import("../../ui/Cover")>();
+  const { createElement } = await import("react");
+  const { COVER_PRESETS } = await import("../../art/iso/covers");
+  const swatchSeeds = new Set(COVER_PRESETS.map((p) => p.block));
+  return {
+    ...real,
+    Cover: (props: Parameters<typeof real.Cover>[0]) => {
+      if (swatchSeeds.has(props.seed)) {
+        const swatches = document.querySelectorAll('[role="radio"][class*="_swatch_"]');
+        swatchCoverRenders.push({ swatches: swatches.length, blocks: [...swatches].filter((s) => s.querySelector('[data-sk-art="iso"]') !== null).length });
+      }
+      return createElement(real.Cover, props);
     },
   };
 });
@@ -173,6 +207,8 @@ beforeEach(() => {
   onClose = vi.fn<() => void>();
   scrolls = [];
   reflowed.clear();
+  reflowSprings.clear();
+  swatchCoverRenders.length = 0;
   Object.defineProperty(HTMLElement.prototype, "scrollTo", {
     configurable: true,
     value(this: HTMLElement, options: ScrollToOptions) {
@@ -285,16 +321,171 @@ describe("新建实例：名称", () => {
   });
 });
 
+describe("新建实例：换步后的焦点", () => {
+  /**
+   * 按在当前焦点上的 Enter：键盘用户连续前进时，按键落在哪里由上一步留下的焦点决定。
+   * 不等入场播完：新的一步一挂上焦点就该交接好，这里按完立即断言，再跑完动画。
+   */
+  function enterOnFocused() {
+    const el = document.activeElement;
+    if (el === null) throw new Error("没有聚焦的元素");
+    keydown(el, "Enter");
+  }
+
+  it("从名称连按 Enter 走到确认：新一步一挂上焦点就落在这一步的已选项上，不落进版本搜索框；确认步落在标题上，再按 Enter 不创建", async () => {
+    await mount();
+    setInput(nameInput(), "连按");
+    keydown(nameInput(), "Enter");
+    expect(subtitle()).toBe("第 2 步，共 5 步 · 游戏版本");
+    expect(document.activeElement).toBe(checkedRadio());
+    expect(document.activeElement?.textContent).toMatch(/^1\.21\.1/);
+    await flush();
+    expect(document.activeElement).toBe(checkedRadio());
+
+    enterOnFocused();
+    expect(subtitle()).toBe("第 3 步，共 5 步 · 加载器");
+    expect(document.activeElement).toBe(checkedRadio());
+    expect(document.activeElement?.textContent).toMatch(/^原版/);
+    await flush();
+
+    enterOnFocused();
+    expect(subtitle()).toBe("第 4 步，共 5 步 · 外观");
+    expect(document.activeElement).toBe(checkedRadio());
+    expect(document.activeElement?.getAttribute("aria-label")).toBe(coverLabel(DEFAULT_COVER.block));
+    await flush();
+
+    enterOnFocused();
+    expect(subtitle()).toBe("第 5 步，共 5 步 · 确认");
+    expect(document.activeElement).toBe(heading());
+    expect(heading().textContent).toBe(CREATE_COPY.confirm.title);
+    await flush();
+
+    enterOnFocused();
+    await flush();
+    expect(subtitle()).toBe("第 5 步，共 5 步 · 确认");
+    expect(callsOf(ipc, "install_version")).toEqual([]);
+  });
+
+  it("连按两下 Enter 前进两步：第二下落在刚挂上的新一步里，不因入场还没播完被吞掉", async () => {
+    await mount();
+    setInput(nameInput(), "连按两下");
+    keydown(nameInput(), "Enter");
+    enterOnFocused();
+    expect(subtitle()).toBe("第 3 步，共 5 步 · 加载器");
+    expect(document.activeElement).toBe(checkedRadio());
+    expect(document.activeElement?.textContent).toMatch(/^原版/);
+    await flush();
+    expect(subtitle()).toBe("第 3 步，共 5 步 · 加载器");
+    expect(document.activeElement).toBe(checkedRadio());
+  });
+
+  it("减少动画：同样在新一步挂上时就把焦点交给已选项，连按两下照样前进两步", async () => {
+    await mount(null, { ...DEFAULT_APPEARANCE, reduceMotion: true });
+    setInput(nameInput(), "减少动画");
+    keydown(nameInput(), "Enter");
+    expect(subtitle()).toBe("第 2 步，共 5 步 · 游戏版本");
+    expect(document.activeElement).toBe(checkedRadio());
+    expect(document.activeElement?.textContent).toMatch(/^1\.21\.1/);
+    enterOnFocused();
+    expect(subtitle()).toBe("第 3 步，共 5 步 · 加载器");
+    expect(document.activeElement?.textContent).toMatch(/^原版/);
+  });
+
+  it("已选的版本排在首批先画的行之后：首批照样画到它，挂上时焦点落在它上面，而不是排第一的那一行", async () => {
+    ipc.overrides.set("list_manifest", async () => {
+      const base = await mockInvoke<ManifestDto>("list_manifest");
+      const older = Array.from({ length: 20 }, (_, i) => ({ ...base.versions[0], id: `1.0.${19 - i}` }));
+      return { ...base, versions: [...base.versions, ...older] };
+    });
+    await mount({ mcVersion: "1.0.4" });
+    setInput(nameInput(), "老版本");
+    keydown(nameInput(), "Enter");
+    expect(subtitle()).toBe("第 2 步，共 5 步 · 游戏版本");
+    expect(document.activeElement).toBe(checkedRadio());
+    expect(document.activeElement?.textContent).toMatch(/^1\.0\.4正式版/);
+  });
+
+  it("版本清单还没到：焦点落在这一步的标题上；清单到了焦点不跳，在标题上按 Enter 照样前进", async () => {
+    const manifest = deferred<ManifestDto>();
+    ipc.overrides.set("list_manifest", () => manifest.promise);
+    await mount();
+    setInput(nameInput(), "晚到");
+    keydown(nameInput(), "Enter");
+    await flush();
+    expect(subtitle()).toBe("第 2 步，共 5 步 · 游戏版本");
+    expect(radios()).toEqual([]);
+    expect(document.activeElement).toBe(heading());
+    expect(heading().textContent).toBe(CREATE_COPY.version.title);
+
+    await act(async () => {
+      manifest.resolve(await mockInvoke<ManifestDto>("list_manifest"));
+      await settle();
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(checkedRadio()?.textContent).toMatch(/^1\.21\.1/);
+    expect(document.activeElement).toBe(heading());
+
+    enterOnFocused();
+    expect(subtitle()).toBe("第 3 步，共 5 步 · 加载器");
+    expect(document.activeElement).toBe(checkedRadio());
+    expect(document.activeElement?.textContent).toMatch(/^原版/);
+  });
+
+  it("点「下一步」换步：焦点留在主按钮上，不被拉进新的一步", async () => {
+    await mount();
+    setInput(nameInput(), "点按钮");
+    const primary = button(CREATE_COPY.next);
+    act(() => primary.focus());
+    click(primary);
+    await flush();
+    expect(subtitle()).toBe("第 2 步，共 5 步 · 游戏版本");
+    expect(document.activeElement).toBe(primary);
+  });
+
+  it("换步还在入场时用户已经把焦点放到别处：入场播完不把焦点抢回新的一步", async () => {
+    await mount();
+    setInput(nameInput(), "抢焦点");
+    keydown(nameInput(), "Enter");
+    const back = button(CREATE_COPY.back);
+    act(() => back.focus());
+    await flush();
+    expect(subtitle()).toBe("第 2 步，共 5 步 · 游戏版本");
+    expect(document.activeElement).toBe(back);
+  });
+});
+
 describe("新建实例：完整走一遍", () => {
-  it("版本列表迟迟不来：骨架下面说一句比平时慢，不是干等着", async () => {
+  it("版本列表迟迟不来：骨架层里说一句比平时慢，不是干等着；这句叠在骨架上，列表区不因它变矮", async () => {
     ipc.overrides.set("list_manifest", () => new Promise(() => undefined));
     await mount();
     await fillName("慢");
-    expect(dialog().textContent).not.toContain(SLOW_LOADING_HINT);
+    const skeleton = () => {
+      const el = dialog().querySelector('[aria-busy="true"] > [aria-hidden="true"]');
+      if (el === null) throw new Error("版本步没有骨架层");
+      return el;
+    };
+    const hint = () => {
+      const el = [...dialog().querySelectorAll<HTMLElement>("p")].find((p) => p.textContent === SLOW_LOADING_HINT);
+      if (el === undefined) throw new Error("版本步没有加载慢的说明");
+      return el;
+    };
+    const status = () => dialog().querySelector('[role="status"]')?.textContent;
+    const pane = skeleton().closest<HTMLElement>('[class*="_pane_"]');
+    if (pane === null) throw new Error("骨架不在步骤容器里");
+    const paneItems = [...pane.children];
+    // 常驻在骨架层里，到点之前透明，读屏只听到正在读取
+    expect(skeleton().contains(hint())).toBe(true);
+    expect(hint().hasAttribute("data-shown")).toBe(false);
+    expect(status()).toBe(CREATE_COPY.version.loadingLabel);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(SLOW_HINT_MS);
     });
-    expect(dialog().textContent).toContain(SLOW_LOADING_HINT);
+    expect(skeleton().contains(hint())).toBe(true);
+    expect(hint().hasAttribute("data-shown")).toBe(true);
+    // 骨架层对读屏隐藏：这句经加载说明的播报区读出
+    expect(status()).toBe(CREATE_COPY.version.slowLoadingLabel);
+    // 步骤容器里没有多出兄弟项，列表区的高度不被它分走
+    expect([...pane.children]).toEqual(paneItems);
   });
 
   it("选版本、加载器、加载器版本、封面后创建：排入安装任务、通知、设为当前并打开详情", async () => {
@@ -921,6 +1112,13 @@ describe("新建实例：占位与换态", () => {
     expect(button(CREATE_COPY.next)).toBe(primary);
   });
 
+  it("底栏按钮行的让位与弹窗外框走同一条 morph：换步时「上一步」出没，「取消」的横滑与底栏随外框的位移同拍到位", async () => {
+    await mount();
+    const actions = dialog().querySelector('[class*="_footActions_"]');
+    if (actions === null) throw new Error("底栏没有按钮行");
+    expect(reflowSprings.get(actions)).toBe("morph");
+  });
+
   it("底栏提示：两句叠在同一格，只有当前那句可见", async () => {
     await mount();
     const lines = () => [...dialog().querySelectorAll('[class*="_footHintLine_"]')].map((el) => [el.textContent, el.hasAttribute("data-current"), el.getAttribute("aria-hidden")]);
@@ -991,6 +1189,42 @@ describe("新建实例：占位与换态", () => {
       await vi.advanceTimersByTimeAsync(600);
     });
     expect(radios().length).toBeGreaterThan(0);
+    expect(status().textContent).toBe("");
+  });
+
+  it("加载器版本没到：前 300 ms 读屏什么也听不到，骨架出现时在骨架层外听到正在读取，版本到了清空", async () => {
+    let release: () => void = () => undefined;
+    ipc.overrides.set("list_loader_versions", (args) => new Promise((resolve) => (release = () => resolve(mockInvoke("list_loader_versions", args)))));
+    await mount();
+    await fillName("慢加载器");
+    await next();
+    click(radio("Fabric"));
+    await flush();
+    click(button(CREATE_COPY.next));
+    await act(async () => {
+      await settle();
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(subtitle()).toBe("第 4 步，共 6 步 · 加载器版本");
+    // 这一步只有一个播报区，且不在对读屏隐藏的骨架层里
+    const status = () => {
+      const found = presentAll<HTMLElement>('[role="status"]');
+      expect(found).toHaveLength(1);
+      expect(found[0].closest('[aria-hidden="true"]')).toBeNull();
+      return found[0];
+    };
+    expect(status().textContent).toBe("");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(status().textContent).toBe(CREATE_COPY.loaderVersion.loadingLabel);
+
+    await act(async () => {
+      release();
+      await settle();
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(checkedRadio()?.textContent).toContain("Fabric 0.16.10");
     expect(status().textContent).toBe("");
   });
 
@@ -1120,6 +1354,42 @@ describe("新建实例：占位与换态", () => {
     expect(marks()[0]).toBe(mark);
     expect(stepButton("名称").querySelector("[data-glyph]:not([data-leaving])")?.getAttribute("data-glyph")).toBe("check");
     expect(dialog().querySelector("aside [data-sk-hover-host]")).toBeNull();
+  });
+
+  it("左栏：步骤有了值才多出的那一行淡入；每一行挂着让位，值行出没时标签的上下移由它接住", async () => {
+    await mount();
+    for (const label of ["名称", "游戏版本", "加载器", "加载器版本", "外观", "确认"]) expect(reflowSprings.get(stepButton(label))).toBe("settle");
+    const value = () => stepButton("名称").querySelector<HTMLElement>('[class*="_stepValue_"]:not([inert])');
+    expect(value()).toBeNull();
+    setInput(nameInput(), "取值");
+    expect(value()?.textContent).toBe("取值");
+    expect(value()?.style.opacity).toBe("0");
+    await flush();
+    expect(value()?.style.opacity).toBe("1");
+    // 同一行换值只换字，不重播淡入
+    setInput(nameInput(), "取值二");
+    expect(value()?.textContent).toBe("取值二");
+    expect(value()?.style.opacity).toBe("1");
+  });
+
+  it("外观步：换上来的那一次只挂色样与方块，卡面底纹在之后补上，补在定高的画面格里", async () => {
+    await mount();
+    await fillName("外观");
+    await next();
+    await next();
+    expect(subtitle()).toBe("第 4 步，共 5 步 · 外观");
+    // 色样的卡面第一次渲染时，16 个色样连同各自的方块已经挂在文档里
+    expect(swatchCoverRenders.length).toBeGreaterThan(0);
+    expect(swatchCoverRenders[0]).toEqual({ swatches: 16, blocks: 16 });
+    const swatches = presentAll<HTMLElement>('[role="radio"][class*="_swatch_"]');
+    expect(swatches).toHaveLength(16);
+    for (const swatch of swatches) {
+      const art = swatch.querySelector<HTMLElement>('[class*="_swatchArt_"]');
+      if (art === null) throw new Error("色样没有画面格");
+      expect(art.style.height).toBe("48px");
+      expect(art.querySelector('[data-source="art"]')).not.toBeNull();
+      expect(art.querySelector('[data-sk-art="iso"]')).not.toBeNull();
+    }
   });
 
   it("预览卡的版本行常驻：清单没到时空着占一行，到了填上版本", async () => {

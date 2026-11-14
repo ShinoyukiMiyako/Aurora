@@ -114,12 +114,32 @@
   scale: 1.03;
 }
 
-.day[data-selected] {
+/*
+ * 选中环画在常驻的 ::before 叠层上（::after 是今天的圆点），只过渡透明度：环淡入淡出，不对 box-shadow 本身做过渡；
+ * 也不再和焦点环、无记录格的内描边争日格自己的 box-shadow。叠层外扩的阴影不占盒，格子尺寸与间距不变
+ */
+.day::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
   box-shadow: 0 0 0 2px var(--sk-surface), 0 0 0 4px var(--sk-accent-strong);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--sk-dur-hover) var(--sk-ease);
+}
+
+.day[data-selected]::before {
+  opacity: 1;
 }
 
 .day:focus-visible {
   box-shadow: var(--sk-focus);
+}
+
+/* 键盘焦点环顶替选中环 */
+.day[data-selected]:focus-visible::before {
+  opacity: 0;
 }
 
 :global([data-sk-reduced]) .day:hover:not([data-level="none"]) {

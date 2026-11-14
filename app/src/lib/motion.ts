@@ -91,6 +91,20 @@ export function tweenAt(tween: { duration: number; ease: readonly [number, numbe
   return cubicBezier(x1, y1, x2, y2)(t / tween.duration);
 }
 
+/** 程序滚动补间的时长（毫秒）：从 minMs 起，距离每多 pxPerMs 像素加 1 ms，封顶 maxMs。 */
+const SCROLL_GLIDE_MS = { minMs: 200, maxMs: 480, pxPerMs: 10 } as const;
+
+/**
+ * 组件逐帧写滚动位置的补间（日志控制台的「跳到最新」），交给 tweenAt 用；时长按起步时要滚的距离给。
+ * 不交给浏览器的平滑滚动：途中终点一直在变（新行进来、折行的行第一次量出高度），对进行中的平滑滚动再发 scrollTo，
+ * 浏览器从当前位置以零速重起一段，终点改得比起步还勤就一直停在起步段。时长封顶：几万像素的日志一屏屏飞过去本来就看不清，
+ * 拖长只是让人等。曲线沿用淡入那条，起步快、落点前收住。
+ */
+export function scrollGlide(distance: number): { duration: number; ease: typeof fade.in.ease } {
+  const ms = Math.min(SCROLL_GLIDE_MS.maxMs, SCROLL_GLIDE_MS.minMs + distance / SCROLL_GLIDE_MS.pxPerMs);
+  return { duration: ms / 1000, ease: fade.in.ease };
+}
+
 /** 应用根 MotionConfig 的兜底过渡：位移类走 base 弹簧，透明度走淡入补间。 */
 export const rootTransition: Transition = { ...springs.base, opacity: fade.in };
 
@@ -189,18 +203,31 @@ export const insertItemFade = {
 const POP_MARK_SHOW = { opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } } as const;
 
 /**
- * 小标记的出现消失，按尺寸与分量分三档，挂在 motion 元素上直接展开（{...popMark.dot}）：
+ * 小标记的出现消失，按尺寸与分量分四档，另有减少动画的一份，挂在 motion 元素上直接展开（{...popMark.dot}）：
  * - dot：角标、提醒点、运行点这类几个像素的点。从 0 弹出，从略小处起看不出是「弹出来」的；退场淡出并缩到 0.6。
  * - glyph：清空键、标签上的徽标、晚到的胶囊标签、下载入口换上来的进度环，本身有一定尺寸。从 0.8 弹出；退场只原地淡出，
  *   它们多在 popLayout 里，退场那一刻已经让出位置，再缩一下反而像往别处飞。
  * - tag：行内状态标签（「当前」「未保存」「已停用」），标签出现本身就是消息。从 0.6 弹出，比 glyph 醒目；退场同 glyph。
+ * - check：一组互斥格子里选中那一格角上的勾（换封面面板）。进场同 tag；退场同 dot 缩到 0.6 淡出：
+ *   旧格的勾是被新格取代、收回原处，不是让出位置，只淡出的话换格那一下看不出勾从哪一格收走。
  * - reduced：减少动画时各档都换成它，只淡入淡出。根部 MotionConfig 会把缩放改成一步到位，照用 dot 退场会先跳到 0.6 再淡出。
  */
 export const popMark = {
   dot: { initial: { opacity: 0, scale: 0 }, animate: POP_MARK_SHOW, exit: { opacity: 0, scale: 0.6, transition: fade.out } },
   glyph: { initial: { opacity: 0, scale: 0.8 }, animate: POP_MARK_SHOW, exit: { opacity: 0, transition: fade.out } },
   tag: { initial: { opacity: 0, scale: 0.6 }, animate: POP_MARK_SHOW, exit: { opacity: 0, transition: fade.out } },
+  check: { initial: { opacity: 0, scale: 0.6 }, animate: POP_MARK_SHOW, exit: { opacity: 0, scale: 0.6, transition: fade.out } },
   reduced: { initial: { opacity: 0 }, animate: { opacity: 1, transition: fade.in }, exit: { opacity: 0, transition: fade.out } },
+} as const;
+
+/**
+ * 成功的落点大勾（设备码登录成功、引导程序装好）：一件事做完了的落点，比 popMark 的小标记更该被看见。
+ * 从 0.6 弹出走回弹更足的 base 弹簧，透明度走淡入补间。只有入场，没有退场：减少动画时根部 MotionConfig
+ * 把缩放改成一步到位，只剩淡入，不需要另备一份只动透明度的。
+ */
+export const successMark = {
+  initial: { opacity: 0, scale: 0.6 },
+  animate: { opacity: 1, scale: 1, transition: { ...springs.base, opacity: fade.in } },
 } as const;
 
 /** 否定抖动：只用于会话崩溃时的状态岛与被拒绝的表单字段，每次只播一次，减少动画时不播。每段都走淡入同一条令牌曲线。 */

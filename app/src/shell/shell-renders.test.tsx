@@ -2,6 +2,7 @@
 // @module-tag heavy-page
 // 外壳常驻部件的重渲染次数：下载进度每个任务约 100 ms 一次、游戏日志每 100 ms 一批，侧栏、标题栏、通知栈这些
 // 一直挂着的部件要是随它们重渲染，带布局动画的指示条与状态岛每次都得重新量一遍布局。
+// 开关弹窗同理：弹窗的入场与退场动画在第一遍提交里就创建了，之后再整页重渲染一遍，被堵住的那一段会记进动画时长。
 // 各部件换成计数外壳：外壳直接调用原组件函数，它自己的订阅与父级带来的重渲染都记在外壳上。
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
@@ -15,10 +16,11 @@ import { PAGE_IDS, type Route } from "../state/route";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, emit, instanceDto, resetRecorder, settle } from "../test/launcher";
+import { CONFIRM_CANCEL_LABEL } from "../ui/ConfirmDialog";
 import { AppShell } from "./AppShell";
 import type { PageTable } from "./nav";
 import { createPageRegistry, type PageRegistry } from "./pages";
-import { ShellProvider } from "./shell";
+import { ShellProvider, useShell, type ShellApi } from "./shell";
 import { WindowPortProvider, browserWindowPort } from "./window";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -76,6 +78,14 @@ vi.mock("./DropHint", async (orig) => {
     },
   };
 });
+/** 花瓣层每次渲染收到的 paused（只记显示着的时候）；画布本身不画，这里只看外壳交给它的暂停状态。 */
+const petals = vi.hoisted(() => ({ paused: [] as boolean[] }));
+vi.mock("../art/petals/PetalCanvas", () => ({
+  PetalCanvas: ({ show, paused }: { show: boolean; paused: boolean }) => {
+    if (show) petals.paused.push(paused);
+    return null;
+  },
+}));
 vi.mock("./UpdatePanel", async (orig) => {
   const mod = await orig<typeof import("./UpdatePanel")>();
   return {
@@ -89,11 +99,13 @@ vi.mock("./UpdatePanel", async (orig) => {
 
 let view: Rendered | undefined;
 let launcher: LauncherApi;
+let shell: ShellApi;
 let registry: PageRegistry;
 let warn: MockInstance<typeof console.warn>;
 
 function Probe() {
   launcher = useLauncher();
+  shell = useShell();
   return null;
 }
 
@@ -181,6 +193,54 @@ describe("外壳常驻部件按片订阅", () => {
     }
     expect(launcher.state.tasks[0].progress).toBe(1);
     expect(launcher.state.session?.logs).toHaveLength(20);
+    expect(renders).toEqual(before);
+  });
+
+  it("主页开着花瓣、窗口在前台：开关确认框时侧栏、标题栏、命令面板、通知栈、放置提示、更新面板一次都不重渲染，花瓣框开着时暂停、关上后恢复", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    petals.paused = [];
+    view = render(
+      <WindowPortProvider port={browserWindowPort()}>
+        <AppearanceProvider initial={{ ...DEFAULT_APPEARANCE, petals: true }}>
+          <LauncherProvider>
+            <ShellProvider>
+              <Probe />
+              <AppShell pages={registry} flows={{ login: LoginStub, onboarding: null, createInstance: null }} />
+            </ShellProvider>
+          </LauncherProvider>
+        </AppearanceProvider>
+      </WindowPortProvider>,
+    );
+    await flush();
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await flush();
+    expect(document.querySelector("[data-page]")?.getAttribute("data-page")).toBe("home");
+    expect(petals.paused.at(-1)).toBe(false);
+    for (const count of Object.values(renders)) expect(count).toBeGreaterThan(0);
+
+    const before = { ...renders };
+    const dialogTitle = () => document.querySelector('[role="dialog"]:not([inert]) h2')?.textContent;
+    const cancel = () => {
+      const el = [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find((b) => b.textContent === CONFIRM_CANCEL_LABEL);
+      if (el === undefined) throw new Error("确认框里找不到「取消」");
+      return el;
+    };
+    const rounds = 2 + Math.floor(Math.random() * 4);
+    for (let i = 0; i < rounds; i++) {
+      let answer: Promise<boolean> | undefined;
+      act(() => {
+        answer = shell.confirm({ title: "删除「生存」？", confirmLabel: "删除实例", tone: "danger" });
+      });
+      await flush();
+      expect(dialogTitle()).toBe("删除「生存」？");
+      expect(petals.paused.at(-1)).toBe(true);
+      act(() => cancel().click());
+      await expect(answer).resolves.toBe(false);
+      await flush();
+      expect(petals.paused.at(-1)).toBe(false);
+    }
     expect(renders).toEqual(before);
   });
 });

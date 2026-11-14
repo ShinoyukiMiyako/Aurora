@@ -17,10 +17,10 @@ use petalfall_base::error_with_causes;
 use petalfall_instance::{
     BrokenReason, BrokenVersion, DiscoveredVersion, Disposer, IncompleteMarker, InstanceContent,
     MarkerStore, PETALFALL_META_DIR, PinsViolation, VersionProbe, VersionScan, VersionSettings,
-    VersionSettingsStore, WorldEntry, check_instance_name, count_mod_files, count_worlds,
-    dir_footprint, discover_versions, has_existing_mods_or_saves, is_backup_file_name,
-    is_safe_instance_id, list_version_dirs, list_worlds, probe_version, read_instance_content,
-    resolve_isolation,
+    VersionSettingsStore, WorldEntry, check_instance_name, count_mod_files, count_resource_packs,
+    count_worlds, dir_footprint, discover_versions, has_existing_mods_or_saves,
+    is_backup_file_name, is_safe_instance_id, list_version_dirs, list_worlds, probe_version,
+    read_instance_content, resolve_isolation,
 };
 use petalfall_launch::{QuickPlaySupport, quick_play_support};
 use petalfall_version::{LoaderInfo, VersionJson, identify_mc_version};
@@ -115,6 +115,9 @@ pub struct ReadyVersion {
     pub mod_count: Option<u32>,
     /// 工作目录 `saves/` 下的存档数，口径同 [`count_worlds`]；何时为 `None` 同 `mod_count`。
     pub world_count: Option<u32>,
+    /// 工作目录 `resourcepacks/` 下的资源包数，口径同 [`count_resource_packs`]（与
+    /// [`Petalfall::instance_content`] 列出的资源包一一对应）；何时为 `None` 同 `mod_count`。
+    pub resource_pack_count: Option<u32>,
     /// 隔离的生效值（实例覆盖、全局档位与磁盘上已有数据共同决定）；何时为 `None` 同 `mod_count`。
     pub isolated: Option<bool>,
 }
@@ -602,9 +605,10 @@ async fn summarize(
                 java_major,
                 quick_play,
                 bases,
-                mod_count: workdir.map(|(mods, _, _)| mods),
-                world_count: workdir.map(|(_, worlds, _)| worlds),
-                isolated: workdir.map(|(_, _, isolated)| isolated),
+                mod_count: workdir.map(|facts| facts.mods),
+                world_count: workdir.map(|facts| facts.worlds),
+                resource_pack_count: workdir.map(|facts| facts.resource_packs),
+                isolated: workdir.map(|facts| facts.isolated),
             })
         }
     };
@@ -621,14 +625,23 @@ async fn summarize(
     }
 }
 
-/// 工作目录里列表要的 Mod 数、存档数与隔离生效值。
+/// 工作目录里列表要的 Mod 数、存档数、资源包数与隔离生效值。三个数同是 `u32`，按名字取，免得排错位置。
+#[derive(Clone, Copy)]
+struct WorkdirFacts {
+    mods: u32,
+    worlds: u32,
+    resource_packs: u32,
+    isolated: bool,
+}
+
+/// 任一项读不出就整组不给：列表把原因记进 `dir_error`，几个数一起为 `None`。
 async fn workdir_facts(
     game_dir: &Path,
     id: &str,
     policy: petalfall_instance::IsolationPolicy,
     settings: &VersionSettings,
     version: &DiscoveredVersion,
-) -> Result<(u32, u32, bool)> {
+) -> Result<WorkdirFacts> {
     let resolved = resolve_isolation(
         game_dir,
         id,
@@ -640,7 +653,13 @@ async fn workdir_facts(
     .await?;
     let mods = count_mod_files(&resolved.working_dir.join("mods")).await?;
     let worlds = count_worlds(&resolved.working_dir.join("saves")).await?;
-    Ok((mods, worlds, resolved.isolated))
+    let resource_packs = count_resource_packs(&resolved.working_dir.join("resourcepacks")).await?;
+    Ok(WorkdirFacts {
+        mods,
+        worlds,
+        resource_packs,
+        isolated: resolved.isolated,
+    })
 }
 
 /// 实例备份目录下各存档里的备份文件数，按文件名认，不读清单。
@@ -1247,6 +1266,8 @@ pub(crate) mod tests {
         }
         // 原版不隔离：公共目录里的存档算在原版头上，不算进隔离的模组实例。
         std::fs::create_dir_all(game.join("saves").join("公共存档")).unwrap();
+        std::fs::create_dir_all(game.join("resourcepacks").join("公共材质")).unwrap();
+        std::fs::write(game.join("resourcepacks").join("Fresh.zip"), b"PK").unwrap();
         VersionSettingsStore::for_version_dir(&modded)
             .save(&VersionSettings {
                 description: Some("周末一起玩".into()),
@@ -1285,6 +1306,7 @@ pub(crate) mod tests {
         // 原版正式版按默认档位不隔离，数的是公共 mods 目录（不存在为 0）。
         assert_eq!(vanilla.mod_count, Some(0));
         assert_eq!(vanilla.world_count, Some(1));
+        assert_eq!(vanilla.resource_pack_count, Some(2));
         assert_eq!(vanilla.isolated, Some(false));
         assert!(list[0].incomplete.is_none());
         assert_eq!(list[0].modpack, Readable::Read(None));
@@ -1311,6 +1333,7 @@ pub(crate) mod tests {
         );
         assert_eq!(fabric.mod_count, Some(2), "只数 .jar 与 .jar.disabled");
         assert_eq!(fabric.world_count, Some(2));
+        assert_eq!(fabric.resource_pack_count, Some(0), "公共目录的资源包不算");
         assert_eq!(fabric.isolated, Some(true), "装了加载器的实例默认隔离");
         let Readable::Read(settings) = &list[2].settings else {
             panic!("设置应可读");
@@ -1334,13 +1357,15 @@ pub(crate) mod tests {
         };
         assert_eq!(ready.mod_count, None, "定不了工作目录就不数");
         assert_eq!(ready.world_count, None);
+        assert_eq!(ready.resource_pack_count, None);
         assert_eq!(ready.isolated, None);
     }
 
-    /// 工作目录里的 `mods`、`saves` 打不开（这里是同名普通文件）：只有这个实例数不出来，别的实例照常。
+    /// 工作目录里的 `mods`、`saves`、`resourcepacks` 打不开（这里是同名普通文件）：只有这个实例数不出来，
+    /// 别的实例照常。
     #[tokio::test]
     async fn unreadable_working_dir_is_reported_per_instance_instead_of_failing_the_list() {
-        for blocked in ["mods", "saves"] {
+        for blocked in ["mods", "saves", "resourcepacks"] {
             let tmp = tempfile::tempdir().unwrap();
             let petalfall = petalfall_at(tmp.path());
             let game = petalfall.game_dir().to_path_buf();
@@ -1357,6 +1382,7 @@ pub(crate) mod tests {
             };
             assert_eq!(ready.mod_count, None, "{blocked}");
             assert_eq!(ready.world_count, None, "{blocked}");
+            assert_eq!(ready.resource_pack_count, None, "{blocked}");
             assert_eq!(ready.isolated, None, "{blocked}");
             let reason = list[1].dir_error.as_deref().unwrap();
             assert!(reason.contains(blocked), "{reason}");
@@ -1366,6 +1392,54 @@ pub(crate) mod tests {
             assert_eq!(healthy.mod_count, Some(0), "{blocked}");
             assert_eq!(list[0].dir_error, None, "{blocked}");
         }
+    }
+
+    /// 列表里的资源包数要与内容页读到的资源包一样多：概览卡按前者画读到之前的占位，按后者画读到的行，
+    /// 差一个就会在读到时跳一行。随机摆几类条目，两边都要等于按口径算出的数。
+    #[tokio::test]
+    async fn listed_resource_pack_count_matches_the_instance_content() {
+        let seed = fastrand::get_seed();
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
+        let modded = write_version(&game, "模组", &fabric_json("模组", "1.21.1"));
+        let packs = modded.join("resourcepacks");
+        std::fs::create_dir_all(&packs).unwrap();
+        let zips = fastrand::usize(0..6);
+        let upper_zips = fastrand::usize(0..3);
+        let folders = fastrand::usize(0..4);
+        let others = fastrand::usize(0..4);
+        for i in 0..zips {
+            std::fs::write(packs.join(format!("材质{i}.zip")), b"PK").unwrap();
+        }
+        for i in 0..upper_zips {
+            std::fs::write(packs.join(format!("PACK{i}.ZIP")), b"PK").unwrap();
+        }
+        for i in 0..folders {
+            std::fs::create_dir_all(packs.join(format!("文件夹{i}"))).unwrap();
+        }
+        for i in 0..others {
+            std::fs::write(packs.join(format!("说明{i}.txt")), b"x").unwrap();
+        }
+        // 模组实例隔离，公共目录的资源包不算在它头上。
+        std::fs::create_dir_all(game.join("resourcepacks").join("公共材质")).unwrap();
+        let expected = zips + upper_zips + folders;
+        let context =
+            format!("seed {seed}: {zips} zip, {upper_zips} ZIP, {folders} 文件夹, {others} 其它");
+
+        let list = petalfall.list_instances().await.unwrap();
+        let modded = list.iter().find(|i| i.id == "模组").unwrap();
+        let InstanceVersion::Ready(ready) = &modded.version else {
+            panic!("模组实例应可用：{:?}", modded.version);
+        };
+        assert_eq!(
+            ready.resource_pack_count,
+            Some(expected as u32),
+            "{context}"
+        );
+        let content = petalfall.instance_content("模组").await.unwrap();
+        assert_eq!(content.resource_packs.len(), expected, "{context}");
     }
 
     /// 列出目录之后实例目录就没了（别处正删着它）：这一项拿不到创建时刻，整张列表照常出来。

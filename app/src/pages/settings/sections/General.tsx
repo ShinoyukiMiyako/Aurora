@@ -54,8 +54,11 @@ function AfterLaunchRow() {
   const actions = useLauncherActions();
   const write = useSettingWrite(afterLaunch, GENERAL_COPY.afterLaunch, (next: AfterLaunch) => actions.updateSettings({ afterLaunch: next }));
   const current = afterLaunchOption(write.value);
+  // 选「关闭」时说明多出警示与提醒、行变高，竖向居中的分段控件会正好从指针下挪开：开让位，它从旧位置滑过去。
+  // 分段控件的宽度不随选项变，满足让位的前提
   return (
     <SettingRow
+      reflow
       title={GENERAL_COPY.afterLaunch}
       description={
         <>

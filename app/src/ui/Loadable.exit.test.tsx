@@ -66,12 +66,58 @@ it("骨架退场途中被拉回等待期、内容又到：骨架留在原处接�
   if (layer === null || layer === undefined) throw new Error("骨架没有挂上");
   await waitForFrames(() => expect(layer.style.opacity).toBe("1"));
   view.rerender(tree("content"));
+  // 退场真的播起来了：等到半透明再拉回
+  let exiting = 1;
+  await waitForFrames(() => {
+    exiting = Number(layer.style.opacity);
+    expect(exiting).toBeGreaterThan(0);
+    expect(exiting).toBeLessThan(1);
+  });
   view.rerender(tree("pending"));
-  view.rerender(tree("content"));
-  // 一帧都还没走，骨架仍看得见：这一刻把它拿掉就是一帧消失
+  await act(async () => {});
   expect(find("[data-skeleton]")?.parentElement).toBe(layer);
-  expect(Number(layer.style.opacity)).toBeGreaterThan(0);
+  expect(layer.hasAttribute("data-pending")).toBe(true);
+  // 拉回之后接着往 0 走了几帧，还没走到 0
+  let pulled = exiting;
+  await waitForFrames(() => {
+    pulled = Number(layer.style.opacity);
+    expect(pulled).toBeLessThan(exiting);
+    expect(pulled).toBeGreaterThan(0);
+  });
+  view.rerender(tree("content"));
+  // 骨架仍半透明：这一刻把它拿掉就是一帧消失
+  expect(find("[data-skeleton]")?.parentElement).toBe(layer);
+  expect(Number(layer.style.opacity)).toBe(pulled);
   await waitForFrames(() => expect(find("[data-skeleton]")).toBeNull());
+});
+
+it("骨架退场途中被拉回等待期、已经淡到 0 之后内容才到：同一次提交里直接拿掉，不再播一段看不见的退场", async () => {
+  view = render(tree("pending"));
+  view.rerender(tree("skeleton"));
+  const layer = find("[data-skeleton]")?.parentElement;
+  if (layer === null || layer === undefined) throw new Error("骨架没有挂上");
+  await waitForFrames(() => expect(layer.style.opacity).toBe("1"));
+  view.rerender(tree("content"));
+  await waitForFrames(() => expect(Number(layer.style.opacity)).toBeLessThan(1));
+  view.rerender(tree("pending"));
+  await waitForFrames(() => expect(layer.style.opacity).toBe("0"));
+  expect(find("[data-skeleton]")?.parentElement).toBe(layer);
+  expect(layer.hasAttribute("data-pending")).toBe(true);
+  view.rerender(tree("content"));
+  expect(find("[data-skeleton]")).toBeNull();
+  expect(find("[data-content]")?.parentElement?.hasAttribute("inert")).toBe(false);
+});
+
+it("骨架显出来过、调用方直接把它退回等待期：淡到 0 之后内容到达，同样同一次提交里拿掉", async () => {
+  view = render(tree("skeleton"));
+  const layer = find("[data-skeleton]")?.parentElement;
+  if (layer === null || layer === undefined) throw new Error("骨架没有挂上");
+  expect(layer.style.opacity).toBe("1");
+  view.rerender(tree("pending"));
+  await waitForFrames(() => expect(layer.style.opacity).toBe("0"));
+  expect(find("[data-skeleton]")?.parentElement).toBe(layer);
+  view.rerender(tree("content"));
+  expect(find("[data-skeleton]")).toBeNull();
 });
 
 it("重新加载再回来：旧内容淡完移除之后，新的内容层从透明淡入", async () => {

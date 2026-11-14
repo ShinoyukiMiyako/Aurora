@@ -10,6 +10,7 @@ import { useShell } from "../../shell/shell";
 import { useLauncherSelector, useNow } from "../../state/launcher";
 import { usePlayStats } from "../../state/queries/home";
 import type { PageProps } from "../../state/route";
+import type { SliceStatus } from "../../state/store";
 import { Bento } from "../../ui/Bento";
 import type { ResponsiveValue } from "../../ui/Card";
 import { monthOf } from "../../ui/CalendarHeatmap";
@@ -19,15 +20,29 @@ import { ContinueCard } from "./ContinueCard";
 import { GreetingCard } from "./GreetingCard";
 import { continueTarget } from "./instances";
 import { NewsCard } from "./NewsCard";
-import { CalendarCard, InsightsCard } from "./PlayCards";
+import { CalendarCard, InsightsCard, type InstancesView } from "./PlayCards";
 import type { PlayView } from "./play-view";
 import { RecentStrip } from "./RecentStrip";
 import { ServersCard } from "./ServersCard";
 import s from "./home.module.css";
 
+/**
+ * 洞察与日历里要按实例列表算的几块。列表第一次读完之前照加载门画骨架；读完过之后，读取出错时点重试的那一轮不再开门，
+ * 留着上一次的结论，结果回来原位换掉：与大卡一样，不为重试先淡出成隐身的骨架、很快又失败时再淡回来。
+ */
+function useInstancesView(kind: SliceStatus["kind"]): InstancesView {
+  const [settled, setSettled] = useState<Exclude<SliceStatus["kind"], "loading"> | null>(kind === "loading" ? null : kind);
+  const outcome = kind === "loading" ? settled : kind;
+  if (outcome !== settled) setSettled(outcome);
+  const gate = useLoadingGate(outcome === null);
+  return { view: gate.view, failed: outcome === "error" };
+}
+
 export default function HomePage(_props: PageProps<"home">) {
   // 主页根与各张卡只订阅自己用到的那几片：游戏运行时日志每 100 ms 一批，整份订阅会让整块 bento 跟着重渲染
-  const instancesReady = useLauncherSelector((s) => s.status.instances.kind === "ready");
+  const instancesKind = useLauncherSelector((s) => s.status.instances.kind);
+  const instancesReady = instancesKind === "ready";
+  const instancesView = useInstancesView(instancesKind);
   // 当前实例记在设置里。设置晚于实例列表到达时先算出来的是最近玩的那个，读到设置又改成配置里的当前实例，
   // 大卡会先指错再换一面：两样都读完才定下大卡指向谁（设置读取出错也算读完，按没设过处理）
   const settingsSettled = useLauncherSelector((s) => s.status.settings.kind !== "loading");
@@ -58,7 +73,7 @@ export default function HomePage(_props: PageProps<"home">) {
   const target = instancesReady && settingsSettled ? continueTarget(instances, selectedInstanceId) : null;
 
   const insights = (span: ResponsiveValue, className?: string) => (
-    <InsightsCard span={span} play={play} today={today} selected={selected} onPickDay={pickDay} className={className} />
+    <InsightsCard span={span} play={play} instances={instancesView} today={today} selected={selected} onPickDay={pickDay} className={className} />
   );
 
   return (
@@ -71,7 +86,7 @@ export default function HomePage(_props: PageProps<"home">) {
       </Bento>
       <RecentStrip currentId={target === null ? null : target.id} />
       <Bento>
-        <CalendarCard span={{ compact: 7, wide: 5 }} play={play} today={today} month={month} onMonthChange={setMonth} selected={selected} onSelect={setSelected} />
+        <CalendarCard span={{ compact: 7, wide: 5 }} play={play} instances={instancesView} today={today} month={month} onMonthChange={setMonth} selected={selected} onSelect={setSelected} />
         {!wide && insights(5)}
         <NewsCard span={{ compact: 7, wide: 4 }} />
         <ServersCard span={{ compact: 5, wide: 3 }} />

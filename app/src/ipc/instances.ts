@@ -88,6 +88,11 @@ export interface InstanceDto {
   mod_count: number | null;
   /** 工作目录 saves/ 下的存档数（每个文件夹算一个）；何时为 null 同 mod_count。 */
   world_count: number | null;
+  /**
+   * 工作目录 resourcepacks/ 下的资源包数，口径同读实例内容时列的资源包：文件夹与 .zip 文件（扩展名不分大小写）各算一个，
+   * 不读压缩包、不进子目录；何时为 null 同 mod_count。
+   */
+  resource_pack_count: number | null;
   /** 隔离的生效值（实例覆盖、全局档位与已有数据共同决定）；何时为 null 同 mod_count。 */
   isolated: boolean | null;
   description: string | null;
@@ -114,7 +119,7 @@ export interface InstanceDto {
   incomplete: IncompleteDto | null;
   /** 实例目录创建时刻（毫秒时间戳）；文件系统不记录或目录读不出时为 null。 */
   created_at: number | null;
-  /** 实例目录或工作目录读不出来的原因；此时 created_at 或 mod_count、world_count、isolated 为 null。 */
+  /** 实例目录或工作目录读不出来的原因；此时 created_at 或 mod_count、world_count、resource_pack_count、isolated 为 null。 */
   dir_error: string | null;
   /** 有几件事并行时报最值得界面知道的那一件：实例自己的事优先，其次 modifying，最后 inherited。 */
   activity: InstanceActivity | null;

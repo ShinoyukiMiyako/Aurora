@@ -101,6 +101,13 @@ pub async fn count_worlds(saves_dir: &Path) -> Result<u32> {
     blocking(saves_dir, move || count_worlds_in(&dir)).await
 }
 
+/// 统计 `resourcepacks_dir` 下的资源包数，口径与 [`read_instance_content`] 列出的资源包相同（文件夹与 `.zip`
+/// 文件各算一个），但不量大小、不读压缩包，供列表页用。目录不存在为 0。
+pub async fn count_resource_packs(resourcepacks_dir: &Path) -> Result<u32> {
+    let dir = resourcepacks_dir.to_path_buf();
+    blocking(resourcepacks_dir, move || count_packs_in(&dir)).await
+}
+
 /// 统计 `mods_dir` 下的 Mod 文件数：`.jar` 与停用的 `.jar.disabled`，不解析内容。目录不存在为 0。
 pub async fn count_mod_files(mods_dir: &Path) -> Result<u32> {
     let dir = mods_dir.to_path_buf();
@@ -283,8 +290,7 @@ fn packs_in(dir: &Path) -> Result<Vec<PackEntry>> {
         let path = entry.path();
         let meta = metadata(&path)?;
         let file_name = entry.file_name().to_string_lossy().into_owned();
-        let is_zip = file_name.to_ascii_lowercase().ends_with(".zip");
-        if !(meta.is_dir() || (meta.is_file() && is_zip)) {
+        if !is_pack(&file_name, meta.file_type()) {
             continue;
         }
         let size_bytes = if meta.is_dir() {
@@ -301,6 +307,40 @@ fn packs_in(dir: &Path) -> Result<Vec<PackEntry>> {
     }
     packs.sort_by(|a, b| a.file_name.cmp(&b.file_name));
     Ok(packs)
+}
+
+/// 资源包与光影包目录里的一项算不算包：文件夹算，文件名不分大小写以 `.zip` 结尾的普通文件算，其它都不算。
+/// `file_type` 要不跟随链接取，所以指向别处的链接（Windows 上含目录联接）不算。列出内容与列表页计数都经它
+/// 判断：两边各写一份，概览卡读到之前按计数画的占位就会和读到的行数对不上。
+fn is_pack(file_name: &str, file_type: std::fs::FileType) -> bool {
+    file_type.is_dir() || (file_type.is_file() && file_name.to_ascii_lowercase().ends_with(".zip"))
+}
+
+fn count_packs_in(dir: &Path) -> Result<u32> {
+    let Some(entries) = read_dir_entries(dir)? else {
+        return Ok(0);
+    };
+    count_pack_entries(&entries)
+}
+
+/// 列表页对每个实例都数一遍资源包，类型取列目录时已经拿到的信息（与 [`packs_in`] 的 `symlink_metadata`
+/// 一样不跟随链接），不逐个 stat、不量文件夹包的大小。平台需要补查类型时条目已经不在，就当它不在。
+fn count_pack_entries(entries: &[std::fs::DirEntry]) -> Result<u32> {
+    let mut count = 0;
+    for entry in entries {
+        match entry.file_type() {
+            Ok(file_type) if is_pack(&entry.file_name().to_string_lossy(), file_type) => count += 1,
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(Error::Io {
+                    path: entry.path(),
+                    source,
+                });
+            }
+        }
+    }
+    Ok(count)
 }
 
 fn count_worlds_in(saves: &Path) -> Result<u32> {
@@ -755,6 +795,119 @@ mod tests {
             vec![("BSL_v8.2.09.zip", true), ("Complementary.zip", false)]
         );
         assert!(content.worlds.is_empty());
+    }
+
+    /// 列表页的资源包数与内容页列出的资源包对得上：文件夹（名字带不带 .zip 都算）与文件名不分大小写以 .zip
+    /// 结尾的文件各算一个，其它文件不算。不量大小、不读压缩包，坏掉的压缩包内容页照样列出，这里也照样算。
+    #[tokio::test]
+    async fn resource_pack_count_matches_the_pack_list_without_measuring() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = tmp.path();
+        let packs = wd.join("resourcepacks");
+        assert_eq!(count_resource_packs(&packs).await.unwrap(), 0, "目录不存在");
+        std::fs::create_dir_all(&packs).unwrap();
+        assert_eq!(count_resource_packs(&packs).await.unwrap(), 0, "空目录");
+        write(&packs.join("樱花材质").join("pack.mcmeta"), b"{}");
+        assert_eq!(
+            count_resource_packs(&packs).await.unwrap(),
+            1,
+            "只有一个文件夹包"
+        );
+
+        write(&packs.join("Faithful 32x.zip"), &[0u8; 100]);
+        write(&packs.join("broken.zip"), b"not a zip");
+        write(&packs.join("UPPER.ZIP"), b"PK");
+        std::fs::create_dir_all(packs.join("unpacked.zip")).unwrap();
+        write(&packs.join("readme.txt"), b"x");
+        write(&packs.join("old.zip.bak"), b"PK");
+        write(&packs.join("zip"), b"PK");
+
+        assert_eq!(count_resource_packs(&packs).await.unwrap(), 5);
+        assert_eq!(
+            read_instance_content(wd)
+                .await
+                .unwrap()
+                .resource_packs
+                .len(),
+            5
+        );
+    }
+
+    /// 列出资源包目录之后有包被删掉（玩家在游戏外整理资源包）：计数照常给出，不让整张实例列表失败。
+    /// 类型取自列目录时拿到的信息，所以按列目录那一刻计数。
+    #[test]
+    fn resource_pack_count_survives_an_entry_vanishing_after_listing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let packs = tmp.path().join("resourcepacks");
+        write(&packs.join("Fresh.zip"), b"PK");
+        write(&packs.join("删掉的.zip"), b"PK");
+        std::fs::create_dir_all(packs.join("删掉的文件夹")).unwrap();
+        write(&packs.join("readme.txt"), b"x");
+        let entries = read_dir_entries(&packs).unwrap().unwrap();
+        assert_eq!(entries.len(), 4);
+
+        std::fs::remove_file(packs.join("删掉的.zip")).unwrap();
+        std::fs::remove_dir(packs.join("删掉的文件夹")).unwrap();
+        assert_eq!(count_pack_entries(&entries).unwrap(), 3);
+        assert_eq!(count_packs_in(&packs).unwrap(), 1);
+    }
+
+    /// 资源包目录里指向别处的链接：内容页按不跟随链接取的类型判断，链接既不是文件夹也不是普通文件，不列出；
+    /// 计数用同一个判断，同样不算，否则概览卡读到之前的占位会比读到的行数多。
+    #[test]
+    fn links_in_resourcepacks_are_neither_listed_nor_counted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        write(&outside.join("Linked Pack").join("pack.mcmeta"), b"{}");
+        write(&outside.join("linked.zip"), b"PK");
+        let packs = tmp.path().join("resourcepacks");
+        write(&packs.join("Real.zip"), b"PK");
+        let links = link_packs(&packs, &outside);
+        eprintln!("建成的链接：{links:?}");
+
+        let listed: Vec<String> = packs_in(&packs)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.file_name)
+            .collect();
+        assert_eq!(listed, vec!["Real.zip"]);
+        assert_eq!(count_packs_in(&packs).unwrap(), 1);
+    }
+
+    /// 在 `packs` 里建指向 `outside` 下文件夹包与压缩包的链接，返回建成的。目录联接不要权限，一定建得出来；
+    /// 符号链接要开发者模式或管理员，建不出来就只测联接，建没建成不影响断言。
+    #[cfg(windows)]
+    fn link_packs(packs: &Path, outside: &Path) -> Vec<&'static str> {
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(packs.join("Junction Pack"))
+            .arg(outside.join("Linked Pack"))
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{made:?}");
+        let mut links = vec!["Junction Pack"];
+        if std::os::windows::fs::symlink_dir(
+            outside.join("Linked Pack"),
+            packs.join("Symlink Pack"),
+        )
+        .is_ok()
+        {
+            links.push("Symlink Pack");
+        }
+        if std::os::windows::fs::symlink_file(outside.join("linked.zip"), packs.join("linked.zip"))
+            .is_ok()
+        {
+            links.push("linked.zip");
+        }
+        links
+    }
+
+    #[cfg(unix)]
+    fn link_packs(packs: &Path, outside: &Path) -> Vec<&'static str> {
+        std::os::unix::fs::symlink(outside.join("Linked Pack"), packs.join("Symlink Pack"))
+            .unwrap();
+        std::os::unix::fs::symlink(outside.join("linked.zip"), packs.join("linked.zip")).unwrap();
+        vec!["Symlink Pack", "linked.zip"]
     }
 
     #[tokio::test]

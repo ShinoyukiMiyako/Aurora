@@ -7,8 +7,10 @@ import { Icon } from "../../art/Icon";
 import type { InstanceCover } from "../../art/iso/covers";
 import type { LoaderKind } from "../../domain/types";
 import { fade } from "../../lib/motion";
+import { useReflow } from "../../lib/reflow";
 import { Slide } from "../../lib/slide";
 import { useAppearance } from "../../state/appearance";
+import { Appear } from "../../ui/Appear";
 import { GlyphSlot } from "../../ui/Button";
 import { Cover } from "../../ui/Cover";
 import { LoaderDot } from "../../ui/LoaderTag";
@@ -91,6 +93,9 @@ export function StepNav({ visible, current, reached, values, onJump }: StepNavPr
   const markRef = useRef<HTMLLIElement>(null);
   const slide = useRef<Slide | null>(null);
   const reduced = useReducedMotionConfig() === true;
+  // 值行出没时文字列变高变矮，在按钮里纵向居中的标签跟着上下移 7 px：每一行各自让位，标签从原处滑过去。
+  // 没有值的行标签与圆点照旧居中，不为值行常驻留空。同一个回调挂到每一行上，各行各自观察、各自停止
+  const rowReflow = useReflow<HTMLButtonElement>();
   useLayoutEffect(() => {
     const list = listRef.current;
     const mark = markRef.current;
@@ -118,6 +123,7 @@ export function StepNav({ visible, current, reached, values, onJump }: StepNavPr
         return (
           <li key={id}>
             <button
+              ref={rowReflow}
               type="button"
               className={styles.stepButton}
               data-state={state}
@@ -132,7 +138,8 @@ export function StepNav({ visible, current, reached, values, onJump }: StepNavPr
               </span>
               <span className={styles.stepText}>
                 <span className={styles.stepLabel}>{STEP_LABEL[id]}</span>
-                {value !== null && <span className={styles.stepValue}>{value}</span>}
+                {/* 走到这一步、有了值时才出现：淡入，退场时抽出布局原地淡出 */}
+                <Appear itemClassName={styles.stepValue}>{value !== null && <span key="value">{value}</span>}</Appear>
               </span>
             </button>
           </li>

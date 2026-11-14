@@ -44,6 +44,7 @@ import {
   modTotals,
   overridesHeap,
   overviewBanner,
+  packsPlaceholderRows,
   pageViewEqual,
   parseDimension,
   peekLayout,
@@ -808,6 +809,22 @@ describe("存档卡加载期的占位", () => {
   it("没有存档画空状态的轮廓；存档数读不出时按 3 行", () => {
     expect(worldsPlaceholder(0)).toEqual({ kind: "empty" });
     expect(worldsPlaceholder(null)).toEqual({ kind: "rows", rows: 3, foot: false });
+  });
+});
+
+describe("资源包与光影卡加载期的占位", () => {
+  it("光影一行加上资源包的行数，与读到之后画的行一样多：没有资源包时也有一行「未添加资源包」", () => {
+    expect(packsPlaceholderRows(0)).toBe(2);
+    expect(packsPlaceholderRows(1)).toBe(2);
+    expect(packsPlaceholderRows(2)).toBe(3);
+    expect(packsPlaceholderRows(7)).toBe(8);
+    // 列表不分页、不设上限，占位也不设
+    const n = 2 + Math.floor(Math.random() * 300);
+    expect(packsPlaceholderRows(n), `资源包 ${n} 个`).toBe(n + 1);
+  });
+
+  it("资源包数读不出时按光影一行加资源包一行", () => {
+    expect(packsPlaceholderRows(null)).toBe(2);
   });
 });
 

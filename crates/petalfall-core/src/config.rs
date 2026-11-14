@@ -3,8 +3,8 @@
 //! 门面持有一份可读写的全局配置：下载源与版本列表源各自的三档策略（对应功能矩阵「文件下载源 /
 //! 版本列表源」两项独立三档设置）、下载并发、默认内存、版本隔离档位、微软 client_id、可选自定义
 //! 游戏/缓存目录，以及启动后窗口行为、默认 Java、主页固定的服务器、并存的游戏目录、首次启动
-//! 是否完成、启动器更新的检查偏好、更新通道与各通道见过的版本，以及界面语言。凭据不进这里（归
-//! petalfall-auth 的加密存储）。
+//! 是否完成、启动器更新的检查偏好、更新通道与各通道见过的版本、界面语言，以及前端首帧占位用的界面形状缓存。
+//! 凭据不进这里（归 petalfall-auth 的加密存储）。
 //!
 //! 配置以 JSON 落在数据目录（`%LOCALAPPDATA%\Petalfall\config.json`）。缺失时用全默认值；损坏时
 //! [`ConfigStore::load`] 冒泡报错，而不是静默用默认覆盖（避免用户改坏的配置被无声吞掉）。桌面应用启动
@@ -29,6 +29,7 @@ use serde_json::Value;
 use crate::appearance::Appearance;
 use crate::error::{CoreError, Result};
 use crate::facade::Petalfall;
+use crate::ui_shape::UiShape;
 
 /// 下载源三档策略。对应功能矩阵的「文件下载源 / 版本列表源」三档设置。
 ///
@@ -246,6 +247,10 @@ pub struct PetalfallConfig {
     pub new_instance_template: bool,
     /// 存档备份。旧配置没有这一项时取默认值。
     pub world_backup: WorldBackupSettings,
+    /// 界面形状缓存：几处由异步数据决定的版面上次落定时的样子，前端首帧按它占位。旧配置没有这一项时取默认值；
+    /// 读不懂时只有这一段按默认读，不算配置损坏（见 [`crate::ui_shape`]）。
+    #[serde(deserialize_with = "crate::ui_shape::read_lenient")]
+    pub ui_shape: UiShape,
     /// 这个版本不认识的顶层设置（多半是更新的版本写的），原样留着、落盘时原样写回。
     ///
     /// 配置整份按内存里的值落盘：不留着的话，降级之后随便改一项设置，新版本的设置就从文件里消失了，
@@ -289,6 +294,7 @@ impl Default for PetalfallConfig {
             skip_accessibility_onboarding: true,
             new_instance_template: true,
             world_backup: WorldBackupSettings::default(),
+            ui_shape: UiShape::default(),
             unrecognized: serde_json::Map::new(),
             carried_over: CarriedOver::default(),
         }
@@ -727,6 +733,11 @@ mod tests {
         assert!(c.extra_java_paths.is_empty());
         assert!(!c.prefer_dedicated_gpu, "独显偏好默认关");
         assert!(c.skip_accessibility_onboarding, "默认跳过无障碍引导");
+        assert_eq!(
+            (c.ui_shape.recent_cards, c.ui_shape.repair_banner),
+            (0, false),
+            "没记过形状时首帧不画最近游玩与修复横幅的占位"
+        );
     }
 
     /// 没有手动 Java 与独显偏好两项的旧配置照常读入：两项取默认，其余字段原样保留；写过之后原样读回。
@@ -2451,5 +2462,180 @@ mod tests {
             assert!(!table.contains(key), "{key}：{table}");
             assert!(ENUM_FIELDS.iter().all(|field| field.path != key), "{key}");
         }
+    }
+
+    /// 界面形状是认识的顶层键：读进自己的字段而不是保留区，只写了一部分时缺的那项取默认，落盘写出完整的两项。
+    #[tokio::test]
+    async fn ui_shape_is_a_known_top_level_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{"download_concurrency": 8, "ui_shape": {"recent_cards": 3}}"#,
+        )
+        .await
+        .unwrap();
+        let store = ConfigStore::at(&path);
+        let (config, recovery) = store.load_or_preserve().await.unwrap();
+        assert_eq!(recovery, None);
+        assert!(
+            config.unrecognized.is_empty(),
+            "ui_shape 不该落进保留区：{:?}",
+            config.unrecognized
+        );
+        assert_eq!(
+            config.ui_shape,
+            UiShape {
+                recent_cards: 3,
+                repair_banner: false,
+            }
+        );
+        assert_eq!(config.download_concurrency, 8);
+
+        store.save(&config).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(
+            raw["ui_shape"],
+            serde_json::json!({ "recent_cards": 3, "repair_banner": false })
+        );
+    }
+
+    /// 旧配置没有 ui_shape 时取默认、不算任何处置；改过之后落盘再读回逐项相等。
+    #[tokio::test]
+    async fn ui_shape_defaults_for_old_config_and_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{"download_concurrency": 12, "language": "en-US"}"#,
+        )
+        .await
+        .unwrap();
+        let store = ConfigStore::at(&path);
+        let (mut config, recovery) = store.load_or_preserve().await.unwrap();
+        assert_eq!(recovery, None);
+        assert_eq!(config.ui_shape, UiShape::default());
+        assert_eq!(config.download_concurrency, 12);
+
+        config.ui_shape = UiShape {
+            recent_cards: 6,
+            repair_banner: true,
+        };
+        store.save(&config).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(
+            raw["ui_shape"],
+            serde_json::json!({ "recent_cards": 6, "repair_banner": true })
+        );
+        let reloaded = store.load().await.unwrap();
+        assert_eq!(reloaded.ui_shape, config.ui_shape);
+        assert_eq!(reloaded, config);
+    }
+
+    /// ui_shape 读不懂（越界、类型不对、更新的版本换了写法）时只有这一段按默认读：不改名、不重置、不报处置，
+    /// 文件原样不动，别的设置照常读入。之后落盘写出的是默认形状。
+    #[tokio::test]
+    async fn unreadable_ui_shape_falls_back_alone() {
+        for shape in [
+            r#"{"recent_cards": 7, "repair_banner": true}"#,
+            r#"{"recent_cards": 256}"#,
+            r#"{"recent_cards": -1}"#,
+            r#"{"recent_cards": 2.5}"#,
+            r#"{"recent_cards": "4"}"#,
+            r#"{"repair_banner": "yes"}"#,
+            r#"{"recent_cards": null}"#,
+            r#""wide""#,
+            r#"6"#,
+            r#"null"#,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.json");
+            let original = format!(
+                r#"{{"download_concurrency": 8, "language": "en-US", "ui_shape": {shape}}}"#
+            );
+            tokio::fs::write(&path, &original).await.unwrap();
+            let store = ConfigStore::at(&path);
+            let (config, recovery) = store.load_or_preserve().await.unwrap();
+            assert_eq!(recovery, None, "{shape}");
+            assert_eq!(config.ui_shape, UiShape::default(), "{shape}");
+            assert_eq!(config.download_concurrency, 8, "{shape}");
+            assert_eq!(config.language, UiLanguage::EnUs, "{shape}");
+            assert!(config.unrecognized.is_empty(), "{shape}");
+            assert_eq!(
+                tokio::fs::read_to_string(&path).await.unwrap(),
+                original,
+                "{shape}：读的时候不改写文件"
+            );
+            assert_eq!(
+                std::fs::read_dir(dir.path()).unwrap().count(),
+                1,
+                "{shape}：不该改名留存"
+            );
+
+            store.save(&config).await.unwrap();
+            let raw: Value =
+                serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+            assert_eq!(
+                raw["ui_shape"],
+                serde_json::json!({ "recent_cards": 0, "repair_banner": false }),
+                "{shape}"
+            );
+        }
+    }
+
+    /// 枚举退回默认走的是摘掉取值后再解析一遍的路径，读不懂的 ui_shape 在这条路径上同样只退回自己。
+    #[tokio::test]
+    async fn unreadable_ui_shape_alongside_an_unknown_enum_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{"language": "fr-FR", "download_concurrency": 8, "ui_shape": {"recent_cards": 9}}"#,
+        )
+        .await
+        .unwrap();
+        let (config, recovery) = ConfigStore::at(&path).load_or_preserve().await.unwrap();
+        assert_eq!(
+            recovery,
+            Some(ConfigRecovery::FieldsReset(vec![ConfigFieldReset {
+                field: "language",
+                value: "fr-FR".into(),
+            }])),
+            "界面形状是缓存，不作为退回默认的配置项报给界面"
+        );
+        assert_eq!(config.ui_shape, UiShape::default());
+        assert_eq!(config.download_concurrency, 8);
+    }
+
+    /// ui_shape 段里不认识的键（更新的版本加的）不影响认识的两项；它是缓存，不认识的键不保留，落盘时丢掉。
+    #[tokio::test]
+    async fn unknown_keys_inside_ui_shape_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{"ui_shape": {"recent_cards": 2, "repair_banner": true, "pack_rows": [{"instance": "a", "resource_packs": 3}]}}"#,
+        )
+        .await
+        .unwrap();
+        let store = ConfigStore::at(&path);
+        let (config, recovery) = store.load_or_preserve().await.unwrap();
+        assert_eq!(recovery, None);
+        assert_eq!(
+            config.ui_shape,
+            UiShape {
+                recent_cards: 2,
+                repair_banner: true,
+            }
+        );
+        assert!(config.unrecognized.is_empty());
+        assert_eq!(config.carried_over, CarriedOver::default());
+
+        store.save(&config).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(
+            raw["ui_shape"],
+            serde_json::json!({ "recent_cards": 2, "repair_banner": true })
+        );
     }
 }

@@ -84,10 +84,10 @@ function SectionSkeleton({ section }: { section: GatedSection }) {
  * 门要是跟着面板重挂，就会从头再等一个出现延迟，骨架先隐身再淡入，内容列空白一下。
  */
 export function useSettingsLoad(): LoadingView {
-  const status = useLauncherSelector((s) => s.status.settings);
-  const loaded = useLauncherSelector((s) => s.settings !== null);
-  // 读失败不算加载中：错误卡换下骨架；点重试才开始新一轮，骨架照样等满延迟才显形
-  return useLoadingGate(!loaded && status.kind === "loading").view;
+  // 读失败不算加载中：错误卡换下骨架；点重试才开始新一轮，骨架照样等满延迟才显形。
+  // 只选这一个布尔：设置页根挂着这个钩子，选整个状态对象的话，配置读到之后每次重读的状态换新都会让整页连同导航与分区重渲染
+  const loading = useLauncherSelector((s) => s.settings === null && s.status.settings.kind === "loading");
+  return useLoadingGate(loading).view;
 }
 
 /** view 取自 useSettingsLoad。 */

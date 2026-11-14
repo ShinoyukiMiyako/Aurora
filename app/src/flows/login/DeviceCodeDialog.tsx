@@ -16,7 +16,7 @@ import { ACTION_ERROR, MICROSOFT_LOGIN_COPY, microsoftLoginFailure, withoutSetti
 import type { Account } from "../../domain/adapt";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { useLoadingGate, type LoadingView } from "../../lib/loading-gate";
-import { codeCell, fade, springs } from "../../lib/motion";
+import { codeCell, successMark } from "../../lib/motion";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { errorDetailOf } from "../../state/errors";
@@ -319,7 +319,7 @@ function Success({ account, updated }: { account: Account; updated: boolean }) {
   const skin = useLoginSkin(account.uuid);
   return (
     <div className={styles.success}>
-      <motion.span className={styles.successMark} initial={{ opacity: 0, scale: 0.6 }} animate={{ opacity: 1, scale: 1, transition: { ...springs.base, opacity: fade.in } }} aria-hidden="true">
+      <motion.span className={styles.successMark} {...successMark} aria-hidden="true">
         <Icon name="check" size={24} />
       </motion.span>
       <p className={styles.successTitle} role="status">

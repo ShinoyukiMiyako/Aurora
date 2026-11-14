@@ -371,7 +371,8 @@ describe("第三方许可清单", () => {
     expect(loadingNoteVisible()).toBe(false);
     expect(listBusy()).toBe(true);
     expect(listStatus().textContent).toBe("");
-    expect(listStatus().className).toBe(styles.status);
+    // 播报区紧挨在加载占位的根前面，是它的兄弟而不在带 aria-busy 的根里：忙碌区域里的变化读屏可以攒到忙完再报
+    expect(listStatus().nextElementSibling?.getAttribute("aria-busy")).toBe("true");
     expect(packageList()).toBeNull();
     expect(countText()).toBe(legal.thirdPartyHeading);
 
@@ -427,17 +428,10 @@ describe("第三方许可清单", () => {
     }
   });
 
-  it("播报区只给读屏：脱离底块的布局、裁成看不见，填字时清单与骨架都不挪", () => {
+  it("播报区交给 Loadable 的 busyLabel：协议页样式表里不再自带一份视觉隐藏规则", () => {
     // jsdom 不做布局，直接读样式表
     const css = readFileSync(resolve(__dirname, "Legal.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
-    const rule = /(?:^|\n)\.status\s*\{([^}]*)\}/.exec(css)?.[1];
-    if (rule === undefined) throw new Error("样式表里没有 .status");
-    const decls = new Map(rule.split(";").flatMap((decl) => (decl.includes(":") ? [[decl.slice(0, decl.indexOf(":")).trim(), decl.slice(decl.indexOf(":") + 1).trim()] as const] : [])));
-    expect(decls.get("position")).toBe("absolute");
-    expect(decls.get("width")).toBe("1px");
-    expect(decls.get("height")).toBe("1px");
-    expect(decls.get("overflow")).toBe("hidden");
-    expect(decls.get("clip-path")).toBe("inset(50%)");
+    expect(css).not.toMatch(/clip-path:\s*inset\(50%\)/);
   });
 
   it("读失败时说明并带上原文，协议全文还在", async () => {

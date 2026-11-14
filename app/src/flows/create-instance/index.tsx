@@ -11,8 +11,8 @@
 // 确认步的开局选项（沿用默认设置、加载器的 API、性能组合）的勾选记在这里而不是确认步里：跳回前面改了加载器或版本
 // 再回来，用户动过的勾选还在。默认设置与开局 Mod 从选定加载器起就开始查，到确认步时多半已经查好。
 
-import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from "framer-motion";
-import { useMemo, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type Ref } from "react";
+import { AnimatePresence, motion, useComposedRefs, useIsPresent, useReducedMotionConfig, type AnimationDefinition } from "framer-motion";
+import { useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type Ref } from "react";
 import { DEFAULT_COVER, type InstanceCover } from "../../art/iso/covers";
 import { InstanceAvatarBase } from "../../art/iso/InstanceAvatarBase";
 import { ACTION_ERROR, coverLabel, LOADER_NAME } from "../../copy/flows";
@@ -33,7 +33,7 @@ import { Appear } from "../../ui/Appear";
 import { Button } from "../../ui/Button";
 import { KeyHint } from "../../ui/KeyHint";
 import { LabelSlot } from "../../ui/LabelSlot";
-import { Modal } from "../../ui/Modal";
+import { AUTOFOCUS_ATTR, Modal } from "../../ui/Modal";
 import { CREATE_COPY } from "./copy";
 import styles from "./create.module.css";
 import {
@@ -77,13 +77,60 @@ interface StepPaneProps {
   children: ReactNode;
 }
 
-/** 换步时新旧两步短暂并存：正在退场的那一步点不到、聚焦不到，读屏也不再读它，操作只落在新的一步上。 */
+/** 焦点已经没有着落：落回 body、所在节点已卸载，或还停在带 inert 的退场层里（浏览器随后也会把它挪回 body）。 */
+function focusLost(): boolean {
+  const active = document.activeElement;
+  return active === null || active === document.body || !active.isConnected || active.closest("[inert]") !== null;
+}
+
+function firstLive(pane: HTMLElement, selector: string): HTMLElement | null {
+  for (const el of pane.querySelectorAll<HTMLElement>(selector)) if (el.closest("[inert]") === null) return el;
+  return null;
+}
+
+/**
+ * 换步后焦点的落点：名称输入框，其次单选组的停靠点（已选项），都没有时（清单还在读、读不到、确认步）落到标题。
+ * 不取文档顺序里的第一个可聚焦控件：版本步排最前的是搜索框，落在那里方向键动的是光标而不是选中项；
+ * 外观步是「随机一块」、确认步是开局选项的复选框，Enter 归它们自己，连按 Enter 会换掉封面、改掉勾选。
+ */
+function stepFocusTarget(pane: HTMLElement): HTMLElement {
+  const target = firstLive(pane, `[${AUTOFOCUS_ATTR}]`) ?? firstLive(pane, '[role="radio"][tabindex="0"]') ?? firstLive(pane, `.${styles.stepTitle}`);
+  if (target === null) throw new Error("新的一步里没有标题，换步后的焦点无处可落");
+  return target;
+}
+
+/**
+ * 换步时新旧两步短暂并存：正在退场的那一步点不到、聚焦不到，读屏也不再读它，操作只落在新的一步上。
+ * 在输入框或单选项上按 Enter 换步时，焦点所在的旧一步在同一次提交里带上 inert，浏览器随后把焦点丢回 body，
+ * 之后的 Enter 不再经过步骤容器。所以新的一步一挂上（提交后、绘制前）就把焦点交给它的落点：此刻焦点还停在
+ * 刚带上 inert 的旧一步里，判得出是丢了；等入场播完再交，这段时间里连按的 Enter 全落空。
+ * 入场播完时焦点若又没了着落，再兜一次：点左栏跳步时被点的那一行成了当前步而禁用，浏览器稍后才把焦点挪走，挂载时还判不出。
+ * 点「下一步」时焦点在不动的主按钮上，入场期间用户自己聚焦了别处，都不抢。
+ * 弹窗打开时的第一步不播入场，两处都不接管，由弹窗按 data-autofocus 初始聚焦。
+ */
 function StepPane({ ref, direction, enter, onKeyDown, children }: StepPaneProps) {
   const present = useIsPresent();
   const reduced = useReducedMotionConfig() === true;
+  const self = useRef<HTMLDivElement | null>(null);
+  const attach = useComposedRefs(ref, self);
+  // 不让浏览器为露出焦点去滚：.main 是 overflow: hidden，被程序滚动后没有滚动条可以滚回来
+  const takeFocus = (pane: HTMLElement) => stepFocusTarget(pane).focus({ preventScroll: true });
+  // 提交之后、绘制之前：新一步的 DOM 已经挂好，单选组的停靠点在，名称框的 autoFocus 也已生效
+  useLayoutEffect(() => {
+    const pane = self.current;
+    if (pane === null) throw new Error("新的一步尚未挂载");
+    // 只在挂载时接管：之后焦点怎么走归用户
+    if (enter && focusLost()) takeFocus(pane);
+  }, []);
+  const onAnimationComplete = (definition: AnimationDefinition) => {
+    const pane = self.current;
+    // 只认入场（退场播完也回调，标签是 exit）；已经开始退场的这一步带 inert，不再接管
+    if (definition !== "center" || pane === null || pane.closest("[inert]") !== null || !focusLost()) return;
+    takeFocus(pane);
+  };
   return (
     <motion.div
-      ref={ref}
+      ref={attach}
       className={styles.pane}
       custom={direction}
       variants={reduced ? stepPaneFade : stepPane}
@@ -92,6 +139,7 @@ function StepPane({ ref, direction, enter, onKeyDown, children }: StepPaneProps)
       exit="exit"
       inert={!present}
       onKeyDown={onKeyDown}
+      onAnimationComplete={onAnimationComplete}
     >
       {children}
     </motion.div>
@@ -152,8 +200,9 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
   const opened = useMounted();
   // 步骤里的块晚到、出没（确认步的 Java 说明、创建失败横幅、版本步的提示行）时，其余块滑到新位置
   const paneReflow = useReflow<HTMLDivElement>();
-  // 底栏按钮行：「上一步」出没时「取消」滑过去
-  const footReflow = useReflow<HTMLDivElement>();
+  // 底栏按钮行：「上一步」出没时「取消」滑过去。「上一步」只在换步时出没，这时弹窗按 layoutKey 沿 morph 形变、
+  // 底栏随外框位移：按钮的横滑走同一条弹簧才与底栏同拍到位
+  const footReflow = useReflow<HTMLDivElement>("morph");
 
   const trimmed = name.trim();
   const filter: VersionFilter = {

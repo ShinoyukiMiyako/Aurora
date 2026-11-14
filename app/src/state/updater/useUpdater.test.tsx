@@ -36,6 +36,16 @@ function Picked() {
   return null;
 }
 
+/** 选择器每次调用都新拼一个对象的订阅方每次渲染看到的值。 */
+let boxes: { kind: string }[] = [];
+
+function PickedObject() {
+  // 新拼的对象永远不按 Object.is 相等：同一份状态下 React 连取两次快照也要拿到同一个引用，否则反复重渲染
+  const box = useUpdaterSelector((state) => ({ kind: state.phase.kind }));
+  boxes.push(box);
+  return null;
+}
+
 function progress(taskId: string, bytes: number, totalBytes: number) {
   return { kind: "download", task_id: taskId, total: 1, finished: 0, bytes, total_bytes: totalBytes, speed: 0 };
 }
@@ -45,6 +55,7 @@ beforeEach(() => {
   resetRecorder(ipc);
   fullRenders = 0;
   picked = [];
+  boxes = [];
 });
 
 afterEach(() => {
@@ -99,6 +110,43 @@ describe("useUpdaterSelector", () => {
     expect(picked.slice(2)).toEqual([{ dot: false, current: "0.1.0" }]);
     act(() => emit(CORE_EVENT, progress(taskId, (events + 1) * 1000, (events + 1) * 1000)));
     expect(picked).toHaveLength(3);
+  });
+
+  it("选择器每次新拼对象：状态不变时快照交回同一个引用，不报快照未缓存、不陷入重渲染；状态每变一次重渲染一次", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const download = deferred<UpdateDto>();
+    ipc.overrides.set("updater_info", () => INFO);
+    ipc.overrides.set("download_update", () => download.promise);
+    view = render(
+      <UpdaterProvider>
+        <Full />
+        <PickedObject />
+      </UpdaterProvider>,
+    );
+    await act(async () => {
+      await settle();
+    });
+    // 挂载一次，更新信息到达一次；挂载后 React 核对快照、拿到的还是渲染时那个引用，不再补渲染
+    expect(boxes).toEqual([{ kind: "idle" }, { kind: "available" }]);
+
+    act(() => {
+      void api.download();
+    });
+    await act(async () => {
+      await settle();
+    });
+    const [{ taskId }] = callsOf(ipc, "download_update");
+    if (typeof taskId !== "string") throw new Error("下载命令没带 taskId");
+    expect(boxes.slice(2)).toEqual([{ kind: "downloading" }]);
+
+    // 新拼的对象每次都不相等，等于整份订阅：每条进度都重渲染一次，且只一次
+    const events = 5 + Math.floor(Math.random() * 10);
+    for (let i = 1; i <= events; i++) {
+      act(() => emit(CORE_EVENT, progress(taskId, i * 1000, events * 1000)));
+    }
+    expect(api.snapshot().phase).toMatchObject({ kind: "downloading", bytes: events * 1000 });
+    expect(boxes.slice(3)).toEqual(Array.from({ length: events }, () => ({ kind: "downloading" })));
+    expect(errors.mock.calls).toEqual([]);
   });
 });
 

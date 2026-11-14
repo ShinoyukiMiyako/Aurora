@@ -7,11 +7,13 @@ import { MotionConfig } from "framer-motion";
 import { act } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
+import { LAUNCH_COPY } from "../copy/flows";
+import { percent } from "../domain/format";
 import { LAUNCH_PHASE_EVENT } from "../ipc/launch";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { render, stubMatchMedia, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { bootOverrides, emit, instanceDto, resetRecorder } from "../test/launcher";
+import { bootOverrides, deferred, emit, instanceDto, resetRecorder } from "../test/launcher";
 import { OverlayRoot } from "../shell/overlay";
 import { ShellProvider } from "../shell/shell";
 import { LaunchCapsule } from "./LaunchCapsule";
@@ -115,4 +117,30 @@ it("减少动画时阶段名换行只交叉淡化：新行不从下方来，旧�
   expect(entering.style.transform).not.toContain("translate");
   await waitForFrames(() => expect(Number(leaving.style.opacity)).toBeLessThan(1));
   expect(leaving.style.transform).not.toContain("translate");
+});
+
+it("补全完成、落地重扫还没回来：安装中面走到 100% 时进度填充还是同一层、不透明，不在完成那一刻淡出", async () => {
+  const repair = deferred<unknown>();
+  ipc.overrides.set("repair_instance", () => repair.promise);
+  await act(() => launcher.actions.repairInstance("生存"));
+  await flush();
+  expect(launcher.state.tasks.map((t) => t.status)).toEqual(["running"]);
+  const fill = document.querySelector<HTMLElement>('[data-fill="info"]');
+  if (fill === null) throw new Error("安装中面应有进度填充");
+  // 落地重扫一直不回来：实例停在安装中，入口拿到的是那个已完成的任务
+  ipc.overrides.set("list_instances", () => new Promise(() => undefined));
+  await act(async () => {
+    repair.resolve({ reinstalled: false, libraries: 3, assets: 0, natives: 0 });
+  });
+  await flush();
+  expect(launcher.state.tasks.map((t) => t.status)).toEqual(["done"]);
+  const title = () => {
+    const line = document.querySelector('[data-face="installing"] [data-slot]');
+    if (line === null) throw new Error("安装中面没有标题槽");
+    return [...line.children].filter((c) => c.getAttribute("aria-hidden") !== "true").map((c) => c.textContent);
+  };
+  // 百分数沿平滑走到满格要比填充的淡出（fade.out）久：走到时填充若在退场早已被移除
+  await waitForFrames(() => expect(title()).toEqual([LAUNCH_COPY.installingTitle(percent(1))]));
+  expect(document.querySelector('[data-fill="info"]')).toBe(fill);
+  expect(fill.style.opacity).toBe("1");
 });

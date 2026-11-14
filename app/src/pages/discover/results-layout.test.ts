@@ -44,6 +44,12 @@ describe("说明行与工具条不被晚到的文字挤动", () => {
     expect(value(".infoClear", "margin-left")).toBe("auto");
   });
 
+  it("适配实例下拉定宽：实例列表晚到、有实例装好变就绪时，触发器不随最长的实例名在一个范围里伸缩", () => {
+    expect(value(".fitSelect", "width")).toBe("184px");
+    expect(declarations(".fitSelect").has("min-width")).toBe(false);
+    expect(declarations(".fitSelect").has("max-width")).toBe(false);
+  });
+
   it("筛选条件数角标绝对定位叠在按钮角上，不占按钮宽度", () => {
     expect(value(".filterBadge", "position")).toBe("absolute");
   });

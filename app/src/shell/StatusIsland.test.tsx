@@ -10,7 +10,7 @@ import { stubCanvas } from "../art/illustrations/test-canvas";
 import { GAME_EXIT_EVENT, GAME_LOG_EVENT, LAUNCH_PHASE_EVENT } from "../ipc/launch";
 import { formatSpeed } from "../domain/format";
 import { BREATH_DELAY_VAR } from "../launch/breath";
-import { feedSpeed, publishSpeed, startSpeed } from "../lib/progress-display";
+import { feedSpeed, publishSpeed, SPEED_REFRESH_MS, startSpeed } from "../lib/progress-display";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { startSession, type SessionState } from "../state/session";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
@@ -636,7 +636,7 @@ describe("状态岛", () => {
     ]);
   });
 
-  it("动作行的每个按钮各包一层，随阶段增删时单独淡入淡出；动作行与详情正文都挂着让位", async () => {
+  it("动作行的每个按钮各包一层，随阶段增删时单独淡入淡出；动作行与详情正文都挂着让位，且都走 morph", async () => {
     reflowed.clear();
     view = render(
       <LauncherProvider>
@@ -661,6 +661,8 @@ describe("状态岛", () => {
     expect(items.map((el) => el.querySelector("button")?.textContent)).toEqual([ISLAND_COPY.fullLog, LAUNCH_COPY.cancel]);
     // 有新按钮插入的换组（加载转运行、失败、崩溃）靠动作行的让位；阶段清单插入时日志区靠详情正文的让位，动作行跟着浮层下沿走
     expect(reflowed.has(actions)).toBe(true);
+    // 动作行在浮层底部那一层，那一层与外框都沿 morph 形变：折行或换组时按钮的位移走同一条弹簧，与外框下沿同拍到位
+    expect(reflowed.get(actions)).toBe("morph");
     const detail = liveDetail().querySelector(`.${styles.detail}`);
     if (detail === null) throw new Error("详情里没有正文");
     // 清单出没时外框沿 morph 形变：正文的让位走同一条弹簧，被挤开的日志区与外框下沿一起到位
@@ -990,6 +992,64 @@ describe("状态岛按片订阅", () => {
     expect(islandButton().getAttribute("aria-label")).toBe(ISLAND_COPY.label("生存", "00:03"));
   });
 
+  /** 进到下载阶段，先报一个速度、同一刻再报一个快得多的：显示的字停在前一个，排着一拍补字。 */
+  async function downloadingWithPendingSpeed() {
+    mount();
+    await flush();
+    act(() => void launcher.actions.launch("生存"));
+    await flush();
+    const session = launcher.state.session;
+    if (session === null) throw new Error("启动后应有会话");
+    const download = (finished: number, speed: number) =>
+      act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 4, download: { finished, total: 10, bytes: 0, total_bytes: null, speed } }));
+    download(2, 1024);
+    await flush();
+    return { t0: Date.now(), next: () => download(3, 8192) };
+  }
+
+  it("收起时：下载速度到点补字，状态岛一次都不提交（收起的胶囊不写速度）", async () => {
+    const { next } = await downloadingWithPendingSpeed();
+    next();
+    await flush();
+    commits = 0;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SPEED_REFRESH_MS);
+    });
+    expect(commits).toBe(0);
+  });
+
+  it("展开后：下载速度到点补字只重画写速度的两行，胶囊、详情头的方块与动作行都不重渲染", async () => {
+    const { t0, next } = await downloadingWithPendingSpeed();
+    act(() => islandButton().click());
+    await flush();
+    next();
+    await flush();
+    const detail = () => {
+      const panel = [...document.querySelectorAll<HTMLElement>('[role="dialog"]')].filter((el) => !el.hasAttribute("data-exiting"));
+      if (panel.length !== 1) throw new Error(`应有且只有一个打开着的详情，实为 ${panel.length} 个`);
+      return panel[0];
+    };
+    /** 详情头的副行与阶段清单下载那一行末尾写的速度。 */
+    const speeds = () => {
+      const head = detail().querySelector(`.${styles.headPhase}`)?.textContent;
+      const row = detail().querySelectorAll("[data-state]")[4]?.textContent;
+      if (head === undefined || head === null || row === undefined || row === null) throw new Error("详情里没有副行或下载那一行");
+      return [head.split(" · ").at(-1), row.split(" · ").at(-1)];
+    };
+    expect(speeds()).toEqual([formatSpeed(1024), formatSpeed(1024)]);
+    const before = { ...renders };
+    expect(before.InstanceBlock).toBeGreaterThan(0);
+    expect(before.Button).toBeGreaterThan(0);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SPEED_REFRESH_MS);
+    });
+    const average = formatSpeed(publishSpeed(feedSpeed(startSpeed(1024, t0), 8192, t0), t0 + SPEED_REFRESH_MS).shown);
+    expect([average === formatSpeed(1024), average === formatSpeed(8192)]).toEqual([false, false]);
+    expect(speeds()).toEqual([average, average]);
+    expect(renders).toEqual(before);
+  });
+
   it("只改数字的重渲染不量布局：下载进度一路走、百分比位数不变，布局动画不读胶囊的尺寸", async () => {
     mount();
     await flush();
@@ -1102,7 +1162,8 @@ describe("状态岛胶囊的动效", () => {
     act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 4, download: { finished: 0, total: 10, bytes: 0, total_bytes: null, speed: 0 } }));
     await flush();
     const after = faces();
-    expect(after.map((el) => el.textContent)).toEqual([`${PHASE_LABEL.preparing}0%`, `${PHASE_LABEL.downloading}30%`]);
+    // 新行的百分数从底边进度条此刻的位置起步：这一刻还没出帧，条还在 0%，新行不先报出 30%（之后逐帧走，见 StatusIsland.progress.test.tsx）
+    expect(after.map((el) => el.textContent)).toEqual([`${PHASE_LABEL.preparing}0%`, `${PHASE_LABEL.downloading}0%`]);
     expect(after[0]).toBe(preparing);
     const downloading = after[1];
     // 新行从下方入场，起点是 lineSwap 的 enter
@@ -1115,7 +1176,7 @@ describe("状态岛胶囊的动效", () => {
     await flush();
     expect(faces().at(-1)).toBe(downloading);
     // 百分数跟底边进度条同一种平滑，逐帧走过去（StatusIsland.progress.test.tsx 逐帧看）：这一刻还没出帧，字不当场跳到新值，读屏的名称已是新值
-    expect(downloading.textContent).toBe(`${PHASE_LABEL.downloading}30%`);
+    expect(downloading.textContent).toBe(`${PHASE_LABEL.downloading}0%`);
     expect(islandButton().getAttribute("aria-label")).toBe(ISLAND_COPY.label("生存", `${PHASE_LABEL.downloading} 39%`));
 
     act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "launching", stage_index: 6 }));
@@ -1193,6 +1254,8 @@ describe("状态岛胶囊的动效", () => {
     expect(launcher.state.session?.phase).toBe("crashed");
     const live = document.querySelector<HTMLElement>("[aria-live='polite']");
     expect(live?.textContent).toBe(ISLAND_COPY.announce("生存", PHASE_LABEL.crashed));
+    // 视觉隐藏走全局类，不在模块样式里另写一份
+    expect(live?.className).toBe("sk-sr-only");
     expect([...shaker.children]).toEqual([island]);
     expect(shaker.contains(live)).toBe(false);
   });

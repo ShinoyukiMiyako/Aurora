@@ -20,6 +20,7 @@ import { describeError, gameDirDataRejectionOf } from "../../state/errors";
 import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
 import { useGameDirectories, type GameDirectoryDto } from "../../state/queries/catalog";
 import { busyInstanceId, gameDirectoryBusy } from "../../state/selectors";
+import { useUiShape } from "../../state/ui-shape";
 import { Appear } from "../../ui/Appear";
 import { Banner, BannerSlot } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
@@ -58,6 +59,9 @@ import { useLibraryView } from "./view-state";
 /** 加载中的骨架卡数：按档位铺满首屏两行。 */
 const SKELETON_CARDS = { compact: 6, regular: 8, wide: 10 } as const;
 
+/** 修复横幅等数据时的骨架：标题与说明各一行文字，按钮位与 sm 按钮同高（30）、约「立即修复」的宽。 */
+const REPAIR_SKELETON = { title: 132, body: "70%", actionWidth: 76, actionHeight: 30 } as const;
+
 const SEARCH_SHORTCUT = ["Ctrl", "F"] as const;
 
 const NO_DIRECTORIES: readonly GameDirectoryDto[] = [];
@@ -93,6 +97,7 @@ export default function LibraryPage() {
   const dirs = useGameDirectories();
   const switchTo = useSwitchDirectory();
   const mounted = useMounted();
+  const { shape, report } = useUiShape();
 
   // 目录列表是缓存的，盘上的版本却可能被别的启动器改过：回到这一页时后台重读一次
   const refreshDirs = dirs.refresh;
@@ -124,6 +129,15 @@ export default function LibraryPage() {
   const shown = useMemo(() => visibleInstances(all, view), [all, view]);
   const broken = useMemo(() => brokenInstances(all), [all]);
   const filtered = isFiltered(view);
+
+  // 横幅在不在：读完以后看有没有损坏实例；还在读时按上次读完时记下的。占位与真实横幅同一个 key、同一个外框，
+  // 数据到了只把里面的骨架换成文字与按钮；记下有、这次却没有时整条淡出，下面由页面的让位滑上来
+  const repairShown = gate.view === "content" ? broken.length > 0 : shape.repairBanner;
+  // 读完、读成功才记：读取失败时的空列表不是「没有损坏实例」
+  const repairSettled = gate.view === "content" && ready ? broken.length > 0 : null;
+  useEffect(() => {
+    if (repairSettled !== null) report({ repairBanner: repairSettled });
+  }, [repairSettled, report]);
 
   // 计数没到时先占住计数槽（null）：读完那一帧六项不会一起变宽，工具条也不会因此折行
   const filterOptions: SegmentOption<LoaderFilter>[] = [
@@ -202,32 +216,42 @@ export default function LibraryPage() {
         </div>
       </EntranceBlock>
 
-      {/* 横幅跟着内容一起出现：骨架还在停留时就插进来，会先把骨架推下去、骨架再换成卡片，连跳两次 */}
+      {/*
+       * 没记过横幅时，横幅跟着内容一起出现：骨架还在停留时就插进来，会先把骨架推下去、骨架再换成卡片，连跳两次。
+       * 记下有横幅时首帧就在：外框与图标照真实横幅画，文字与按钮的位置由各自的加载层占着（与网格同一个加载门，
+       * 隐身期里看不见、之后显出骨架、内容到了交叉淡化），外框不因数据到达重挂
+       */}
       <BannerSlot>
-        {gate.view === "content" && broken.length > 0 && (
+        {repairShown && (
           <Banner
             key="repair"
             tone="warn"
             icon="wrench"
-            title={LIBRARY_COPY.repairTitle(broken.length)}
+            title={
+              <Loadable view={gate.view} skeleton={<Skeleton shape="text" width={REPAIR_SKELETON.title} />}>
+                {() => LIBRARY_COPY.repairTitle(broken.length)}
+              </Loadable>
+            }
             actions={
-              <Button size="sm" disabledReason={repairable.length === 0 ? repairReason(broken[0]) : undefined} onClick={repairAll}>
-                {broken.length > 1 ? LIBRARY_COPY.repairAll : LIBRARY_COPY.repairOne}
-              </Button>
+              <Loadable view={gate.view} skeleton={<Skeleton shape="block" width={REPAIR_SKELETON.actionWidth} height={REPAIR_SKELETON.actionHeight} radius="sm" />}>
+                {() => (
+                  <Button size="sm" disabledReason={repairable.length === 0 ? repairReason(broken[0]) : undefined} onClick={repairAll}>
+                    {broken.length > 1 ? LIBRARY_COPY.repairAll : LIBRARY_COPY.repairOne}
+                  </Button>
+                )}
+              </Loadable>
             }
           >
-            {LIBRARY_COPY.repairBody(broken.map((inst) => inst.name))}
+            <Loadable view={gate.view} skeleton={<Skeleton shape="text" width={REPAIR_SKELETON.body} />}>
+              {() => LIBRARY_COPY.repairBody(broken.map((inst) => inst.name))}
+            </Loadable>
           </Banner>
         )}
       </BannerSlot>
 
       {/* 骨架与内容共用这一个一级区块：页面入场只播一次，换成内容时在块里交叉淡化，不再整块重挂、重播入场 */}
       <EntranceBlock>
-        {/* 骨架层整层对读屏隐藏：加载说明放在它外面，常驻的状态区在骨架显出来时播报一次 */}
-        <p className={styles.srOnly} role="status">
-          {gate.view === "skeleton" ? LIBRARY_COPY.loadingLabel : ""}
-        </p>
-        <Loadable view={gate.view} skeleton={<SkeletonGrid count={SKELETON_CARDS[tier]} />}>
+        <Loadable view={gate.view} skeleton={<SkeletonGrid count={SKELETON_CARDS[tier]} />} busyLabel={LIBRARY_COPY.loadingLabel}>
           {() => (
             // 读取失败、空库与有实例三种内容互换（重试成功、建好第一个实例、删掉最后一个）时交叉淡化，不硬切；
             // 目录打不开与别的读取失败也各占一个键，重试后换了一种失败时同样交叉淡化

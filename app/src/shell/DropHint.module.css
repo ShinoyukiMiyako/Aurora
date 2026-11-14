@@ -28,13 +28,3 @@
 .label > svg {
   color: var(--sk-accent-strong);
 }
-
-/* 只给读屏：不占位、不可见，但留在可访问性树里 */
-.announcer {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}

@@ -138,26 +138,22 @@ function LoadedBody<T>({ resource, loading, failed, children }: { resource: Reso
     );
   }
   return (
-    <>
-      {/* 骨架层对读屏隐藏，读取中的说明另放一份给读屏：区域挂载时就在、先是空的，转圈显形时才写进文字，读屏才会念出来 */}
-      <span className={s.srOnly} role="status">
-        {gate.view === "skeleton" ? loading : ""}
-      </span>
-      <Loadable
-        view={gate.view}
-        skeleton={
-          <div className={s.licensesLoading}>
-            <Spinner size={20} />
-            <span>{loading}</span>
-          </div>
-        }
-      >
-        {() => {
-          if (resource.status !== "ready") throw new Error("加载门放行内容时文件必须已经读到");
-          return children(resource.data);
-        }}
-      </Loadable>
-    </>
+    // 骨架层对读屏隐藏，转圈旁的那句读屏听不到：同一句交给加载层的播报区，转圈显形时才念
+    <Loadable
+      view={gate.view}
+      busyLabel={loading}
+      skeleton={
+        <div className={s.licensesLoading}>
+          <Spinner size={20} />
+          <span>{loading}</span>
+        </div>
+      }
+    >
+      {() => {
+        if (resource.status !== "ready") throw new Error("加载门放行内容时文件必须已经读到");
+        return children(resource.data);
+      }}
+    </Loadable>
   );
 }
 

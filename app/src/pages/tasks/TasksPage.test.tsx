@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
+import { MotionConfig } from "framer-motion";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IpcError } from "../../ipc/errors";
@@ -12,10 +13,12 @@ import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/lau
 import type { RouteOf } from "../../state/route";
 import { render, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { bootOverrides, callsOf, cancelledError, deferred, emit, resetRecorder, settle, type Deferred } from "../../test/launcher";
+import type { InstanceDto } from "../../ipc/instances";
+import { bootOverrides, callsOf, cancelledError, deferred, emit, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
 import { PickFolderProvider } from "../discover/platform";
 import TasksPage from "./index";
 import styles from "./tasks.module.css";
+import { TASK_ROW_ATTR } from "./TaskRow";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -45,15 +48,17 @@ const advance = (ms: number) =>
     await vi.advanceTimersByTimeAsync(ms);
   });
 
-async function mount(route: RouteOf<"tasks"> = { page: "tasks" }) {
+/** reduced：整页按「减少动画」画（与外观偏好经根部 MotionConfig 生效的口径相同）。 */
+async function mount(route: RouteOf<"tasks"> = { page: "tasks" }, { reduced = false }: { reduced?: boolean } = {}) {
+  const tree = (
+    <PickFolderProvider value={() => Promise.resolve(MOCK_DOWNLOADS_DIR)}>
+      <Host />
+      <OverlayRoot />
+    </PickFolderProvider>
+  );
   view = render(
     <LauncherProvider>
-      <ShellProvider>
-        <PickFolderProvider value={() => Promise.resolve(MOCK_DOWNLOADS_DIR)}>
-          <Host />
-          <OverlayRoot />
-        </PickFolderProvider>
-      </ShellProvider>
+      <ShellProvider>{reduced ? <MotionConfig reducedMotion="always">{tree}</MotionConfig> : tree}</ShellProvider>
     </LauncherProvider>,
   );
   await flush();
@@ -290,6 +295,27 @@ describe("下载任务页：历史", () => {
     expect(callsOf(ipc, "save_task_journal").at(-1)).toEqual({ seq: 1, tasks: [] });
   });
 
+  it("补全成功、落地重扫还没回来：这一行在已结束里，清除按钮却不算它、不可点（点了也清不掉）；重扫回来才计上", async () => {
+    await mount();
+    const repair = deferred<unknown>();
+    ipc.overrides.set("repair_instance", () => repair.promise);
+    await act(() => launcher.actions.repairInstance("生存"));
+    await flush();
+    const scan = deferred<InstanceDto[]>();
+    ipc.overrides.set("list_instances", () => scan.promise);
+    repair.resolve({ reinstalled: false, libraries: 3, assets: 0, natives: 0 });
+    await flush();
+    // 收尾那一拍过去，行换到已结束
+    await advance(1000);
+    expect(launcher.state.tasks.map((t) => t.status)).toEqual(["done"]);
+    expect(headings()).toEqual(["已结束 · 1"]);
+    expect(buttonIn(header(), "清除已结束").disabled).toBe(true);
+
+    scan.resolve([instanceDto("生存"), instanceDto("创造")]);
+    await flush();
+    expect(buttonIn(header(), "清除已结束（1）").disabled).toBe(false);
+  });
+
   it("清除按钮与筛选的计数按三位数定宽：首个任务结束、计数跨位数时按钮与分段都不变宽", async () => {
     bootOverrides(ipc, { journal: HISTORY });
     await mount();
@@ -515,8 +541,8 @@ describe("下载任务页：筛选", () => {
 });
 
 describe("下载任务页：进行中", () => {
-  async function fourJavaTasks(): Promise<string[]> {
-    await mount();
+  async function fourJavaTasks(options?: { reduced?: boolean }): Promise<string[]> {
+    await mount(undefined, options);
     for (const major of [8, 17, 21, 25]) await act(() => launcher.actions.installJava(major));
     await flush();
     return launcher.state.tasks.map((t) => t.id);
@@ -649,6 +675,51 @@ describe("下载任务页：进行中", () => {
     expect(laneTitles()).toEqual([[t25], [t17], [t21]]);
   });
 
+  /** 这个任务的列表行：在场的那一行，与还在原处淡出的那些（自己或某个祖先带 inert）。 */
+  function taskRows(id: string): { present: HTMLLIElement[]; leaving: HTMLLIElement[] } {
+    const all = [...page().querySelectorAll(`ul [${TASK_ROW_ATTR}="${id}"]`)].map((mark) => {
+      const li = mark.closest("li");
+      if (li === null) throw new Error(`任务 ${id} 的标记不在列表行里`);
+      return li;
+    });
+    return { present: all.filter(live), leaving: all.filter((li) => !live(li)) };
+  }
+
+  const JAVA_8 = { component: "java-runtime-delta", version: { major: 8, minor: 0, security: 1, build: 1, raw: "1.8.0_1" }, java_executable: "C:/java8.exe" };
+
+  /** 换到已结束的新行是完成的样子；原处淡出的那份停在收尾：进度条满格，取消键留在原位但不可用，与有收尾这一拍时离开前的样子相同。 */
+  function expectLeavingAsFinishing(id: string) {
+    const { present, leaving } = taskRows(id);
+    expect([present.length, leaving.length]).toEqual([1, 1]);
+    expect(present[0].querySelector('[role="progressbar"]')).toBeNull();
+    expect(present[0].querySelector('[role="img"]')?.getAttribute("aria-label")).toBe("Java，已完成");
+    expect(leaving[0].querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("100");
+    expect(leaving[0].querySelector('button[aria-label="取消任务"]')?.getAttribute("aria-disabled")).toBe("true");
+  }
+
+  it("减少动画时任务完成：不留收尾这一拍，行立即换到已结束；进行中组里淡出的那份照收尾画满格，不在淡出时换成已结束的样子", async () => {
+    const ids = await fourJavaTasks({ reduced: true });
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: `${ids[0]}#1`, total: 10, finished: 6, bytes: 60 * MB, total_bytes: 100 * MB, speed: 5 * MB }));
+    expect(progressOf(row("Java 8"))).toBe("60");
+    javaRuns.get(`${ids[0]}#1`)?.resolve(JAVA_8);
+    await flush();
+    expect(launcher.state.tasks.find((t) => t.id === ids[0])?.status).toBe("done");
+    expect(headings()).toEqual(["进行中 · 3", "已结束 · 1"]);
+    expectLeavingAsFinishing(ids[0]);
+  });
+
+  it("减少动画时最后一个进行中的任务完成：进行中整组在原处淡出，组里那一行同样停在收尾的满格", async () => {
+    await mount(undefined, { reduced: true });
+    await act(() => launcher.actions.installJava(8));
+    await flush();
+    const [id] = launcher.state.tasks.map((t) => t.id);
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: `${id}#1`, total: 10, finished: 6, bytes: 60 * MB, total_bytes: 100 * MB, speed: 5 * MB }));
+    javaRuns.get(`${id}#1`)?.resolve(JAVA_8);
+    await flush();
+    expect(headings()).toEqual(["已结束 · 1"]);
+    expectLeavingAsFinishing(id);
+  });
+
   it("补全完成行：进度按有效字节走满，说明只写实际下载的量；一个字节没传写文件已就绪", async () => {
     const ids = await fourJavaTasks();
     const repaired = `${ids[0]}#1`;
@@ -673,7 +744,7 @@ describe("下载任务页：进行中", () => {
     expect(row("Java 17").textContent).not.toContain("701 MB");
   });
 
-  it("已下大小按节拍换字：事件到达的那一刻行内、已下载与剩余都不换，满间隔才换上最新值，剩余时间同一拍；传到总量与任务完成立即到位", async () => {
+  it("已下大小按节拍换字：从 0 开始传的第一条立即换上；之后事件到达的那一刻行内、已下载与剩余都不换，满间隔才换上最新值，剩余时间同一拍；传到总量与任务完成立即到位", async () => {
     await mount();
     await act(() => launcher.actions.installJava(8));
     await flush();
@@ -685,13 +756,13 @@ describe("下载任务页：进行中", () => {
     const remaining = () => [...page().querySelectorAll(`.${styles.flowSub}`)].filter(live)[0]?.textContent;
     const shown = () => [meta(), downloaded(), remaining()];
 
-    // 行与卡挂上还不到一个间隔：第一条事件的已下大小先不换，剩余时间按这一刻的速度估（剩 100 MB / 4 MB/s）
+    // 从 0 开始传：第一条事件的已下大小立即换上，不停在 0 B；剩余时间按这一刻的速度估（剩 90 MB / 4 MB/s）
     progress(10 * MB, 4 * MB);
-    expect(shown()).toEqual(["0 B / 100 MB4.0 MB/s · 约 25 秒", "0 B", "剩余 100 MB · 约 25 秒"]);
-    // 窗口里还没有采到这一次的速度，估速跟着瞬时速度走：已下大小没换字，剩余时间也不跟着跳（照算会是约 50 秒）
+    expect(shown()).toEqual(["10.0 MB / 100 MB4.0 MB/s · 约 25 秒", "10.0 MB", "剩余 90.0 MB · 约 25 秒"]);
+    // 窗口里还没有采到这一次的速度，估速跟着瞬时速度走：已下大小没换字，剩余时间也不跟着跳（照算会是约 45 秒）
     await advance(100);
     progress(12 * MB);
-    expect(shown()).toEqual(["0 B / 100 MB4.0 MB/s · 约 25 秒", "0 B", "剩余 100 MB · 约 25 秒"]);
+    expect(shown()).toEqual(["10.0 MB / 100 MB4.0 MB/s · 约 25 秒", "10.0 MB", "剩余 90.0 MB · 约 25 秒"]);
 
     // 走到稳态：剩余时间的平均窗口里全是 2 MB/s，上一次换字已过了很久
     await advance(4_900);

@@ -29,14 +29,17 @@ import InstancePage from "./index";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
-// 让位挂到了哪些容器上：jsdom 不做布局，让位本身在这里测不了，只核对它挂对了地方；挂载照常交给真实现
+// 让位挂到了哪些容器上：jsdom 不做布局，让位本身在这里测不了，只核对它挂对了地方；挂载照常交给真实现。
+// 顺带数调用次数：设置页与外观卡、JVM 卡每渲染一次都要调它，次数没变就是这几处都没重渲染
 const reflowed = vi.hoisted(() => new Set<Element>());
+const reflowHooks = vi.hoisted(() => ({ calls: 0 }));
 vi.mock("../../lib/reflow", async (orig) => {
   const mod = await orig<typeof import("../../lib/reflow")>();
   const { useCallback } = await import("react");
   return {
     ...mod,
     useReflow: <T extends HTMLElement>(spring: Parameters<typeof mod.useReflow>[0] = "settle") => {
+      reflowHooks.calls += 1;
       const real = mod.useReflow<T>(spring);
       return useCallback(
         (el: T | null) => {
@@ -350,6 +353,70 @@ describe("实例设置：JVM 参数卡", () => {
     });
     expect(grid.hasAttribute(REFLOW_PAUSED_ATTR)).toBe(false);
   });
+
+  const grid = () => {
+    const el = document.querySelector<HTMLElement>('[class*="settingsGrid"]');
+    if (el === null) throw new Error("没有设置网格");
+    return el;
+  };
+  const press = () =>
+    act(() => {
+      area().dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    });
+  const fire = (type: string) =>
+    act(() => {
+      window.dispatchEvent(new Event(type));
+    });
+  /** 从现在起挂到窗口上、还没摘掉的松手类监听（pointerup、pointercancel、blur）各几份。监听照常挂上，这里只记账。 */
+  const trackReleaseListeners = () => {
+    const added = vi.spyOn(window, "addEventListener");
+    const removed = vi.spyOn(window, "removeEventListener");
+    return () => {
+      const live = { pointerup: new Set<unknown>(), pointercancel: new Set<unknown>(), blur: new Set<unknown>() };
+      const watched = (type: string): type is keyof typeof live => Object.hasOwn(live, type);
+      // 每次按下挂的都是新函数：先全记上、再按摘掉的划去，与先后无关
+      for (const [type, listener] of added.mock.calls) if (watched(type)) live[type].add(listener);
+      for (const [type, listener] of removed.mock.calls) if (watched(type)) live[type].delete(listener);
+      return { pointerup: live.pointerup.size, pointercancel: live.pointercancel.size, blur: live.blur.size };
+    };
+  };
+
+  it("按下、松手只在网格节点上开关暂停属性：设置页、外观卡与 JVM 卡都不重渲染", async () => {
+    await openSettings();
+    const before = reflowHooks.calls;
+    press();
+    expect(grid().hasAttribute(REFLOW_PAUSED_ATTR)).toBe(true);
+    fire("pointerup");
+    expect(grid().hasAttribute(REFLOW_PAUSED_ATTR)).toBe(false);
+    expect(reflowHooks.calls).toBe(before);
+  });
+
+  it("按着时窗口失焦（抬起事件会丢）也算松手；pointercancel 同样恢复", async () => {
+    await openSettings();
+    press();
+    fire("blur");
+    expect(grid().hasAttribute(REFLOW_PAUSED_ATTR)).toBe(false);
+    press();
+    expect(grid().hasAttribute(REFLOW_PAUSED_ATTR)).toBe(true);
+    fire("pointercancel");
+    expect(grid().hasAttribute(REFLOW_PAUSED_ATTR)).toBe(false);
+  });
+
+  it("连按两次只挂一份松手监听，松手后全部摘掉；按着时离开设置页也不留监听", async () => {
+    await openSettings();
+    const live = trackReleaseListeners();
+    press();
+    press();
+    expect(live()).toEqual({ pointerup: 1, pointercancel: 1, blur: 1 });
+    fire("pointerup");
+    expect(grid().hasAttribute(REFLOW_PAUSED_ATTR)).toBe(false);
+    expect(live()).toEqual({ pointerup: 0, pointercancel: 0, blur: 0 });
+    press();
+    expect(live()).toEqual({ pointerup: 1, pointercancel: 1, blur: 1 });
+    view?.unmount();
+    view = undefined;
+    expect(live()).toEqual({ pointerup: 0, pointercancel: 0, blur: 0 });
+  });
 });
 
 describe("实例设置：让位挂在哪里", () => {
@@ -490,7 +557,14 @@ describe("实例设置：会换的说明与按钮文案", () => {
 describe("实例设置：默认设置一行", () => {
   const templateRow = () => row(SETTINGS_COPY.templateTitle);
 
-  it("读取中第二行走加载门：300 ms 内骨架占位但不可见，之后才显出；没存过默认设置时这一行照样占着", async () => {
+  /** 第二行（来源、没存过、已关闭、读不到）。 */
+  const templateLine = () => {
+    const line = templateRow().querySelector<HTMLElement>('[class*="templateLine"]');
+    if (line === null) throw new Error("默认设置一行没有第二行");
+    return line;
+  };
+
+  it("读取中第二行走加载门：300 ms 内骨架占位但不可见，之后才显出；没存过默认设置时写明没有可沿用的", async () => {
     const pending = deferred<TemplateInfoDto>();
     ipc.overrides.set("template_info", () => pending.promise);
     await openSettings();
@@ -506,9 +580,39 @@ describe("实例设置：默认设置一行", () => {
       await vi.advanceTimersByTimeAsync(300);
     });
     expect(layer()).toBeNull();
-    const line = templateRow().querySelector<HTMLElement>('[class*="templateLine"]');
-    expect(line).not.toBeNull();
-    expect(textOf(line as HTMLElement)).toBe("");
+    expect(textOf(templateLine())).toBe("还没有默认设置，新建实例时没有可沿用的设置。");
+  });
+
+  it("存过默认设置、沿用开着：第二行写取自哪个实例", async () => {
+    ipc.overrides.set("template_info", (): TemplateInfoDto => ({ present: true, files: [{ name: "options.txt", size: 2048 }], source_instance: "创造", saved_at: null, enabled: true }));
+    await openSettings();
+    expect(textOf(templateLine())).toBe("当前默认取自「创造」");
+  });
+
+  it("来源实例名最长 32 字：窄列里只截实例名、悬停给全名，前后两段照常写全，这一行不折成两行", async () => {
+    const source = "樱花".repeat(16);
+    ipc.overrides.set("template_info", (): TemplateInfoDto => ({ present: true, files: [{ name: "options.txt", size: 2048 }], source_instance: source, saved_at: null, enabled: true }));
+    await openSettings();
+    const line = templateLine();
+    expect(textOf(line)).toBe(`当前默认取自「${source}」`);
+    const sentence = line.querySelector<HTMLElement>('[class*="templateSource"]');
+    if (sentence === null) throw new Error("来源一句没有按单行排");
+    expect([...sentence.children].map(textOf)).toEqual(["当前默认取自「", source, "」"]);
+    const name = sentence.children[1] as HTMLElement;
+    expect(name.className).toMatch(/ellipsis/);
+    expect(name.title).toBe(source);
+  });
+
+  it.each([
+    ["存过", true],
+    ["没存过", false],
+  ])("配置里关了沿用（%s默认设置）：第二行写已关闭，不写取自哪个实例", async (_name, present) => {
+    ipc.overrides.set(
+      "template_info",
+      (): TemplateInfoDto => ({ present, files: present ? [{ name: "options.txt", size: 2048 }] : [], source_instance: present ? "创造" : null, saved_at: null, enabled: false }),
+    );
+    await openSettings();
+    expect(textOf(templateLine())).toBe("新建实例时沿用默认设置已在配置里关闭。");
   });
 
   it("「清除」常驻占位：清除成功后还是同一个按钮，淡出并进了不可交互的层；焦点从它身上交给「保存为默认」", async () => {
@@ -554,6 +658,17 @@ describe("实例设置：占位规则（读样式表）", () => {
 
   it("默认设置的第二行常驻一行高", () => {
     expect(rule(".templateLine")).toMatch(/min-height:\s*var\(--sk-lh-small\)/);
+  });
+
+  it("默认设置的来源一句不折行：整句一行排开，可收窄的只有实例名，它按单行截断", () => {
+    const sentence = rule(".templateSource");
+    expect(sentence).toMatch(/display:\s*flex/);
+    expect(sentence).toMatch(/white-space:\s*nowrap/);
+    expect(sentence).toMatch(/min-width:\s*0/);
+    const ellipsis = rule(".ellipsis");
+    expect(ellipsis).toMatch(/min-width:\s*0/);
+    expect(ellipsis).toMatch(/overflow:\s*hidden/);
+    expect(ellipsis).toMatch(/text-overflow:\s*ellipsis/);
   });
 
   it("按钮文案槽：另一条画在零高、不可见的伪元素里，只撑宽", () => {

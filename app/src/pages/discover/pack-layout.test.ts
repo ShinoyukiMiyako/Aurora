@@ -33,17 +33,6 @@ describe("投放区", () => {
   });
 });
 
-describe("受限文件清单的主按钮", () => {
-  it("三条文案叠在同一格按最宽留宽：没在显示的两条只画在不可见的伪元素里", () => {
-    for (const part of [".primaryLabel > span", ".primaryLabel::before", ".primaryLabel::after"]) expect(decls(part).get("grid-area")).toBe("1 / 1");
-    expect(decls(".primaryLabel").get("display")).toBe("inline-grid");
-    expect(decls(".primaryLabel::before").get("content")).toBe("attr(data-reserve-a)");
-    expect(decls(".primaryLabel::after").get("content")).toBe("attr(data-reserve-b)");
-    expect(decls(".primaryLabel::before").get("visibility")).toBe("hidden");
-    expect(decls(".primaryLabel::after").get("visibility")).toBe("hidden");
-  });
-});
-
 describe("换内容时旧的一块叠在原处淡出", () => {
   it("说明块所在的栈都是定位容器：抽出布局的旧说明以它为基准，不飘到弹窗面板的角上", () => {
     for (const stack of [".blocked", ".choose", ".confirm"]) expect(decls(stack).get("position")).toBe("relative");

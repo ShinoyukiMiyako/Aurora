@@ -13,6 +13,7 @@ import { AppearanceProvider, DEFAULT_APPEARANCE } from "../state/appearance";
 import { errorRecord } from "../state/errors";
 import type { FlowProps } from "../state/flows";
 import { LauncherProvider, useLauncher, useLauncherSelector, type LauncherApi } from "../state/launcher";
+import { DEFAULT_UI_SHAPE, UiShapeProvider } from "../state/ui-shape";
 import { PAGE_IDS, type PageProps, type Route } from "../state/route";
 import { getInstance } from "../state/selectors";
 import { drainFrames, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
@@ -72,20 +73,22 @@ async function mount() {
   view = render(
     <WindowPortProvider port={{ ...browserWindowPort(), show: async () => {} }}>
       <AppearanceProvider initial={{ ...DEFAULT_APPEARANCE, petals: false }}>
-        <LauncherProvider>
-          <ShellProvider>
-            <Probe />
-            <ErrorBoundary
-              onError={() => undefined}
-              fallback={(error) => {
-                crashed = error;
-                return <p data-crashed="" />;
-              }}
-            >
-              <AppShell pages={registry} flows={{ login: LoginStub, onboarding: null, createInstance: null }} />
-            </ErrorBoundary>
-          </ShellProvider>
-        </LauncherProvider>
+        <UiShapeProvider initial={DEFAULT_UI_SHAPE}>
+          <LauncherProvider>
+            <ShellProvider>
+              <Probe />
+              <ErrorBoundary
+                onError={() => undefined}
+                fallback={(error) => {
+                  crashed = error;
+                  return <p data-crashed="" />;
+                }}
+              >
+                <AppShell pages={registry} flows={{ login: LoginStub, onboarding: null, createInstance: null }} />
+              </ErrorBoundary>
+            </ShellProvider>
+          </LauncherProvider>
+        </UiShapeProvider>
       </AppearanceProvider>
     </WindowPortProvider>,
   );

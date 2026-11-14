@@ -6,14 +6,16 @@ import { act, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { accountKindLabel } from "../copy/flows";
-import { ACCOUNT_COPY } from "../copy/shell";
+import { ACCOUNT_COPY, SHELL_ACTION_ERROR } from "../copy/shell";
 import { LOADING_DELAY_MS } from "../domain/limits";
 import type { AccountDto } from "../ipc/accounts";
+import { IpcError } from "../ipc/errors";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
+import { resources } from "../state/resource";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { accountDto, bootOverrides, deferred, resetRecorder, settle, type Deferred } from "../test/launcher";
-import { AccountCapsule } from "./AccountCapsule";
+import { AccountCapsule, useAccountSkin } from "./AccountCapsule";
 import { OverlayRoot } from "./overlay";
 import { ShellProvider } from "./shell";
 import { TIER_REGULAR_MIN } from "./tier";
@@ -232,5 +234,61 @@ describe("已经读到账户之后", () => {
     // 退场在假时钟下播不完，节点还在；减少动画下缩放一步到位，退场带缩放的话这里已经是 scale(0.6)
     expect(dot.isConnected).toBe(true);
     expect(dot.style.transform).not.toContain("scale");
+  });
+});
+
+describe("胶囊与切换菜单头像用的皮肤", () => {
+  const REMOTE = { kind: "remote", sha1: "ab".repeat(20), model: "wide", hat: true } as const;
+  const seen: unknown[] = [];
+
+  function SkinProbe({ uuid }: { uuid: string }) {
+    launcher = useLauncher();
+    seen.push(useAccountSkin(uuid));
+    return null;
+  }
+
+  async function mountProbe(uuid: string) {
+    seen.length = 0;
+    view = render(
+      <LauncherProvider>
+        <ShellProvider>
+          <SkinProbe uuid={uuid} />
+        </ShellProvider>
+      </LauncherProvider>,
+    );
+    await flush();
+  }
+
+  it("皮肤信息还在读时是「读取中」而不是「没有皮肤」：头像留着正在显示的脸，读到再换上", async () => {
+    const pending = deferred<typeof REMOTE>();
+    ipc.overrides.set("skin_info", () => pending.promise);
+    await mountProbe(STEVE.uuid);
+    expect(seen.at(-1)).toBe("loading");
+    pending.resolve(REMOTE);
+    await flush();
+    expect(seen.at(-1)).toEqual(REMOTE);
+  });
+
+  it("重取失败时沿用上次读到的皮肤；失败照旧经统一错误处理报成通知", async () => {
+    ipc.overrides.set("skin_info", () => REMOTE);
+    await mountProbe(STEVE.uuid);
+    expect(seen.at(-1)).toEqual(REMOTE);
+    ipc.overrides.set("skin_info", () => {
+      throw new IpcError("io", "账户文件读不出来");
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    act(() => resources.invalidate(`skin:${STEVE.uuid}`));
+    await flush();
+    expect(seen.at(-1)).toEqual(REMOTE);
+    expect(launcher.state.toasts.map((t) => `${t.tone}:${t.title}`)).toEqual([`error:${SHELL_ACTION_ERROR.skin}`]);
+  });
+
+  it("从没读到过就失败：没有可沿用的，头像画剪影（null）", async () => {
+    ipc.overrides.set("skin_info", () => {
+      throw new IpcError("io", "账户文件读不出来");
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await mountProbe(STEVE.uuid);
+    expect(seen.at(-1)).toBeNull();
   });
 });

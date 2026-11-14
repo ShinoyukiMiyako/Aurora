@@ -120,33 +120,47 @@ describe("入队上下文与未看过的失败随任务一起清掉", () => {
     expect(store.getState().unseenFailures).toBe(1);
   });
 
-  it("新建结束后还在等落地重扫时被清除：入队上下文留到重扫落定，之后一并清掉", async () => {
+  it("新建结束后还在等落地重扫时清除已结束：这个任务留着（落地期间实例按它派生安装中），别的已结束照常清掉；落定之后再清就一并清掉", async () => {
     let onDisk: InstanceDto[] = [instanceDto("生存"), instanceDto("创造")];
     ipc.overrides.set("list_instances", () => onDisk);
     ipc.overrides.set("install_version", () => {
       onDisk = [...onDisk, instanceDto("新世界")];
       return { id: "新世界" };
     });
+    ipc.overrides.set("install_java", () => {
+      throw new IpcError("download_failed", "下载源暂时不可用");
+    });
     ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
     const settings = { description: null, cover: null, cover_image: null, background: "follow", background_image: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
     ipc.overrides.set("get_instance_settings", () => settings);
     ipc.overrides.set("set_instance_settings", (args) => args.settings);
+    await store.actions.installJava(17);
+    await settle();
+    const [java] = store.getState().tasks;
+    expect(java.status).toBe("failed");
     const landingScan = deferred<InstanceDto[]>();
     await store.actions.createInstance({ name: "新世界", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "grass" });
     ipc.overrides.set("list_instances", () => landingScan.promise);
     await settle();
-    const [task] = store.getState().tasks;
+    const task = store.getState().tasks.find((t) => t.id !== java.id);
+    if (task === undefined) throw new Error("应有新建任务");
     expect(task.status).toBe("done");
     expect(refsOf(store).landing).toEqual([task.id]);
 
     store.actions.clearFinishedTasks();
-    expect(store.getState().tasks).toEqual([]);
+    expect(store.getState().tasks.map((t) => t.id)).toEqual([task.id]);
     expect(Object.keys(refsOf(store).taskMeta)).toEqual([task.id]);
+    expect(store.getState().instances.find((i) => i.id === "新世界")).toMatchObject({ status: "installing" });
+    expectAligned(store);
 
     landingScan.resolve(onDisk);
     await settle();
     expect(refsOf(store).landing).toEqual([]);
-    expect(refsOf(store).taskMeta).toEqual({});
     expect(store.getState().instances.map((i) => i.id)).toEqual(["生存", "创造", "新世界"]);
+    expect(store.getState().instances.find((i) => i.id === "新世界")).toMatchObject({ status: "ready" });
+
+    store.actions.clearFinishedTasks();
+    expect(store.getState().tasks).toEqual([]);
+    expect(refsOf(store).taskMeta).toEqual({});
   });
 });

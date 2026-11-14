@@ -62,6 +62,7 @@ use crate::playtime::{
 use crate::reattach::{RECORD_FORMAT, RecordAccount, RunningRecord};
 use crate::session::JavaUsed;
 use crate::template::{TEMPLATE_META_FILE, TemplateMeta, fill_staging};
+use crate::ui_shape::UiShape;
 
 /// 自带格式版本的常量与登记值：常量一改就与登记值对不上，逼改动的人同步判断数据格式号。
 const REGISTERED_FORMATS: [(&str, u32, u32); 4] = [
@@ -541,6 +542,10 @@ fn config_samples() -> Vec<PetalfallConfig> {
                 auto: false,
                 keep_per_world: 8,
                 max_total_gb: 50,
+            },
+            ui_shape: UiShape {
+                recent_cards: 4,
+                repair_banner: true,
             },
             unrecognized: unrecognized.clone(),
             // 不参与序列化：只由 ConfigStore 读入时收下各段不认识的键、落盘时写回，填不进样本。

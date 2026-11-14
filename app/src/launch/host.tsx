@@ -8,7 +8,21 @@ import type { ConfirmDialogProps } from "../ui/ConfirmDialog";
 export type RunOutcome<T> = { ok: true; value: T } | { ok: false; error: unknown };
 
 /** 命令式确认的入参，与 ConfirmDialog 的同名属性一致。 */
-export type ConfirmOptions = Pick<ConfirmDialogProps, "title" | "body" | "confirmLabel" | "cancelLabel" | "tone">;
+export type ConfirmOptions = Pick<ConfirmDialogProps, "title" | "body" | "confirmLabel" | "cancelLabel" | "tone" | "confirmDisabled">;
+
+/**
+ * 先开框、内容晚到的命令式确认（外壳的 openConfirm）交回的句柄。点了马上开框，数据到了再原地换内容：
+ * 框不重挂、不重做聚焦，标题与正文不再淡入（正文换内容的过渡由正文自己接住），尺寸变化经弹窗形变。
+ * 已经结算（确认、取消、被新的确认顶掉、dismiss）之后 update 与 dismiss 什么都不做。
+ */
+export interface ConfirmHandle {
+  /** 确认为 true；取消、Esc、被新的确认顶掉、dismiss 为 false。 */
+  result: Promise<boolean>;
+  /** 原地换掉其中几项，没给的照旧。 */
+  update(patch: Partial<ConfirmOptions>): void;
+  /** 按取消结算并关框。 */
+  dismiss(): void;
+}
 
 export interface LaunchHost {
   /** 执行动作；失败转成 error 通知并写控制台，返回的 Promise 不 reject。 */

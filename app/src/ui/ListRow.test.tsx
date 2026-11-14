@@ -316,7 +316,24 @@ describe("行的增删", () => {
         writable: true,
         value(this: Element, frames: Keyframe[]) {
           played.push({ el: this, frames });
-          return { currentTime: 0, cancel: () => undefined, onfinish: null, oncancel: null };
+          // 与 Web Animations 一致：建好就在播；从静止起步的让位先暂停、隔几帧再播，暂停不挪时间；取消之后回到 idle
+          const animation = {
+            currentTime: 0 as number | null,
+            playState: "running" as AnimationPlayState,
+            cancel: () => {
+              animation.playState = "idle";
+              animation.currentTime = null;
+            },
+            pause: () => {
+              animation.playState = "paused";
+            },
+            play: () => {
+              animation.playState = "running";
+            },
+            onfinish: null,
+            oncancel: null,
+          };
+          return animation;
         },
       });
       onTestFinished(() => {

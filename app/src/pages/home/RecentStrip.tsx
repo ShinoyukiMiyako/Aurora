@@ -1,12 +1,13 @@
 // 「最近游玩」：大卡之外最近玩过的几个实例。整卡点进详情（标题按钮铺满整卡），右下角的小钮就地启动，
 // 小钮与胶囊共用同一个启动视图，只是收成一个图标或一个进度环。一个都没有时整段不渲染。
 //
-// 这一段夹在两排卡片之间，有没有要等实例列表读出来才知道。首次加载期间整段照常占位（前 300 ms 隐身），
+// 这一段夹在两排卡片之间，有没有、有几张要等实例列表读出来才知道。首次加载按上次读完时记下的张数
+// （state/ui-shape）占位（前 300 ms 隐身）：记下 0 张时首帧不画这一段，读到有卡再淡入；记下有卡时按那么多张骨架占着，
 // 列表到了有卡就原位换上，没有就整段淡出、让出位置，下面一排由页面的让位滑上来；之后有无翻转（换一个、
-// 新玩了一个）同样是淡入淡出加让位，不让下面整排一帧跳动。
+// 新玩了一个）同样是淡入淡出加让位，不让下面整排一帧跳动。读完（没出错）后把这次的张数记下来。
 
 import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from "framer-motion";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Icon } from "../../art/Icon";
 import { LAUNCH_COPY, LOADER_NAME, PHASE_LABEL, STOPPED_LABEL, AVATAR_LINE } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
@@ -23,6 +24,7 @@ import { useNav, useShell } from "../../shell/shell";
 import { useLauncherSelector, useNow } from "../../state/launcher";
 import { findInstance } from "../../state/selectors";
 import { progressTrack } from "../../state/tasks";
+import { useUiShape } from "../../state/ui-shape";
 import { Appear } from "../../ui/Appear";
 import { Button } from "../../ui/Button";
 import { Card, CardTitleButton } from "../../ui/Card";
@@ -35,7 +37,7 @@ import { SectionTitle } from "../../ui/SectionTitle";
 import { Skeleton } from "../../ui/Skeleton";
 import { Tag } from "../../ui/Tag";
 import { HOME_COPY } from "./copy";
-import { RECENT_COUNT, recentInstances } from "./instances";
+import { RECENT_COUNT, recentCardCount, recentInstances } from "./instances";
 import { RECENT_COVER_HEIGHT, SKELETON_SIZE } from "./layout";
 import s from "./home.module.css";
 
@@ -51,17 +53,27 @@ export function RecentStrip({ currentId }: { currentId: string | null }) {
   const { tier } = useShell();
   const gate = useLoadingGate(status.kind === "loading" || settingsLoading);
   const count = RECENT_COUNT[tier];
+  const { shape, report } = useUiShape();
 
   const waiting = gate.view !== "content";
   const pending = gate.view === "pending";
   // 实例列表读不出来时由大卡原位报错；这里与「一个都没玩过」一样整段不渲染
   const recent = waiting || status.kind === "error" ? [] : recentInstances(instances, currentId, count);
-  // 上一次读完时这一段在不在（null：还没读完过）。读取失败后在大卡上点重试，实例列表重新进入读取中：本来就不在的段落
+  // 上一次读完时这一段在不在。读取失败后在大卡上点重试，实例列表重新进入读取中：本来就不在的段落
   // 不为这次重读先插进一块隐身的空白、把下面一排推下去（重读后仍没有卡还要再滑回来），读到有卡再淡入。
-  // 第一次读取还不知道有没有，照常占位
-  const [settled, setSettled] = useState<boolean | null>(null);
+  // 这次运行还没读完过时按记下的形状：上次读完有卡就占位，没有就先不画
+  const [settled, setSettled] = useState(() => shape.recentCards > 0);
   if (!waiting && settled !== (recent.length > 0)) setSettled(recent.length > 0);
-  const shown = waiting ? settled !== false : recent.length > 0;
+  const shown = waiting ? settled : recent.length > 0;
+  // 记下的是最宽一档的张数，这一档放不下那么多时按这一档的上限占位。段落在占位时记下的一定不是 0：
+  // settled 为真只来自记下有卡，或这次读完有卡（随即记下了这次的张数）
+  const skeletons = Math.min(shape.recentCards, count);
+
+  // 读完、没出错才记：加载中与读取失败都不是「有几张」的答案
+  const remembered = waiting || status.kind === "error" ? null : recentCardCount(instances, currentId);
+  useEffect(() => {
+    if (remembered !== null) report({ recentCards: remembered });
+  }, [remembered, report]);
 
   return (
     <Appear>
@@ -84,7 +96,7 @@ export function RecentStrip({ currentId }: { currentId: string | null }) {
             view={gate.view}
             skeleton={
               <div className={s.recentGrid}>
-                {Array.from({ length: count }, (_, i) => (
+                {Array.from({ length: skeletons }, (_, i) => (
                   <RecentSkeleton key={i} />
                 ))}
               </div>

@@ -5,7 +5,7 @@ import { SIDEBAR_PIN_LIMIT, USED_AUTH_SERVERS_LIMIT } from "../domain/limits";
 import type { Task } from "../domain/types";
 import { isSessionActive } from "./session";
 import type { LauncherState } from "./store";
-import { DOWNLOADS_WHEN_RUNNING, isActiveTask, queuePosition as taskQueuePosition, WORLD_TASK_COMMANDS } from "./tasks";
+import { DOWNLOADS_WHEN_RUNNING, INSTANCE_TASK_COMMANDS, isActiveTask, queuePosition as taskQueuePosition, WORLD_TASK_COMMANDS } from "./tasks";
 
 export function activeAccount(state: LauncherState): Account | null {
   if (state.currentAccountId === null) return null;
@@ -58,6 +58,32 @@ export function getInstance(state: LauncherState, id: string): InstanceSummary {
 export function instanceTask(state: LauncherState, instanceId: string): Task | null {
   const task = state.tasks.find((t) => t.instanceId === instanceId && isActiveTask(t));
   return task === undefined ? null : task;
+}
+
+/**
+ * 安装中的实例此刻对应的任务：有未完成的就是它。没有时，这个实例最近一次写整个目录的任务（新建、导入、补全）若已完成，
+ * 就是它结束后的那次重扫还没回来（状态层在这一段里照旧按安装中派生），给出这个已完成的任务，入口按满格画，不翻回排队。
+ * 最近那次失败或取消了，或这次运行里没有这样的任务（后端报着在装）时为 null。只对状态是安装中的实例有意义。
+ */
+export function installTask(state: LauncherState, instanceId: string): Task | null {
+  const active = instanceTask(state, instanceId);
+  if (active !== null) return active;
+  // 任务表按入队与重试的先后排：同一实例上写整个目录的任务互斥，排在最后的就是最近的那次
+  let latest: Task | null = null;
+  for (const t of state.tasks) if (t.instanceId === instanceId && INSTANCE_TASK_COMMANDS.has(t.spec.command)) latest = t;
+  return latest !== null && latest.status === "done" ? latest : null;
+}
+
+/**
+ * 「清除已结束」此刻能清掉的任务数：已结束的，扣掉落地中的（landingTaskIds）。新建与导入不论成败、补全成功之后，
+ * 结束触发的那次重扫回来之前清除会留着它们（tasks 的 clearFinished）；计数要是算上，按钮在重扫回来前一直写着 1 且可点，
+ * 点了却什么都不清。每次进度事件都要跑一遍：落地中的只有寥寥几条，建一次集合，按任务条数线性走完。
+ */
+export function clearableFinishedCount(state: LauncherState): number {
+  const landing = new Set(state.landingTaskIds);
+  let count = 0;
+  for (const t of state.tasks) if (!isActiveTask(t) && !landing.has(t.id)) count += 1;
+  return count;
 }
 
 /**

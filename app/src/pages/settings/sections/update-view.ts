@@ -23,12 +23,27 @@ export interface CardButton {
   disabledReason: string | undefined;
 }
 
+/**
+ * 下载中主句里的百分数。进度事件约 100 ms 一条，照原样拼进主句一秒跳十次字，所以状态行不直接画 view.title，
+ * 而是在 before 与 after 之间摆与进度条同一条平滑的百分数节点（ui/SmoothPercent）。
+ */
+export interface CardPercent {
+  /** 0-1，上报的原值。 */
+  value: number;
+  /** 平滑的分段：换任务或换源都从新值起算。换源后字节从 0 重新报起，同一段里只进不退会让百分数停在上一个源下到的位置。 */
+  track: string;
+  before: string;
+  after: string;
+}
+
 /** 下载中的次句素材：已下大小要按显示节拍换字，由渲染它的组件节流后交给 downloadSub 拼成句子。 */
 export interface CardProgress {
   bytes: number;
   totalBytes: number | null;
   /** 换过源时跟在字节后面的一句；还在第一个源时为 null。 */
   switched: string | null;
+  /** 主句里的百分数；总量未知时为 null，主句只写版本。 */
+  percent: CardPercent | null;
 }
 
 export interface CardView {
@@ -136,6 +151,15 @@ export function channelChangeCost(phase: UpdaterPhase): ChannelChangeCost | null
   }
 }
 
+/** 文案模板里百分数的占位：模板按它切成前后两段，中间摆平滑的百分数节点。 */
+export const PERCENT_SLOT = "\u0000";
+
+export function aroundPercent(text: string): readonly [string, string] {
+  const parts = text.split(PERCENT_SLOT);
+  if (parts.length !== 2) throw new Error(`下载中的主句里百分数应当恰好出现一次，实为 ${parts.length - 1} 次`);
+  return [parts[0], parts[1]];
+}
+
 /** 下载中的次句：已下 / 总量（总量未知时只写已下），换过源时在后面说一句。bytes 由调用方给显示用的值。 */
 export function downloadSub(progress: CardProgress): string {
   const size = progress.totalBytes === null ? formatBytes(progress.bytes) : UPDATE_COPY.progress(formatBytes(progress.bytes), formatBytes(progress.totalBytes));
@@ -205,8 +229,15 @@ export function updateCardView(state: UpdaterState, ctx: CardContext): CardView 
     case "downloading": {
       const fraction = downloadFraction(phase.bytes, phase.totalBytes);
       const title = fraction === null ? UPDATE_COPY.downloading(phase.update.version) : UPDATE_COPY.downloadingPct(phase.update.version, percent(fraction));
+      // 还没报过源就是在用第一个源，与报了第 0 个源是同一段
+      const sourceIndex = phase.source === null ? 0 : phase.source.index;
+      let pct: CardPercent | null = null;
+      if (fraction !== null) {
+        const [before, after] = aroundPercent(UPDATE_COPY.downloadingPct(phase.update.version, PERCENT_SLOT));
+        pct = { value: fraction, track: `${phase.taskId}:${sourceIndex}`, before, after };
+      }
       // 已下大小随进度事件约 100 ms 一涨，次句不在这里定稿：交给组件按显示节拍换字
-      const progress = { bytes: phase.bytes, totalBytes: phase.totalBytes, switched: sourceSwitchedCopy(phase.source) };
+      const progress = { bytes: phase.bytes, totalBytes: phase.totalBytes, switched: sourceSwitchedCopy(phase.source), percent: pct };
       return view(title, null, button(UPDATE_COPY.viewProgress, "secondary", "open_panel"), { progress });
     }
     case "ready":

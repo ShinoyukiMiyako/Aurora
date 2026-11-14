@@ -175,12 +175,14 @@ export interface InstanceSummary {
   playtimeMin: number | null;
   /** 游玩记录读不出来的原因。 */
   playError: string | null;
-  /** 实例目录或工作目录读不出来的原因；此时 createdAt 或 modCount、worldCount、isolated 为 null。 */
+  /** 实例目录或工作目录读不出来的原因；此时 createdAt 或 modCount、worldCount、resourcePackCount、isolated 为 null。 */
   dirError: string | null;
   /** mods/ 下的文件数，只数不解析；损坏、设置或工作目录读不出时为 null。 */
   modCount: number | null;
   /** saves/ 下的存档数（每个文件夹算一个）；何时为 null 同 modCount。 */
   worldCount: number | null;
+  /** resourcepacks/ 下的资源包数（文件夹与 .zip 文件各算一个，与内容列表同一口径）；何时为 null 同 modCount。 */
+  resourcePackCount: number | null;
   /** 隔离的生效值；何时为 null 同 modCount。 */
   isolated: boolean | null;
   /** 实例设置里的最大内存 MB；null 为跟随全局（或设置读不出）。 */
@@ -302,6 +304,7 @@ export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): Instanc
     dirError: dto.dir_error,
     modCount: dto.mod_count,
     worldCount: dto.world_count,
+    resourcePackCount: dto.resource_pack_count,
     isolated: dto.isolated,
     memoryMb: dto.memory_mb,
     modpack: dto.modpack === null ? null : modpackFromDto(dto.modpack),

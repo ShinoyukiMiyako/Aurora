@@ -2,14 +2,14 @@
 // 启动器更新面板的开合与自动检查、全局快捷键、尺寸分档、运行呼吸窗口、材质状态绑定，以及启动层要的宿主能力。
 // 标题栏、侧栏、命令面板、通知容器等视觉件只读这里导出的 useShell / useNav，不各自持有这些状态。
 //
-// 装配：AppearanceProvider -> LauncherProvider -> ShellProvider -> 外壳布局。外壳布局把应用根元素交给 bindRoot、
+// 装配：AppearanceProvider -> UiShapeProvider -> LauncherProvider -> ShellProvider -> 外壳布局。外壳布局把应用根元素交给 bindRoot、
 // 内容区滚动容器交给 bindPageScroll，并把 OverlayRoot 放在应用根元素的最后一个子位置。
 
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ACTION_ERROR, TOAST_COPY } from "../copy/flows";
 import { artBlocks, artStatus, onArtChanged } from "../ipc/art";
 import { endBreathWindow, startBreathWindow } from "../launch/breath";
-import { LaunchHostProvider, type ConfirmOptions, type LaunchHost } from "../launch/host";
+import { LaunchHostProvider, type ConfirmHandle, type ConfirmOptions, type LaunchHost } from "../launch/host";
 import { bindArtStatus } from "../mc/binding";
 import { registerCatalogReload, settleArtDownload } from "../state/art-download";
 import type { CreateInstancePreset } from "../state/flows";
@@ -91,6 +91,11 @@ export interface ShellApi {
   tier: Tier;
   /** 命令式确认：确认为 true；取消、Esc、被新的确认顶掉为 false。 */
   confirm(options: ConfirmOptions): Promise<boolean>;
+  /**
+   * 先开框、内容晚到的命令式确认：点了马上开框，要等的数据到了再经句柄原地换内容（见 ConfirmHandle）。
+   * 与 confirm 共用同一个确认框，同样顶掉尚未回答的旧请求。
+   */
+  openConfirm(options: ConfirmOptions): ConfirmHandle;
   palette: PaletteState;
   openPalette(query?: string): void;
   closePalette(): void;
@@ -142,8 +147,6 @@ export interface ShellApi {
    * 永不 reject（失败已经报告过，再抛回去会报两次）。
    */
   copyText(text: string): Promise<boolean>;
-  /** 主页花瓣暂停：窗口不可见、失焦或有带遮罩的浮层。 */
-  petalsPaused: boolean;
   /** 应用根元素（尺寸分档按它的宽度）。 */
   bindRoot(el: HTMLElement | null): void;
   /** 内容区唯一的纵向滚动容器（历史项的滚动位置记录与恢复）。 */
@@ -154,6 +157,8 @@ export interface ShellApi {
 
 const NavContext = createContext<NavApi | null>(null);
 const ShellContext = createContext<ShellApi | null>(null);
+/** 窗口可见且有焦点。只给花瓣暂停用，不进 ShellApi，理由见 usePetalsPaused。 */
+const WindowActiveContext = createContext<boolean | null>(null);
 
 export function useNav(): NavApi {
   const api = useContext(NavContext);
@@ -165,6 +170,19 @@ export function useShell(): ShellApi {
   const api = useContext(ShellContext);
   if (api === null) throw new Error("useShell 必须在 ShellProvider 之内使用");
   return api;
+}
+
+/**
+ * 主页花瓣暂停：窗口不可见、失焦或有带遮罩的浮层。
+ * 不放在 ShellApi 上：每次开关弹窗、窗口失焦聚焦都会换外壳上下文的值，读 useShell 的整页跟着重渲染一遍；
+ * 弹窗的入场与退场动画在这之前已经创建，被这遍渲染堵住的时长记进动画，第一张可见帧就跳过一截。
+ * 外壳核心也不订阅浮层状态，开关弹窗只让调用这里的那一小块重渲染。
+ */
+export function usePetalsPaused(): boolean {
+  const active = useContext(WindowActiveContext);
+  if (active === null) throw new Error("usePetalsPaused 必须在 ShellProvider 之内使用");
+  const { scrimOpen } = useOverlayState();
+  return !active || scrimOpen;
 }
 
 export function ShellProvider({ children }: { children: ReactNode }) {
@@ -237,6 +255,8 @@ interface ConfirmRequest {
   id: number;
   /** 确认框的 key：框开着时被顶替的请求沿用前一个的，框关上之后再来的请求才换新的。 */
   frame: number;
+  /** 经句柄原地换过几次内容：确认框的布局只在请求或它变了的那次重渲染量。 */
+  revision: number;
   options: ConfirmOptions;
   resolve: (ok: boolean) => void;
 }
@@ -267,7 +287,6 @@ function ShellCore({ children }: { children: ReactNode }) {
   const actions = useLauncherActions();
   const run = useRunner();
   const overlay = useOverlayControls();
-  const { scrimOpen } = useOverlayState();
 
   // ---------------------------------------------------------------- 历史
 
@@ -408,19 +427,6 @@ function ShellCore({ children }: { children: ReactNode }) {
   const pendingRef = useRef<ConfirmRequest | null>(null);
   const confirmSeq = useRef(0);
 
-  const confirm = useCallback((options: ConfirmOptions) => {
-    return new Promise<boolean>((resolve) => {
-      // 新的确认顶掉尚未回答的旧请求：旧请求按取消结算
-      if (pendingRef.current !== null) pendingRef.current.resolve(false);
-      confirmSeq.current += 1;
-      const frame = pendingRef.current === null ? confirmSeq.current : pendingRef.current.frame;
-      const request: ConfirmRequest = { id: confirmSeq.current, frame, options, resolve };
-      pendingRef.current = request;
-      setConfirmRequest(request);
-      setConfirmOpen(true);
-    });
-  }, []);
-
   const settleConfirm = useCallback((ok: boolean) => {
     const request = pendingRef.current;
     if (request === null) return;
@@ -428,6 +434,42 @@ function ShellCore({ children }: { children: ReactNode }) {
     request.resolve(ok);
     setConfirmOpen(false);
   }, []);
+
+  const openConfirm = useCallback(
+    (options: ConfirmOptions): ConfirmHandle => {
+      // 新的确认顶掉尚未回答的旧请求：旧请求按取消结算
+      if (pendingRef.current !== null) pendingRef.current.resolve(false);
+      confirmSeq.current += 1;
+      const id = confirmSeq.current;
+      const frame = pendingRef.current === null ? id : pendingRef.current.frame;
+      let request!: ConfirmRequest;
+      const result = new Promise<boolean>((resolve) => {
+        request = { id, frame, revision: 0, options, resolve };
+      });
+      pendingRef.current = request;
+      setConfirmRequest(request);
+      setConfirmOpen(true);
+      // 已经结算（含被新的确认顶掉）的句柄碰不到确认框：那时框里是别的请求，或者正在退场
+      const live = () => pendingRef.current?.id === id;
+      return {
+        result,
+        update: (patch) => {
+          if (!live()) return;
+          // 同一个请求原地换内容：id 与 frame 不变，确认框不重挂、不当成顶替（不重做聚焦、标题与正文不淡入）
+          setConfirmRequest((prev) => {
+            if (prev?.id !== id) throw new Error(`确认请求 ${id} 还没结算，外壳里的确认框却不是它`);
+            return { ...prev, revision: prev.revision + 1, options: { ...prev.options, ...patch } };
+          });
+        },
+        dismiss: () => {
+          if (live()) settleConfirm(false);
+        },
+      };
+    },
+    [settleConfirm],
+  );
+
+  const confirm = useCallback((options: ConfirmOptions) => openConfirm(options).result, [openConfirm]);
 
   // 另一实例占着游戏进程时再点启动：状态容器挂出 launchPrompt，这里弹替换确认并把回答交回
   const promptRef = useRef<typeof launchPrompt>(null);
@@ -715,8 +757,6 @@ function ShellCore({ children }: { children: ReactNode }) {
     return () => endBreathWindow();
   }, [runningSince, active]);
 
-  const petalsPaused = !shown || !focused || scrimOpen;
-
   // ---------------------------------------------------------------- 材质状态
 
   // 绑定只建一次；失败经统一错误处理报告（写控制台 + error 通知）
@@ -772,6 +812,7 @@ function ShellCore({ children }: { children: ReactNode }) {
     () => ({
       tier,
       confirm,
+      openConfirm,
       palette,
       openPalette,
       closePalette,
@@ -791,7 +832,6 @@ function ShellCore({ children }: { children: ReactNode }) {
       saveFile,
       runToastAction,
       copyText,
-      petalsPaused,
       bindRoot: setRootEl,
       bindPageScroll,
       bindChrome,
@@ -809,11 +849,11 @@ function ShellCore({ children }: { children: ReactNode }) {
       fileDrop.registerFileDrop,
       fileDrop.registerJarDrop,
       installUpdate,
+      openConfirm,
       openCreateInstance,
       openPalette,
       openUpdatePanel,
       palette,
-      petalsPaused,
       pickFile,
       registerFind,
       registerShortcut,
@@ -829,15 +869,16 @@ function ShellCore({ children }: { children: ReactNode }) {
       <ShellContext.Provider value={shell}>
         <LaunchHostProvider host={launchHost}>
           <UpdaterBridge bind={bindUpdater} />
-          {children}
+          <WindowActiveContext.Provider value={active}>{children}</WindowActiveContext.Provider>
           {/* 框开着时被顶替不换 key：换 key 会把开着的框连遮罩一起卸掉重挂，遮罩断一帧。原地换内容，
-              按 requestKey 重做初始聚焦；框关上之后再来的请求才换 key */}
+              按 requestKey 重做初始聚焦；框关上之后再来的请求才换 key。布局只在换了请求或句柄换了内容的那次量 */}
           {confirmRequest !== null && (
             <ConfirmDialog
               key={confirmRequest.frame}
               open={confirmOpen}
               {...confirmRequest.options}
               requestKey={confirmRequest.id}
+              layoutKey={`${confirmRequest.id}:${confirmRequest.revision}`}
               onConfirm={() => settleConfirm(true)}
               onClose={() => settleConfirm(false)}
             />

@@ -13,11 +13,11 @@
 
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { AnimatePresence, motion, useReducedMotionConfig } from "framer-motion";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Icon } from "../art/Icon";
 import { clock } from "../domain/format";
 import { APP_NAME } from "../lib/app-info";
-import { fade, insertItemFade, popMark, springs } from "../lib/motion";
+import { fade, insertItemFade, popMark, scrollGlide, springs, tweenAt } from "../lib/motion";
 import { cssVars, cx } from "../lib/util";
 import { Appear } from "./Appear";
 import { Button } from "./Button";
@@ -59,8 +59,20 @@ export const ERROR_ANNOUNCE_INTERVAL_MS = 5000;
 const LIST_PADDING_TOP = 8;
 const LIST_PADDING_BOTTOM = 14;
 
-/** 平滑滚到底的途中交给虚拟列表的找补判据：一律不找补（理由见组件里的 glideToEnd）。 */
+/** 滚到底的补间途中交给虚拟列表的找补判据：一律不找补（理由见组件里的 glideToEnd）。 */
 const HOLD_SCROLL_ADJUSTMENT = () => false;
+
+/** 进行中的「跳到最新」补间。 */
+interface Glide {
+  /** 起点的滚动位置。 */
+  from: number;
+  /** 按起步时的距离定下的时长与曲线。 */
+  tween: ReturnType<typeof scrollGlide>;
+  /** 起步那一帧的时间戳，第一帧到来前为 null：只拿帧回调给的时间戳相减，计时与画面同一个来源。 */
+  startedAt: number | null;
+  /** 排着的下一帧。 */
+  frame: number;
+}
 
 /**
  * 「跳到最新」胶囊的进出：从下方 8px 处滑上来并淡入，收起时原地淡出。
@@ -256,9 +268,8 @@ export function LogConsole({
   const [wrap, setWrap] = useState(false);
   const [stuck, setStuck] = useState(true);
   const stuckRef = useRef(true);
-  // 「跳到最新」的平滑滚动途中：途经的位置不算用户上翻，到底（滚动结束）后再按实际位置判断。
-  // target 是最近一次发出的平滑滚动的终点，目标没变就不重发：每发一次，浏览器都从当前位置重新起一段平滑滚动
-  const jumping = useRef<{ target: number } | null>(null);
+  // 「跳到最新」的补间途中：途经的位置不算用户上翻，补间写到底之后再按实际位置判断
+  const glide = useRef<Glide | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const omittedRef = useRef<HTMLDivElement>(null);
   const reduced = useReducedMotionConfig() === true;
@@ -289,25 +300,70 @@ export function LogConsole({
   }, [virtualizer, wrap]);
 
   /**
-   * 平滑滚到底：直接交给浏览器，目标是元素能滚到的最大位置。途中不让虚拟列表做测量找补：换行时途经的行第一次量出高度，
-   * 起点在滚动位置之上的，它默认立刻写一次瞬时滚动把正在读的行留在原处；按 CSSOM，新的程序滚动会中止正在进行的平滑滚动。
-   * 跳到最新本来就要离开正在读的位置，这时的找补没有意义，压住它平滑滚动才走得完；途中行高变了、新行进来，
-   * 由下面的贴底找补把目标改到新的底部。不走虚拟列表自己的平滑滚动命令：命令途中它只测量目标附近的行，
-   * 落点上方没量到的折行行会一直按估计行高排位、叠在下一行上；离目标不足一屏时它改目标用的是瞬时滚动，最后一段一步跳完。
+   * 滚到底：组件逐帧写 scrollTop 的定长补间，时长按起步时的距离给。每帧把终点取为当时元素能滚到的最大位置，
+   * 途中新行进来、换行时途经的行第一次量出高度，只是把终点推远，不重起；到时长写到当时的底部就结束，不等 scrollend。
+   * 不交给浏览器的平滑滚动：底部一变就得重发 scrollTo，浏览器对进行中的平滑滚动再发一次，会从当前位置以零速重起一段，
+   * 实时会话每批新行、换行时每量出一行都要重起，滚动一直停在起步段，几十秒到不了底，实时会话里永远到不了。
+   * 也不走虚拟列表自己的平滑滚动命令：命令途中它只测量目标附近的行，落点上方没量到的折行行会一直按估计行高排位、叠在下一行上。
+   * 途中压住虚拟列表的测量找补：途经的行第一次量出高度、起点在滚动位置之上的，它默认写一次瞬时滚动把正在读的行留在原处；
+   * 跳到最新本来就要离开正在读的位置，那一下只会让这一帧的画面跳一下，下一帧又被补间写回去。
    */
-  const glideToEnd = (el: HTMLElement, again = false) => {
-    const target = el.scrollHeight - el.clientHeight;
-    if (!again && jumping.current !== null && jumping.current.target === target) return;
-    if (jumping.current === null) virtualizer.shouldAdjustScrollPositionOnItemSizeChange = HOLD_SCROLL_ADJUSTMENT;
-    jumping.current = { target };
-    el.scrollTo({ top: target, behavior: "smooth" });
+  const glideToEnd = (el: HTMLElement) => {
+    const from = el.scrollTop;
+    const state: Glide = { from, tween: scrollGlide(distanceFromBottom(el)), startedAt: null, frame: 0 };
+    // 写完当场派发一次 scroll：浏览器的滚动事件要到下一帧才来，虚拟列表照它换渲染的行。长距离起步时一帧滚过几千像素，
+    // 等它的话这一帧画出来的还是上一帧位置的那些行，整个可视区一片空白；当场通知，这一帧就画上新位置的行。
+    // 下一帧浏览器自己的滚动事件读到的是同一个位置，虚拟列表不再重渲染
+    const moveTo = (top: number) => {
+      const before = el.scrollTop;
+      el.scrollTop = top;
+      if (el.scrollTop !== before) el.dispatchEvent(new Event("scroll"));
+    };
+    const step = (now: number) => {
+      if (state.startedAt === null) state.startedAt = now;
+      const elapsed = (now - state.startedAt) / 1000;
+      const end = el.scrollHeight - el.clientHeight;
+      if (elapsed >= state.tween.duration) {
+        moveTo(end);
+        endGlide();
+        return;
+      }
+      moveTo(from + (end - from) * tweenAt(state.tween, elapsed));
+      state.frame = requestAnimationFrame(step);
+    };
+    virtualizer.shouldAdjustScrollPositionOnItemSizeChange = HOLD_SCROLL_ADJUSTMENT;
+    state.frame = requestAnimationFrame(step);
+    glide.current = state;
   };
 
-  /** 平滑滚动结束或被用户接管：测量找补回到虚拟列表的默认判据。 */
+  /** 补间写到底或被用户接管：取消排着的帧，测量找补回到虚拟列表的默认判据。 */
   const endGlide = () => {
-    jumping.current = null;
+    const running = glide.current;
+    if (running === null) return;
+    cancelAnimationFrame(running.frame);
+    glide.current = null;
     virtualizer.shouldAdjustScrollPositionOnItemSizeChange = undefined;
   };
+
+  // 自动换行时逐行测量。补间途中新挂上的行当场量出高度：滚动中虚拟列表不在挂载时量，等 ResizeObserver 报上来、
+  // 再异步重渲染才按真实高度排开，这一帧已经画出去了；补间一帧滚过几屏，新挂上的行就在可视区里，按估计行高叠成一团。
+  // 挂载时量出的是提交阶段里的更新，绘制之前就同步重排好
+  const measureRow = useCallback(
+    (node: HTMLDivElement | null) => {
+      virtualizer.measureElement(node);
+      if (node !== null && glide.current !== null) virtualizer.resizeItem(Number(node.dataset.index), node.offsetHeight);
+    },
+    [virtualizer],
+  );
+
+  // 卸载时补间还在走：取消排着的帧，不再写已经卸下的滚动区
+  useEffect(
+    () => () => {
+      const running = glide.current;
+      if (running !== null) cancelAnimationFrame(running.frame);
+    },
+    [],
+  );
 
   const totalSize = virtualizer.getTotalSize();
   /** 上一次提交时的显示状态：判断这一次是不是只在两头增删了行。 */
@@ -318,9 +374,8 @@ export function LogConsole({
     const el = scrollRef.current;
     if (el === null) return;
     if (stuckRef.current) {
-      // 平滑滚到底的途中新行进来、行量出新高度：目标改到新的底部，接着平滑地滚，不中途一下跳到位
-      if (jumping.current !== null) glideToEnd(el);
-      else el.scrollTop = el.scrollHeight;
+      // 滚到底的补间途中新行进来、行量出新高度：补间下一帧按新的底部定终点，这里再写滚动位置会一下跳到底
+      if (glide.current === null) el.scrollTop = el.scrollHeight;
       return;
     }
     // 筛选、换行切换是用户自己换了内容，不找补
@@ -344,7 +399,9 @@ export function LogConsole({
     if (el === null) return;
     stuckRef.current = true;
     setStuck(true);
-    // 本来就在底部时不会有滚动、也就等不到滚动结束：直接到位
+    // 补间已经在往底部走（途中又按了 End）：它每帧追着当时的底部，不重起
+    if (glide.current !== null) return;
+    // 本来就在底部时没有要补的距离：直接到位
     if (reduced || distanceFromBottom(el) < 1) {
       el.scrollTop = el.scrollHeight;
       return;
@@ -354,28 +411,14 @@ export function LogConsole({
 
   const onScroll = () => {
     const el = scrollRef.current;
-    if (el === null || jumping.current !== null) return;
+    if (el === null || glide.current !== null) return;
     const atBottom = distanceFromBottom(el) < STICK_THRESHOLD;
     stuckRef.current = atBottom;
     setStuck(atBottom);
   };
 
-  const onScrollEnd = () => {
-    const el = scrollRef.current;
-    if (el === null || jumping.current === null) return;
-    // 停下时还没到底：平滑滚动被别的程序滚动中止在半路。接着滚，半路的位置不算用户上翻
-    if (distanceFromBottom(el) >= STICK_THRESHOLD) {
-      glideToEnd(el, true);
-      return;
-    }
-    endGlide();
-    onScroll();
-  };
-
   // 用户自己动手（滚轮、拖滚动条、按键）就不再是程序滚动：之后的位置照常判断是否贴底，新行进来也不再把用户拽回底部
-  const takeOver = () => {
-    if (jumping.current !== null) endGlide();
-  };
+  const takeOver = endGlide;
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== "End" || event.ctrlKey || event.altKey || event.metaKey) {
@@ -446,7 +489,6 @@ export function LogConsole({
           aria-label="日志输出"
           tabIndex={0}
           onScroll={onScroll}
-          onScrollEnd={onScrollEnd}
           onWheel={takeOver}
           onPointerDown={takeOver}
           onKeyDown={onKeyDown}
@@ -458,7 +500,7 @@ export function LogConsole({
               return (
                 <div
                   key={item.key}
-                  ref={wrap ? virtualizer.measureElement : undefined}
+                  ref={wrap ? measureRow : undefined}
                   data-index={item.index}
                   className={styles.line}
                   data-level={line.level}
@@ -486,7 +528,7 @@ export function LogConsole({
           )}
         </AnimatePresence>
       </div>
-      <span className={styles.srOnly} role="status" aria-live="polite">
+      <span className="sk-sr-only" role="status" aria-live="polite">
         <span key={announcement.seq}>{announcement.text}</span>
       </span>
     </div>

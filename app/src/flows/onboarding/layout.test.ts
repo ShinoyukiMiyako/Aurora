@@ -40,6 +40,10 @@ describe("步骤里出没的块", () => {
     expect(wrap).toMatch(/display:\s*flex/);
     expect(wrap).toMatch(/align-self:\s*flex-start/);
   });
+
+  it("Java 扫描中给读屏的说明交给 Loadable 的 busyLabel：向导样式表里不再自带一份视觉隐藏规则", () => {
+    expect(css).not.toMatch(/clip-path:\s*inset\(50%\)/);
+  });
 });
 
 describe("账户步", () => {

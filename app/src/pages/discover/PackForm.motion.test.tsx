@@ -3,12 +3,12 @@
 // 要等 framer-motion 的帧循环把动画播完，整个文件走真实时间。
 
 import { MotionConfig } from "framer-motion";
-import { useCallback, type ReactNode } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, useCallback, type ReactNode } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { COVER_PRESETS, type InstanceCover } from "../../art/iso/covers";
 import type { SpringName } from "../../lib/motion";
 import { OverlayProvider, OverlayRoot } from "../../shell/overlay";
-import { render, waitForFrames, type Rendered } from "../../test/dom";
+import { render, stubResizeObserver, waitForFrames, type Rendered } from "../../test/dom";
 import { PackForm, type PackFacts } from "./PackForm";
 
 // 方块要读材质、画 canvas，和这里要验的位移无关：换成一个标着封面的占位
@@ -124,6 +124,61 @@ describe("舞台方块换封面", () => {
     written.stop();
     expect(Number(written.opacities[0])).toBeLessThan(1);
     expect(scales(written.transforms)).toEqual([]);
+  });
+});
+
+describe("换封面面板里的勾标", () => {
+  // 浮层按面板尺寸重新定位，jsdom 没有 ResizeObserver
+  beforeEach(() => {
+    stubResizeObserver();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** 打开换封面面板，取此刻选中那一格的勾标。 */
+  function openPicker(): HTMLElement {
+    const button = [...document.querySelectorAll("button")].find((b) => b.textContent === "换封面");
+    if (button === undefined) throw new Error("没有换封面按钮");
+    act(() => button.click());
+    const check = document.querySelector<HTMLElement>('[role="radio"][aria-checked="true"] [data-cover-check]');
+    if (check === null) throw new Error("换封面面板里选中的那一格没有勾标");
+    return check;
+  }
+
+  it("换到别的一格：旧格的勾标缩回 0.6 并淡出，新格的勾标从 0.6 弹出", async () => {
+    view = render(form(FIRST));
+    const old = openPicker();
+    const written = record(old);
+    view.rerender(form(SECOND));
+    const fresh = document.querySelector<HTMLElement>('[role="radio"][aria-checked="true"] [data-cover-check]');
+    expect(fresh).not.toBe(old);
+    expect(fresh?.style.opacity).toBe("0");
+    expect(fresh?.style.transform).toBe("scale(0.6)");
+
+    await waitForFrames(() => expect(old.isConnected).toBe(false));
+    written.stop();
+    // 只淡出不缩小时（行内标签那一档的退场）这里一个缩放值都录不到
+    const seen = scales(written.transforms);
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.at(-1)).toBeCloseTo(0.6, 6);
+    expect(seen.every((s) => s >= 0.6 - 1e-6 && s <= 1)).toBe(true);
+    expect(written.opacities.at(-1)).toBe("0");
+  });
+
+  it("减少动画时旧格的勾标只淡出，进出都不缩放", async () => {
+    view = render(form(FIRST, { reduced: "always" }));
+    const old = openPicker();
+    const written = record(old);
+    view.rerender(form(SECOND, { reduced: "always" }));
+    const fresh = document.querySelector<HTMLElement>('[role="radio"][aria-checked="true"] [data-cover-check]');
+    expect(fresh?.style.opacity).toBe("0");
+    expect(fresh?.style.transform).toBe("");
+
+    await waitForFrames(() => expect(old.isConnected).toBe(false));
+    written.stop();
+    expect(scales(written.transforms)).toEqual([]);
+    expect(written.opacities.at(-1)).toBe("0");
   });
 });
 

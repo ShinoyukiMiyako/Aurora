@@ -1,6 +1,8 @@
+/* 数字等宽：带计数的候选只按最宽的位数列一条（「全部更新 · 99」），同位数的计数才都不比它宽 */
 .slot {
   display: inline-grid;
   justify-items: center;
+  font-variant-numeric: tabular-nums;
 }
 
 .slot[data-align="start"] {
@@ -13,6 +15,7 @@
   white-space: nowrap;
 }
 
+/* 跟随祖先而不是写死 visible：整颗按钮放进 visibility: hidden 的隐形垫宽占位时，当前这条不能自己露出来 */
 .option[data-current] {
-  visibility: visible;
+  visibility: inherit;
 }

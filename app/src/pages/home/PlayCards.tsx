@@ -3,10 +3,11 @@
 //
 // 加载态与内容同尺寸：骨架照真实内容逐行画（行高取同一处样式），数据到达时只交叉淡化、不撑高卡片。
 // 近 7 天柱与日历一样，加载期间就画出柱槽与星期（日期由今天算得出），数据到了数值淡入、填充长出来。
+// 常玩加载器、累计时长与当天玩过的实例还要等实例列表：游玩记录先到时只有这几块留在骨架里，列表读完再各自淡入。
 
 import { motion } from "framer-motion";
 import { useState } from "react";
-import { LOADER_NAME } from "../../copy/flows";
+import { BOOT_SLICE_ERROR, LOADER_NAME } from "../../copy/flows";
 import { formatCount, formatPlaytime } from "../../domain/format";
 import { InstanceAvatar } from "../../launch/InstanceAvatar";
 import type { LoadingView } from "../../lib/loading-gate";
@@ -15,6 +16,7 @@ import { cssVars } from "../../lib/util";
 import { useNav } from "../../shell/shell";
 import { describeError } from "../../state/errors";
 import { useLauncherSelector } from "../../state/launcher";
+import type { PlayDayDto } from "../../state/queries/home";
 import { findInstance } from "../../state/selectors";
 import { Appear } from "../../ui/Appear";
 import { Button } from "../../ui/Button";
@@ -51,6 +53,20 @@ import s from "./home.module.css";
 /** 连续游玩满这么多天写「一周没断过」。 */
 const STREAK_WEEK = 7;
 const EMPTY_CALENDAR: ReadonlyMap<string, number> = new Map();
+/** 当日实例行的头像边长，骨架照同一个数画。 */
+const DAY_AVATAR = 24;
+/** 当日实例的列表骨架至多画几行：Skeleton 约定的列表上限，早已超出列表的最大高度，再多也看不见。 */
+const DAY_SKELETON_ROWS = 6;
+
+/**
+ * 要按实例列表算的几块（常玩加载器、累计时长、当天玩过的实例）怎么画。游玩记录通常比实例列表（要扫盘）先到，
+ * 按还空着的列表算会写出「暂无」「0 个实例」「已被删除」，所以列表读完之前这几块照它的加载门画骨架。
+ */
+export interface InstancesView {
+  view: LoadingView;
+  /** 实例列表读取出错：这几块写读不到，错误本身由继续游玩大卡原位报。 */
+  failed: boolean;
+}
 
 function dayLabel(date: string): string {
   const [, m, d] = date.split("-").map(Number);
@@ -94,6 +110,8 @@ function StatsError({ play }: { play: Extract<PlayView, { status: "error" }> }) 
 export interface CalendarCardProps {
   span: ResponsiveValue;
   play: PlayView;
+  /** 当日详情里列出当天玩过的实例要等它。 */
+  instances: InstancesView;
   /** 今天，YYYY-MM-DD。 */
   today: string;
   month: string;
@@ -102,7 +120,7 @@ export interface CalendarCardProps {
   onSelect: (date: string) => void;
 }
 
-export function CalendarCard({ span, play, today, month, onMonthChange, selected, onSelect }: CalendarCardProps) {
+export function CalendarCard({ span, play, instances, today, month, onMonthChange, selected, onSelect }: CalendarCardProps) {
   const ready = play.status === "ready" ? play.activity : null;
   const minMonth = ready === null ? month : ready.minMonth;
   const maxMonth = ready === null ? month : ready.maxMonth;
@@ -152,7 +170,7 @@ export function CalendarCard({ span, play, today, month, onMonthChange, selected
             <Inset className={s.dayDetail}>
               <span className={s.dayDate}>{dayLabel(selected)}</span>
               <Loadable view={loadView(play)} skeleton={<DaySkeleton />}>
-                {() => <DayDetail activity={readyActivity(play)} date={selected} />}
+                {() => <DayDetail activity={readyActivity(play)} date={selected} instances={instances} />}
               </Loadable>
             </Inset>
           </div>
@@ -176,21 +194,25 @@ function DaySkeleton() {
   );
 }
 
-function DayDetail({ activity, date }: { activity: PlayActivity; date: string }) {
+interface DayDetailProps {
+  activity: PlayActivity;
+  date: string;
+  instances: InstancesView;
+}
+
+function DayDetail({ activity, date, instances }: DayDetailProps) {
   // 改选日期时新的一天淡入，读得出换了一天；挂载时就在的那天跟着骨架换内容的淡入走，不再叠一层
   const [firstDate] = useState(date);
   const [moved, setMoved] = useState(false);
   if (!moved && date !== firstDate) setMoved(true);
   return (
     <motion.div key={date} className={s.dayBody} initial={moved ? { opacity: 0 } : false} animate={{ opacity: 1, transition: fade.in }}>
-      <DayContent activity={activity} date={date} />
+      <DayContent activity={activity} date={date} instances={instances} />
     </motion.div>
   );
 }
 
-function DayContent({ activity, date }: { activity: PlayActivity; date: string }) {
-  const instances = useLauncherSelector((s) => s.instances);
-  const { go } = useNav();
+function DayContent({ activity, date, instances }: DayDetailProps) {
   if (!activity.hasRecords) return <span className={s.dayTime}>{HOME_COPY.noRecords}</span>;
   const day = activity.days.get(date);
   if (day === undefined) {
@@ -201,30 +223,63 @@ function DayContent({ activity, date }: { activity: PlayActivity; date: string }
       </>
     );
   }
-  const alive = day.instances.flatMap((entry) => {
-    const inst = findInstance({ instances }, entry.version_id);
-    return inst === undefined ? [] : [inst];
-  });
+  // 当天的时长来自游玩记录，照常先出；玩过哪些实例要拿列表对照，列表读完之前由同形的列表骨架占着。
+  // 说明与列表放在 dayBody 那一层里（Appear 的包裹层），上边距与直接排在正文里时一样起作用
   return (
     <>
       <span className={s.dayTime}>{formatPlaytime(day.minutes)}</span>
-      {alive.length === 0 ? (
-        <span className={s.dayHint}>{HOME_COPY.dayDeleted}</span>
-      ) : (
-        <List className={s.dayList}>
-          {alive.map((inst) => (
-            <ListRow
-              key={inst.id}
-              size="sm"
-              leading={<InstanceAvatar instance={inst} size={24} status={false} />}
-              title={inst.name}
-              ariaLabel={HOME_COPY.openInstance(inst.name)}
-              onClick={() => go({ page: "instance", id: inst.id, tab: "overview" })}
-            />
-          ))}
-        </List>
-      )}
+      <Loadable view={instances.view} skeleton={<DayInstancesSkeleton count={day.instances.length} />}>
+        {() => (
+          // 读取出错与读到列表互换时交叉淡化（出错后重扫读到了，或重扫时目录变得打不开）
+          <Appear itemClassName={s.dayBody}>
+            {instances.failed ? (
+              <span key="failed" className={s.dayHint}>
+                {BOOT_SLICE_ERROR.instances}
+              </span>
+            ) : (
+              <DayInstances key="listed" entries={day.instances} />
+            )}
+          </Appear>
+        )}
+      </Loadable>
     </>
+  );
+}
+
+/** 当天玩过的实例还在等实例列表：照列表逐行画，行数取当天的记录条数（其中已删除的读到后不列，多半一个也没有）。 */
+function DayInstancesSkeleton({ count }: { count: number }) {
+  return (
+    <span className={s.dayBody}>
+      <List className={s.dayList}>
+        {Array.from({ length: Math.min(count, DAY_SKELETON_ROWS) }, (_, i) => (
+          <ListRow key={i} size="sm" leading={<Skeleton shape="square" size={DAY_AVATAR} />} title={<Skeleton shape="text" width="60%" />} />
+        ))}
+      </List>
+    </span>
+  );
+}
+
+function DayInstances({ entries }: { entries: PlayDayDto["instances"] }) {
+  const instances = useLauncherSelector((s) => s.instances);
+  const { go } = useNav();
+  const alive = entries.flatMap((entry) => {
+    const inst = findInstance({ instances }, entry.version_id);
+    return inst === undefined ? [] : [inst];
+  });
+  if (alive.length === 0) return <span className={s.dayHint}>{HOME_COPY.dayDeleted}</span>;
+  return (
+    <List className={s.dayList}>
+      {alive.map((inst) => (
+        <ListRow
+          key={inst.id}
+          size="sm"
+          leading={<InstanceAvatar instance={inst} size={DAY_AVATAR} status={false} />}
+          title={inst.name}
+          ariaLabel={HOME_COPY.openInstance(inst.name)}
+          onClick={() => go({ page: "instance", id: inst.id, tab: "overview" })}
+        />
+      ))}
+    </List>
   );
 }
 
@@ -233,13 +288,15 @@ function DayContent({ activity, date }: { activity: PlayActivity; date: string }
 export interface InsightsCardProps {
   span: ResponsiveValue;
   play: PlayView;
+  /** 常玩加载器与累计时长要等它。 */
+  instances: InstancesView;
   today: string;
   selected: string;
   onPickDay: (date: string) => void;
   className?: string;
 }
 
-export function InsightsCard({ span, play, today, selected, onPickDay, className }: InsightsCardProps) {
+export function InsightsCard({ span, play, instances, today, selected, onPickDay, className }: InsightsCardProps) {
   return (
     <Card span={span} className={className}>
       <CardHeader level={2} title={HOME_COPY.insightsTitle} subtitle={HOME_COPY.insightsSubtitle} icon="activity" />
@@ -248,7 +305,7 @@ export function InsightsCard({ span, play, today, selected, onPickDay, className
         {play.status === "error" ? (
           <StatsError key="error" play={play} />
         ) : (
-          <InsightsBody key="body" play={play} today={today} selected={selected} onPickDay={onPickDay} />
+          <InsightsBody key="body" play={play} instances={instances} today={today} selected={selected} onPickDay={onPickDay} />
         )}
       </Appear>
     </Card>
@@ -257,45 +314,49 @@ export function InsightsCard({ span, play, today, selected, onPickDay, className
 
 interface InsightsBodyProps {
   play: Exclude<PlayView, { status: "error" }>;
+  instances: InstancesView;
   today: string;
   selected: string;
   onPickDay: (date: string) => void;
 }
 
-function InsightsBody({ play, today, selected, onPickDay }: InsightsBodyProps) {
+function InsightsBody({ play, instances, today, selected, onPickDay }: InsightsBodyProps) {
   return (
     <div className={s.insightsBody}>
       <Loadable view={loadView(play)} skeleton={<StatSkeletons />}>
-        {() => <InsightStats activity={readyActivity(play)} />}
+        {() => <InsightStats activity={readyActivity(play)} instances={instances} />}
       </Loadable>
       <WeekBars activity={play.status === "ready" ? play.activity : null} today={today} selected={selected} onPickDay={onPickDay} />
     </div>
   );
 }
 
-/** 数据块骨架：每块照 StatTile 画标签、数值、环比三行，行高逐行相同。真实数据块的环比偶尔缺席，矮出的那点由让位接住。 */
+/** 数据块骨架：照 StatTile 画标签、数值、环比三行，行高逐行相同。真实数据块的环比偶尔缺席，矮出的那点由让位接住。 */
+function StatSkeleton() {
+  return (
+    <span className={s.statSkeleton}>
+      <Skeleton shape="text" width="50%" />
+      <span className={s.statSkeletonValue}>
+        <Skeleton shape="block" width="70%" height={SKELETON_SIZE.statValue} radius="sm" />
+      </span>
+      <Skeleton shape="text" width="60%" />
+    </span>
+  );
+}
+
 function StatSkeletons() {
   return (
     <StatGrid columns={2}>
       {Array.from({ length: 4 }, (_, i) => (
-        <span key={i} className={s.statSkeleton}>
-          <Skeleton shape="text" width="50%" />
-          <span className={s.statSkeletonValue}>
-            <Skeleton shape="block" width="70%" height={SKELETON_SIZE.statValue} radius="sm" />
-          </span>
-          <Skeleton shape="text" width="60%" />
-        </span>
+        <StatSkeleton key={i} />
       ))}
     </StatGrid>
   );
 }
 
-function InsightStats({ activity }: { activity: PlayActivity }) {
-  const instances = useLauncherSelector((s) => s.instances);
+function InsightStats({ activity, instances }: { activity: PlayActivity; instances: InstancesView }) {
   const week = weekCompare(activity);
   const streak = streakDays(activity);
-  const top = topLoader(activity, instances);
-  const total = totalPlaytime(instances);
 
   return (
     <StatGrid columns={2}>
@@ -311,24 +372,49 @@ function InsightStats({ activity }: { activity: PlayActivity }) {
         unit={HOME_COPY.dayUnit}
         delta={streak === 0 ? undefined : { direction: "flat", text: streak >= STREAK_WEEK ? HOME_COPY.streakWeek : HOME_COPY.streakKeep }}
       />
-      <StatTile
-        label={HOME_COPY.topLoader}
-        kind="text"
-        value={top === null ? HOME_COPY.none : LOADER_NAME[top.loader]}
-        delta={top === null ? undefined : { direction: "flat", text: HOME_COPY.topLoaderShare(Math.round(top.share * 100)) }}
-      />
-      {total.hours === null ? (
-        <StatTile label={HOME_COPY.total} kind="text" value={HOME_COPY.totalUnknown} delta={{ direction: "flat", text: HOME_COPY.instanceCount(total.count) }} />
-      ) : (
-        <StatTile
-          label={HOME_COPY.total}
-          value={formatCount(total.hours)}
-          unit={HOME_COPY.hours}
-          delta={{ direction: "flat", text: HOME_COPY.instanceCount(total.count) }}
-        />
-      )}
+      {/* 后两块要按实例列表算：列表读完之前各自占着一块骨架，读完淡入；读取出错与读到列表互换时交叉淡化 */}
+      <Loadable view={instances.view} skeleton={<StatSkeleton />}>
+        {() => (
+          <Appear>
+            {instances.failed ? <StatTile key="failed" label={HOME_COPY.topLoader} kind="text" value={HOME_COPY.topLoaderUnknown} /> : <TopLoaderTile key="listed" activity={activity} />}
+          </Appear>
+        )}
+      </Loadable>
+      <Loadable view={instances.view} skeleton={<StatSkeleton />}>
+        {() => (
+          <Appear>
+            {instances.failed ? (
+              <StatTile key="failed" label={HOME_COPY.total} kind="text" value={HOME_COPY.totalUnknown} delta={{ direction: "flat", text: BOOT_SLICE_ERROR.instances }} />
+            ) : (
+              <TotalTile key="listed" />
+            )}
+          </Appear>
+        )}
+      </Loadable>
     </StatGrid>
   );
+}
+
+function TopLoaderTile({ activity }: { activity: PlayActivity }) {
+  const instances = useLauncherSelector((s) => s.instances);
+  const top = topLoader(activity, instances);
+  return (
+    <StatTile
+      label={HOME_COPY.topLoader}
+      kind="text"
+      value={top === null ? HOME_COPY.none : LOADER_NAME[top.loader]}
+      delta={top === null ? undefined : { direction: "flat", text: HOME_COPY.topLoaderShare(Math.round(top.share * 100)) }}
+    />
+  );
+}
+
+function TotalTile() {
+  const instances = useLauncherSelector((s) => s.instances);
+  const total = totalPlaytime(instances);
+  if (total.hours === null) {
+    return <StatTile label={HOME_COPY.total} kind="text" value={HOME_COPY.totalUnknown} delta={{ direction: "flat", text: HOME_COPY.instanceCount(total.count) }} />;
+  }
+  return <StatTile label={HOME_COPY.total} value={formatCount(total.hours)} unit={HOME_COPY.hours} delta={{ direction: "flat", text: HOME_COPY.instanceCount(total.count) }} />;
 }
 
 interface WeekBarsProps {

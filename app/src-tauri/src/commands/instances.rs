@@ -611,6 +611,9 @@ pub struct InstanceDto {
     pub mod_count: Option<u32>,
     /// 工作目录 saves/ 下的存档数（每个文件夹算一个）；何时为 null 同 mod_count。
     pub world_count: Option<u32>,
+    /// 工作目录 resourcepacks/ 下的资源包数（文件夹与 .zip 文件各算一个，与实例内容里的资源包列表一一对应）；
+    /// 何时为 null 同 mod_count。
+    pub resource_pack_count: Option<u32>,
     /// 隔离的生效值；何时为 null 同 mod_count。
     pub isolated: Option<bool>,
     pub description: Option<String>,
@@ -636,7 +639,8 @@ pub struct InstanceDto {
     pub incomplete: Option<IncompleteDto>,
     /// 实例目录的创建时刻（Unix 毫秒）；文件系统不记录或目录读不出时为 null。
     pub created_at: Option<u64>,
-    /// 实例目录或工作目录读不出来的原因；此时 created_at 或 mod_count、world_count、isolated 为 null。
+    /// 实例目录或工作目录读不出来的原因；此时 created_at 或 mod_count、world_count、resource_pack_count、
+    /// isolated 为 null。
     pub dir_error: Option<String>,
     /// 实例此刻在做的事；空闲为 null。
     pub activity: Option<InstanceActivity>,
@@ -1112,6 +1116,7 @@ fn instance_dto(
         quick_play: None,
         mod_count: None,
         world_count: None,
+        resource_pack_count: None,
         isolated: None,
         description,
         cover,
@@ -1155,6 +1160,7 @@ fn instance_dto(
             });
             dto.mod_count = ready.mod_count;
             dto.world_count = ready.world_count;
+            dto.resource_pack_count = ready.resource_pack_count;
             dto.isolated = ready.isolated;
         }
         InstanceVersion::Broken(reason) => {
@@ -4839,7 +4845,7 @@ mod tests {
         assert_eq!(value["background"], json!("image"));
     }
 
-    /// 列表 DTO 带上整合包来源、最近崩溃、存档数、隔离生效值与自定内存；附属文件读不出时
+    /// 列表 DTO 带上整合包来源、最近崩溃、存档数、资源包数、隔离生效值与自定内存；附属文件读不出时
     /// 只把原因放进对应的 *_error，其余字段照常给。
     #[test]
     fn instance_dto_carries_modpack_crash_worlds_isolation_and_memory() {
@@ -4859,6 +4865,7 @@ mod tests {
                 bases: Vec::new(),
                 mod_count: Some(80),
                 world_count: Some(3),
+                resource_pack_count: Some(4),
                 isolated: Some(true),
             }),
             settings,
@@ -4909,6 +4916,7 @@ mod tests {
         assert_eq!(value["last_crash_at"], json!(1_700_000_000_000_u64));
         assert_eq!(value["last_crash_error"], json!(null));
         assert_eq!(value["world_count"], json!(3));
+        assert_eq!(value["resource_pack_count"], json!(4));
         assert_eq!(value["isolated"], json!(true));
         assert_eq!(value["memory_mb"], json!(6144));
         assert_eq!(
@@ -4954,6 +4962,7 @@ mod tests {
             serde_json::to_value(instance_dto(missing_json, None, Readable::Read(None))).unwrap();
         assert_eq!(value["status"], json!("broken"));
         assert_eq!(value["quick_play"], json!(null));
+        assert_eq!(value["resource_pack_count"], json!(null));
     }
 
     /// 导入中断留下的整合包标记在列表里报为 modpack，而不是「标记读不出来」。

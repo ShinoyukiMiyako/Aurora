@@ -16,6 +16,7 @@ import { ShellProvider, useNav, type NavApi } from "../../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../../state/appearance";
 import { LauncherProvider } from "../../../state/launcher";
 import { invalidate } from "../../../state/resource";
+import type { SpringName } from "../../../lib/motion";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
 import type { IpcRecorder } from "../../../test/fake-bridge";
 import { deferred, instanceDto, resetRecorder, settle } from "../../../test/launcher";
@@ -24,6 +25,33 @@ import s from "../settings.module.css";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../../ipc/bridge", async (orig) => (await import("../../../test/fake-bridge")).fakeBridge(await orig(), ipc));
+// 每个容器挂了几层让位：直接调 observeReflow 与经 useReflow 挂的都记，照常转给真的实现
+const reflowed = vi.hoisted(() => new Map<Element, number>());
+vi.mock("../../../lib/reflow", async (orig) => {
+  const real = await orig<typeof import("../../../lib/reflow")>();
+  const { useCallback } = await import("react");
+  const count = (el: Element) => {
+    const before = reflowed.get(el);
+    reflowed.set(el, before === undefined ? 1 : before + 1);
+  };
+  return {
+    ...real,
+    observeReflow: (container: HTMLElement, spring?: SpringName) => {
+      count(container);
+      return real.observeReflow(container, spring);
+    },
+    useReflow: <T extends HTMLElement>(spring?: SpringName) => {
+      const ref = real.useReflow<T>(spring);
+      return useCallback(
+        (el: T | null) => {
+          if (el !== null) count(el);
+          return ref(el);
+        },
+        [ref],
+      );
+    },
+  };
+});
 
 let view: Rendered | undefined;
 let nav: NavApi;
@@ -109,6 +137,7 @@ const MISSING_MANUAL = "还缺 Java 25，对应实例会启动失败。可以在
 
 beforeEach(() => {
   vi.useFakeTimers();
+  reflowed.clear();
   resetMocks();
   resetRecorder(ipc);
   stubResizeObserver();
@@ -139,6 +168,13 @@ describe("Java · 卡片之间的让位", () => {
     if (stack === null) throw new Error("运行时卡片没有父元素");
     expect(stack.classList.contains(s.sectionFlow)).toBe(true);
     expect([...stack.children]).toEqual(cards);
+  });
+
+  it("默认 Java 的单选块网格上只有一层让位：同一个容器挂两层，其余块被挤动时位移会叠成两倍", async () => {
+    await mountJava();
+    const grid = card(RUNTIMES).querySelector('[role="radiogroup"]');
+    if (grid === null) throw new Error("没有默认 Java 的单选块网格");
+    expect(reflowed.get(grid)).toBe(1);
   });
 });
 
@@ -245,6 +281,28 @@ describe("Java · 「重新选择」", () => {
     await mountJava(true);
     await click(button("重新选择"));
     expect(scrollIntoView.mock.calls).toEqual([[{ block: "nearest", behavior: "auto" }]]);
+  });
+
+  it("排在最前的运行时刚被移除、还在原位淡出时：焦点落到在场的第一个运行时上，不落进退场中的那一块", async () => {
+    const JDK17 = "C:\\Java\\jdk-17\\bin\\java.exe";
+    ipc.overrides.set("detect_java", () => [installation(JDK21, 21), installation(JDK17, 17)]);
+    await mountJava();
+    ipc.overrides.set("detect_java", () => [installation(JDK17, 17)]);
+    await click(button("重新扫描"));
+    const runtimes = card(RUNTIMES);
+    // 退场块仍排在原来的位置：自动选择之后、Java 17 之前
+    const leaving = [...runtimes.querySelectorAll<HTMLButtonElement>('[inert] [role="radio"]')];
+    expect(leaving.map((el) => el.textContent?.startsWith("Java 21"))).toEqual([true]);
+    const all = [...runtimes.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
+    expect(all.indexOf(leaving[0])).toBe(1);
+    const target = live<HTMLButtonElement>(runtimes, '[role="radio"]')[1];
+    expect(target.textContent?.startsWith("Java 17")).toBe(true);
+
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    await click(button("重新选择"));
+    expect(document.activeElement).toBe(target);
+    expect(focus.mock.contexts).toEqual([target]);
+    expect(scrollIntoView.mock.contexts).toEqual([target]);
   });
 });
 

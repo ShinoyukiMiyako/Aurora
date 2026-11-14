@@ -299,4 +299,30 @@ describe("CalendarHeatmap 样式", () => {
   it("日格不做颜色过渡：主题切换一帧换完", () => {
     expect(/transition: ([^;]+);/.exec(rule(".day"))?.[1]).toBe("scale var(--sk-spring-tap-dur) var(--sk-spring-tap)");
   });
+
+  const decl = (body: string, property: string) => {
+    const m = new RegExp(`(?:^|;|\\s)${property}\\s*:\\s*([^;]+)`).exec(body);
+    if (m === null) throw new Error(`没有声明 ${property}`);
+    return m[1].trim();
+  };
+
+  it("选中环画在常驻的 ::before 叠层上、只过渡透明度：日格自己选中时不加阴影与描边，无记录格的内描边也不被盖掉", () => {
+    // 不落在伪元素上的选中规则（含与悬停、聚焦组合的）一条都不碰 box-shadow、outline、border
+    const selectedOnDay = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)].filter((m) => m[1].split(",").some((sel) => sel.includes("[data-selected]") && !sel.includes("::")));
+    for (const [, , body] of selectedOnDay) expect(body).not.toMatch(/box-shadow|outline|border/);
+
+    const ring = rule(".day::before");
+    expect(decl(ring, "position")).toBe("absolute");
+    expect(decl(ring, "inset")).toBe("0");
+    expect(decl(ring, "box-shadow")).toBe("0 0 0 2px var(--sk-surface), 0 0 0 4px var(--sk-accent-strong)");
+    expect(decl(ring, "opacity")).toBe("0");
+    expect(decl(ring, "transition")).toBe("opacity var(--sk-dur-hover) var(--sk-ease)");
+    expect(decl(ring, "pointer-events")).toBe("none");
+    expect(decl(rule(".day[data-selected]::before"), "opacity")).toBe("1");
+  });
+
+  it("选中格拿到键盘焦点：焦点环顶替选中环，叠层淡出，焦点环照旧画在日格自己身上", () => {
+    expect(decl(rule(".day[data-selected]:focus-visible::before"), "opacity")).toBe("0");
+    expect(decl(rule(".day:focus-visible"), "box-shadow")).toBe("var(--sk-focus)");
+  });
 });

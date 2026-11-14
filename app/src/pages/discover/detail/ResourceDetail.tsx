@@ -14,6 +14,7 @@ import { fade, springs } from "../../../lib/motion";
 import { REFLOW_PAUSED_ATTR, useReflow } from "../../../lib/reflow";
 import { cx } from "../../../lib/util";
 import type { Platform } from "../../../domain/types";
+import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector, useNow } from "../../../state/launcher";
 import { useManifest } from "../../../state/queries/catalog";
@@ -34,11 +35,12 @@ import { LoaderDot, LoaderTag } from "../../../ui/LoaderTag";
 import { Modal } from "../../../ui/Modal";
 import { SegmentedControl } from "../../../ui/SegmentedControl";
 import { Skeleton } from "../../../ui/Skeleton";
-import { TabPanel, Tabs } from "../../../ui/Tabs";
+import { TabPanel, Tabs, type TabItem } from "../../../ui/Tabs";
 import { Tag } from "../../../ui/Tag";
 import { RichText } from "../../../ui/RichText";
 import { parseBody } from "../../../ui/richtext-parse";
 import { Thumb } from "../../../ui/Thumb";
+import { tabStep } from "../../instance/model";
 import { BLOCKED_COPY, DETAIL_COPY, INSTALL_COPY, KIND_LABEL, MODPACK_COPY, PLATFORM_LABEL, SEARCH_COPY } from "../copy";
 import { categoryDisplay, entryHue, parsePlatformTime, projectOrigins, resourceKindOf } from "../model";
 import { dotLoaders } from "../ResultCard";
@@ -85,6 +87,8 @@ export interface ResourceDetailProps {
 
 export function ResourceDetail({ target, onClose, fitInstance, online }: ResourceDetailProps) {
   const [footerHost, setFooterHost] = useState<HTMLElement | null>(null);
+  // 弹窗定高，介绍常常超出、版本与骨架常常不超出：换标签、骨架换正文时滚动条出没，头图、统计条与两栏跟着横移一个槽宽。
+  // 槽位常驻，代价是头图与统计条右侧总留一条槽宽的空边
   return (
     <Modal
       open={target !== null}
@@ -92,6 +96,7 @@ export function ResourceDetail({ target, onClose, fitInstance, online }: Resourc
       ariaLabel={DETAIL_COPY.tabsLabel}
       size="xl"
       padded={false}
+      stableGutter
       hideClose
       className={styles.dialog}
       footer={<div ref={setFooterHost} className={styles.footerHost} />}
@@ -103,7 +108,13 @@ export function ResourceDetail({ target, onClose, fitInstance, online }: Resourc
   );
 }
 
-type StackEntry = DetailTarget;
+interface StackEntry extends DetailTarget {
+  /**
+   * 合并卡上切到的来源，没切换过为 null。记在栈里而不是这一层的组件里：换层时整层卸掉重挂，
+   * 点进前置再返回，组件里的状态会回到默认的 Modrinth。
+   */
+  picked: Platform | null;
+}
 
 interface DetailStackProps {
   target: DetailTarget;
@@ -134,10 +145,10 @@ type LayerDir = 1 | -1 | 0;
 /**
  * 前置的层层点进：栈顶是正在看的资源，返回回到上一层。
  * 换层时新的一层从它在层级里那一侧滑进来，看得出是进了一层还是退了一层；旧的一层同帧撤掉，不和新层叠着淡出
- * （它的底栏挂在弹窗页脚里，叠着就是两份底栏）。点进前置从新资源的开头看起，返回回到点进去之前看到的位置。
+ * （它的底栏挂在弹窗页脚里，叠着就是两份底栏）。点进前置从新资源的开头看起，返回回到点进去之前看到的位置与来源。
  */
 function DetailStack({ target, onClose, fitInstance, online, footerHost }: DetailStackProps) {
-  const [nav, setNav] = useState<{ stack: StackEntry[]; dir: LayerDir }>({ stack: [target], dir: 0 });
+  const [nav, setNav] = useState<{ stack: StackEntry[]; dir: LayerDir }>({ stack: [{ ...target, picked: null }], dir: 0 });
   const [titles, setTitles] = useState<ReadonlyMap<string, string>>(() => new Map());
   const rememberTitle = useCallback((key: string, title: string) => setTitles((prev) => (prev.get(key) === title ? prev : new Map(prev).set(key, title))), []);
   const layerRef = useRef<HTMLDivElement>(null);
@@ -164,8 +175,9 @@ function DetailStack({ target, onClose, fitInstance, online, footerHost }: Detai
   const openDependency = (dep: DependencyProject) => {
     const scroller = scrollParent(layerRef.current);
     if (scroller !== null) scrolls.current[level - 1] = scroller.scrollTop;
-    setNav((n) => ({ stack: [...n.stack, { platform: dep.platform, projectId: dep.project_id, sources: [], listedType: null }], dir: 1 }));
+    setNav((n) => ({ stack: [...n.stack, { platform: dep.platform, projectId: dep.project_id, sources: [], listedType: null, picked: null }], dir: 1 }));
   };
+  const pickSource = (picked: Platform) => setNav((n) => ({ ...n, stack: n.stack.map((e, i) => (i === n.stack.length - 1 ? { ...e, picked } : e)) }));
   const back = parent === null ? null : { label: DETAIL_COPY.back(parentLabel(parent, titles)), onBack: () => setNav((n) => ({ stack: n.stack.slice(0, -1), dir: -1 })) };
   return (
     <motion.div
@@ -180,6 +192,7 @@ function DetailStack({ target, onClose, fitInstance, online, footerHost }: Detai
         back={back}
         onTitle={rememberTitle}
         onOpenDependency={openDependency}
+        onPick={pickSource}
         onClose={onClose}
         fitInstance={fitInstance}
         online={online}
@@ -194,6 +207,8 @@ interface DetailSourcesProps {
   back: { label: string; onBack: () => void } | null;
   onTitle: (key: string, title: string) => void;
   onOpenDependency: (dep: DependencyProject) => void;
+  /** 合并卡切换来源：记到这一层的栈条目上。 */
+  onPick: (platform: Platform) => void;
   onClose: () => void;
   fitInstance: string | null;
   online: boolean;
@@ -215,9 +230,9 @@ function isMerged(entry: StackEntry): boolean {
  * 落进去；正文到达时也不卸掉重挂，焦点留在原处，按钮不跟着正文淡入闪一下。
  */
 function DetailSources(props: DetailSourcesProps) {
-  const { entry, back, footerHost, onClose } = props;
+  const { entry, back, footerHost, onClose, onPick } = props;
   const merged = isMerged(entry);
-  const [platform, setPlatform] = useState<Platform>(merged ? "modrinth" : entry.platform);
+  const platform: Platform = entry.picked !== null ? entry.picked : merged ? "modrinth" : entry.platform;
   const source = entry.sources.find((s) => s.platform === platform);
   const projectId = source === undefined ? entry.projectId : source.project_id;
   const detail = useProjectDetail(platform, projectId);
@@ -230,7 +245,7 @@ function DetailSources(props: DetailSourcesProps) {
   const sourceSwitch = merged
     ? {
         value: platform,
-        onChange: setPlatform,
+        onChange: onPick,
         switching: detail.status === "loading",
         failed: detail.status === "error" ? { error: detail.error, retry: detail.reload } : null,
       }
@@ -396,6 +411,13 @@ function DetailError({ onClose, footerHost, error, retry }: DetailSourcesProps &
 
 type DetailTab = "intro" | "versions";
 
+/** 标签条从左到右的顺序：换标签时新面板的来向也按它定。 */
+const DETAIL_TABS: readonly TabItem<DetailTab>[] = [
+  { value: "intro", label: DETAIL_COPY.tabIntro },
+  { value: "versions", label: DETAIL_COPY.tabVersions },
+];
+const DETAIL_TAB_ORDER: readonly DetailTab[] = DETAIL_TABS.map((item) => item.value);
+
 interface SourceSwitch {
   value: Platform;
   onChange: (p: Platform) => void;
@@ -416,7 +438,10 @@ function DetailBody({ entry, detail, onTitle, onClose, onOpenDependency, fitInst
   // 点进前置后，返回按钮要写上一层的名字
   const titleKey = `${entry.platform}:${entry.projectId}`;
   useEffect(() => onTitle(titleKey, detail.title), [onTitle, titleKey, detail.title]);
-  const [tab, setTab] = useState<DetailTab>("intro");
+  // 换标签时新面板从它在标签条上的那一侧进来：方向随标签一起记下，面板重挂的那一次渲染就读到
+  const [tabNav, setTabNav] = useState<{ tab: DetailTab; dir: 1 | -1 }>({ tab: "intro", dir: 1 });
+  const tab = tabNav.tab;
+  const onTab = useCallback((next: DetailTab) => setTabNav((prev) => (prev.tab === next ? prev : { tab: next, dir: tabStep(DETAIL_TAB_ORDER, prev.tab, next) })), []);
   // 切换来源时本组件不重新挂载（标签、安装面板的勾选都留着），但选定的版本只属于它所在的平台：换了平台回到「自动」
   const detailKey = `${detail.platform}:${detail.project_id}`;
   const [pin, setPin] = useState<{ key: string; versionId: string | null }>({ key: detailKey, versionId: null });
@@ -435,23 +460,24 @@ function DetailBody({ entry, detail, onTitle, onClose, onOpenDependency, fitInst
   const stale = switching && switchGate.view === "skeleton";
   // 切换失败的说明块进出时，下面的标签内容从原位置滑过去
   const mainReflow = useReflow<HTMLDivElement>();
+  // 紧凑档两栏叠成一列，右栏排在左栏下面：换标签时左栏一帧变高变矮，右栏从原位置滑过去。
+  // 只在这一档挂：并排时右栏吸顶，吸住后它的位置随滚动变，下一次让位会把它当成位移、从滚动前的位置滑回来；并排时也没有别的兄弟会被挤动
+  const { tier } = useShell();
+  const gridReflow = useReflow<HTMLDivElement>();
 
   return (
     <div className={styles.root} aria-busy={switching || undefined}>
       <DetailHero detail={detail} listedType={detail.platform === entry.platform ? entry.listedType : null} platforms={platforms} stale={stale} />
       <StatsBar detail={detail} stale={stale} />
-      <div className={styles.bodyGrid}>
+      <div ref={tier === "compact" ? gridReflow : undefined} className={styles.bodyGrid}>
         <div ref={mainReflow} className={styles.mainColumn}>
           <div className={styles.tabsRow}>
             <Tabs<DetailTab>
               id={tabsId}
               value={tab}
-              onChange={setTab}
+              onChange={onTab}
               ariaLabel={DETAIL_COPY.tabsLabel}
-              items={[
-                { value: "intro", label: DETAIL_COPY.tabIntro },
-                { value: "versions", label: DETAIL_COPY.tabVersions },
-              ]}
+              items={DETAIL_TABS}
             />
             {sourceSwitch !== null && (
               <div className={styles.sourceSwitch}>
@@ -490,8 +516,9 @@ function DetailBody({ entry, detail, onTitle, onClose, onOpenDependency, fitInst
             )}
           </Appear>
           <div className={styles.dimmable} data-stale={stale || undefined}>
-            {/* 面板第一次挂载时随弹窗与加载层的淡入一起出现，不再叠一层自己的上移淡入；之后换标签照常播 */}
-            <TabPanel tabsId={tabsId} value={tab} initial={false}>
+            {/* 面板第一次挂载时随弹窗与加载层的淡入一起出现，不再叠一层自己的入场；之后换标签照常播。
+                面板只有入场、旧面板同帧撤掉，减少动画时根部的 MotionConfig 让横移一步到位，剩下的就是淡入 */}
+            <TabPanel tabsId={tabsId} value={tab} from={{ axis: "x", dir: tabNav.dir }} initial={false}>
               {tab === "intro" ? (
                 // 换来源时整段重挂：正文的块按下标作 key，留着旧元素会被让位当成「同一段变高了」，段落与下面的小节一起滑
                 <IntroTab key={detailKey} detail={detail} onOpenDependency={onOpenDependency} />

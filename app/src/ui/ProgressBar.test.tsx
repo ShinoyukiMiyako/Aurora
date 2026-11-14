@@ -20,8 +20,15 @@ describe("进度推演", () => {
     expect(nextProgressTarget(start, "task#1", 0.75)).toEqual({ track: "task#1", target: 0.75, jump: false });
   });
 
-  it("换了标识直接跳到新值，即使比旧值小", () => {
+  it("换了标识而当前目标大于 0：直接跳到新值，比旧值小也不从旧值往回滑", () => {
     expect(nextProgressTarget({ track: "task#1", target: 0.9 }, "task#2", 0.1)).toEqual({ track: "task#2", target: 0.1, jump: true });
+    expect(nextProgressTarget({ track: "task#1", target: 0.3 }, "task#2", 0.8)).toEqual({ track: "task#2", target: 0.8, jump: true });
+  });
+
+  // 第一条下载快照带来总字节与文件数，标识随之从「还没有批次」换成这一批：从空开始的首批要沿弹簧走上去
+  it("换了标识而当前目标是 0（首批从空开始）：不跳，新值交给弹簧；一次下完的小批次也一样", () => {
+    expect(nextProgressTarget({ track: "t#1:count:0", target: 0 }, "t#1:4096:3", 0.2)).toEqual({ track: "t#1:4096:3", target: 0.2, jump: false });
+    expect(nextProgressTarget({ track: "t#1:count:0", target: 0 }, "t#1:512:1", 1)).toEqual({ track: "t#1:512:1", target: 1, jump: false });
   });
 
   it("没有标识时原样跟随，可以回退", () => {
@@ -131,6 +138,49 @@ describe("useSmoothProgress", () => {
     );
     expect(latest()).toBe(0.1);
   });
+
+  it("给了最少显示长度：大于 0 的目标在终点上抬到它，0 仍是 0；返回的 target 照原值", () => {
+    let floored: { smooth: MotionValue<number>; target: number } | undefined;
+    function FloorProbe({ value }: { value: number }) {
+      floored = useSmoothProgress(value, "s", MIN_VISIBLE_PROGRESS);
+      return null;
+    }
+    const read = () => {
+      if (floored === undefined) throw new Error("探针未挂载");
+      return { smooth: floored.smooth.get(), target: floored.target };
+    };
+    view = render(<FloorProbe value={0.005} />);
+    expect(read()).toEqual({ smooth: MIN_VISIBLE_PROGRESS, target: 0.005 });
+    view.unmount();
+    view = render(<FloorProbe value={0} />);
+    expect(read()).toEqual({ smooth: 0, target: 0 });
+    view.unmount();
+    view = render(
+      <MotionConfig reducedMotion="always">
+        <FloorProbe value={0.5} />
+      </MotionConfig>,
+    );
+    view.rerender(
+      <MotionConfig reducedMotion="always">
+        <FloorProbe value={0.6} />
+      </MotionConfig>,
+    );
+    expect(read()).toEqual({ smooth: 0.6, target: 0.6 });
+  });
+
+  it("完整动画下首批从 0 起：换了标识也交给弹簧，同步读取仍是 0", () => {
+    view = render(
+      <MotionConfig reducedMotion="never">
+        <Probe value={0} track="t#1:count:0" />
+      </MotionConfig>,
+    );
+    view.rerender(
+      <MotionConfig reducedMotion="never">
+        <Probe value={0.6} track="t#1:4096:3" />
+      </MotionConfig>,
+    );
+    expect(latest()).toBe(0);
+  });
 });
 
 describe("ProgressBar", () => {
@@ -158,6 +208,48 @@ describe("ProgressBar", () => {
     expect(bar().getAttribute("aria-valuenow")).toBe("60");
     view.rerender(<ProgressBar value={0.3} track="t#2" label="安装" />);
     expect(bar().getAttribute("aria-valuenow")).toBe("30");
+  });
+
+  it("首批快照就到 100%（一次下完的小文件）：填充从空一帧帧走到满格，不从空直接跳满", async () => {
+    const at = (value: number, track: string) => (
+      <MotionConfig reducedMotion="never">
+        <ProgressBar value={value} track={track} label="安装" />
+      </MotionConfig>
+    );
+    view = render(at(0, "t#1:count:0"));
+    const fill = bar().firstElementChild as HTMLElement;
+    // 位移归零时 framer-motion 把 transform 写成 none
+    const offset = () => (fill.style.transform === "none" ? 0 : Number.parseFloat(fill.style.transform.replace("translateX(", "")));
+    expect(offset()).toBe(-100);
+    const offsets: number[] = [];
+    const observer = new MutationObserver(() => offsets.push(offset()));
+    observer.observe(fill, { attributes: true, attributeFilter: ["style"] });
+    view.rerender(at(1, "t#1:512:1"));
+    expect(bar().getAttribute("aria-valuenow")).toBe("100");
+    await waitForFrames(() => expect(offset()).toBe(0));
+    observer.disconnect();
+    expect(offsets.filter((o) => o > -100 && o < -1).length).toBeGreaterThan(2);
+  });
+
+  // 最少显示长度要是加在逐帧平滑之后，弹簧离开 0 的第一帧就一下冒出 2% 那一截
+  it("起步时填充从空一帧帧长到最少显示的 2%，不一下冒出那一截；读屏仍报原值", async () => {
+    const at = (value: number) => (
+      <MotionConfig reducedMotion="never">
+        <ProgressBar value={value} track="t#1" label="安装" />
+      </MotionConfig>
+    );
+    view = render(at(0));
+    const fill = bar().firstElementChild as HTMLElement;
+    const offset = () => Number.parseFloat(fill.style.transform.replace("translateX(", ""));
+    expect(offset()).toBe(-100);
+    const offsets: number[] = [];
+    const observer = new MutationObserver(() => offsets.push(offset()));
+    observer.observe(fill, { attributes: true, attributeFilter: ["style"] });
+    view.rerender(at(0.005));
+    expect(bar().getAttribute("aria-valuenow")).toBe("1");
+    await waitForFrames(() => expect(offset()).toBeCloseTo(-98, 3));
+    observer.disconnect();
+    expect(offsets.filter((o) => o > -100 && o < -98.01).length).toBeGreaterThan(2);
   });
 
   it("不定进度：没有 aria-valuenow，只有一条光带", () => {

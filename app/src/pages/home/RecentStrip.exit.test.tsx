@@ -15,6 +15,7 @@ import { PageErrorBoundary } from "../../shell/PageError";
 import { ShellProvider } from "../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider } from "../../state/launcher";
+import { DEFAULT_UI_SHAPE, UiShapeProvider } from "../../state/ui-shape";
 import { drainFrames, render, stubMatchMedia, stubResizeObserver, waitForFrames, type Rendered } from "../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, callsOf, configDto, instanceDto, resetRecorder } from "../../test/launcher";
@@ -47,16 +48,18 @@ function liveRecent(): HTMLElement {
 async function mount() {
   view = render(
     <AppearanceProvider initial={DEFAULT_APPEARANCE}>
-      <LauncherProvider>
-        <ShellProvider>
-          <RemoteImageProvider resolve={async (url) => url}>
-            <PageErrorBoundary page="home">
-              <HomePage route={{ page: "home" }} />
-            </PageErrorBoundary>
-          </RemoteImageProvider>
-          <OverlayRoot />
-        </ShellProvider>
-      </LauncherProvider>
+      <UiShapeProvider initial={DEFAULT_UI_SHAPE}>
+        <LauncherProvider>
+          <ShellProvider>
+            <RemoteImageProvider resolve={async (url) => url}>
+              <PageErrorBoundary page="home">
+                <HomePage route={{ page: "home" }} />
+              </PageErrorBoundary>
+            </RemoteImageProvider>
+            <OverlayRoot />
+          </ShellProvider>
+        </LauncherProvider>
+      </UiShapeProvider>
     </AppearanceProvider>,
   );
   // 「生存」是当前实例，在大卡上；最近游玩按上次游玩倒序列其余玩过的

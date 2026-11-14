@@ -50,20 +50,45 @@ describe("实例卡片的统计行", () => {
     expect(declarations(".stats")["container-type"]).toBe("inline-size");
     const query = /@container\s*\(width < (\d+)px\)\s*\{\s*\.stats > li:nth-child\(n \+ 4\)\s*\{([^}]*)\}\s*\}/.exec(css);
     if (query === null) throw new Error("样式表里没有按卡宽收起第四项的容器查询");
-    // 与只给读屏的说明（.srOnly）同一套视觉隐藏：不占行内位置、裁成看不见，但不移出无障碍树
-    const hidden = Object.fromEntries(
-      query[2]
-        .split(";")
-        .map((d) => d.trim())
-        .filter((d) => d !== "")
-        .map((d) => d.split(":").map((part) => part.trim())),
-    );
-    expect(hidden).toEqual(declarations(".srOnly"));
+    // 与全局的视觉隐藏类（styles/base.css 的 .sk-sr-only）同一套声明：不占行内位置、裁成看不见，但不移出无障碍树。
+    // 条件规则作用在既有的列表项上，换不成类名，只能照抄一份；这里直接读全局类逐条对齐，全局类改了这份跟着改
+    const base = readFileSync(new URL("../../styles/base.css", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const srOnly = /(?:^|\n)\.sk-sr-only\s*\{([^}]*)\}/.exec(base);
+    if (srOnly === null) throw new Error("styles/base.css 里没有 .sk-sr-only 规则");
+    const decls = (body: string) =>
+      Object.fromEntries(
+        body
+          .split(";")
+          .map((d) => d.trim())
+          .filter((d) => d !== "")
+          .map((d) => d.split(":").map((part) => part.trim())),
+      );
+    expect(decls(query[2])).toEqual(decls(srOnly[1]));
+    // 页面自己不再留一份视觉隐藏类：加载说明交给 Loadable 的 busyLabel
+    expect(css).not.toMatch(/\.srOnly\b/);
     // 阈值不低于四项最宽写法：每项 16px 图标加 4px 间距、三处 12px 列距，文字按 12px 字号的 em 数
     // （相对时间预留的 4.4em、「读不到」3em、四位 Mod 数与三位存档数每位 0.6em）
     const recent = Number.parseFloat(declarations(".stats")["--lib-stat-recent-min"]);
     const worst = 4 * (16 + 4) + 3 * 12 + (recent + 3 + 4 * 0.6 + 3 * 0.6) * 12;
     expect(Number(query[1])).toBeGreaterThanOrEqual(worst);
+  });
+
+  it("损坏原因与统计行同高、同上边距，没有内边距与描边：卡高不随损坏、修好而变，同一行的卡片与底栏不跟着跳", () => {
+    const stats = declarations(".stats");
+    const broken = declarations(".broken");
+    for (const property of ["height", "margin", "font-size", "line-height"]) expect(broken[property], property).toBe(stats[property]);
+    expect(broken.padding).toBeUndefined();
+    expect(broken.border).toBeUndefined();
+    // 一行放不下时省略，不折成第二行
+    expect(declarations(".ellipsis")).toEqual({ "min-width": "0", overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" });
+  });
+
+  it("损坏原因浮在标题按钮的整卡覆盖层之上：悬停才看得到被省略的全文；只占文字的宽度，旁边空白处照样点开详情", () => {
+    const broken = declarations(".broken");
+    expect(broken.position).toBe("relative");
+    expect(broken["z-index"]).toBe("1");
+    expect(broken.width).toBe("fit-content");
+    expect(broken["max-width"]).toBe("100%");
   });
 });
 

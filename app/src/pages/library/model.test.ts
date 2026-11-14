@@ -45,6 +45,7 @@ function inst(id: string, overrides: Partial<InstanceSummary> = {}): InstanceSum
     dirError: null,
     modCount: 0,
     worldCount: 0,
+    resourcePackCount: 0,
     isolated: false,
     memoryMb: null,
     modpack: null,

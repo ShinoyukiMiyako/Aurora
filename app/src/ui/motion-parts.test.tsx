@@ -2,13 +2,14 @@
 import { motion, MotionConfig } from "framer-motion";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { act, type ReactNode } from "react";
+import { act, useLayoutEffect, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, waitForFrames, type Rendered } from "../test/dom";
 import { Appear } from "./Appear";
 import { Bento } from "./Bento";
 import { Card } from "./Card";
 import { LabelSlot } from "./LabelSlot";
+import labelSlotStyles from "./LabelSlot.module.css";
 import { Loadable } from "./Loadable";
 import loadableStyles from "./Loadable.module.css";
 import { Page } from "./Page";
@@ -136,6 +137,50 @@ describe("Loadable", () => {
     expect(status.textContent).toBe("");
   });
 
+  /** 与播报区同一次提交挂上，记下播报区在这次提交里的文字：读屏看到它插进来时里面写着什么。 */
+  const statusAtInsert: (string | null)[] = [];
+  function InsertProbe() {
+    useLayoutEffect(() => {
+      const status = document.querySelector('[role="status"]');
+      if (status === null) throw new Error("播报区没有和探针同一次提交挂上");
+      statusAtInsert.push(status.textContent);
+    }, []);
+    return null;
+  }
+  afterEach(() => {
+    statusAtInsert.length = 0;
+  });
+
+  it("骨架期才挂上（加载门在父组件里、晚挂的条件块）：播报区插进来时是空的，挂上之后才写进说明", () => {
+    view = render(
+      <>
+        {labelled("skeleton")}
+        <InsertProbe />
+      </>,
+    );
+    expect(statusAtInsert).toEqual([""]);
+    expect(one('[role="status"]').textContent).toBe("正在读取");
+  });
+
+  it("加载说明在骨架期才传进来：播报区同样先空着插进来，挂上之后才写", () => {
+    view = render(
+      <>
+        {tree("skeleton")}
+        {null}
+      </>,
+    );
+    const skeleton = one("[data-skeleton]");
+    view.rerender(
+      <>
+        {labelled("skeleton")}
+        <InsertProbe />
+      </>,
+    );
+    expect(one("[data-skeleton]")).toBe(skeleton);
+    expect(statusAtInsert).toEqual([""]);
+    expect(one('[role="status"]').textContent).toBe("正在读取");
+  });
+
   it("加载说明的播报区在带 aria-busy 的根外面、不在骨架的 aria-hidden 里，视觉隐藏且不参与让位", () => {
     view = render(labelled("skeleton"));
     const status = one('[role="status"]');
@@ -143,12 +188,8 @@ describe("Loadable", () => {
     expect(status.closest('[aria-hidden="true"]')).toBeNull();
     expect(status.nextElementSibling?.getAttribute("aria-busy")).toBe("true");
     expect(status.hasAttribute(REFLOW_SKIP_ATTR)).toBe(true);
-    expect(status.classList.contains(loadableStyles.status)).toBe(true);
-    const css = readFileSync(resolve(__dirname, "Loadable.module.css"), "utf8");
-    const rule = /(?:^|\n)\.status\s*\{([^}]*)\}/.exec(css);
-    if (rule === null) throw new Error("Loadable.module.css 里没有 .status 规则");
-    expect(rule[1]).toMatch(/\bposition:\s*absolute;/);
-    expect(rule[1]).toMatch(/\bclip-path:\s*inset\(50%\);/);
+    // 视觉隐藏走全局的 sk-sr-only（声明由 styles/base.test.ts 核对），模块里不再各写一份
+    expect(status.className).toBe("sk-sr-only");
   });
 
   it("加载说明中途撤掉：根元素与里面的内容层不重挂", () => {
@@ -407,7 +448,49 @@ describe("LabelSlot", () => {
     expect(/\.slot\[data-align="start"\]\s*\{\s*justify-items: start;/.test(css)).toBe(true);
   });
 
+  it("候选里的数字等宽：按最宽的位数列一条候选就能占住同位数的任何计数", () => {
+    const css = readFileSync(resolve(__dirname, "LabelSlot.module.css"), "utf8").replace(/\r\n/g, "\n");
+    const slot = /(?:^|\n)\.slot\s*\{([^}]*)\}/.exec(css);
+    if (slot === null) throw new Error("LabelSlot.module.css 里没有 .slot 规则");
+    expect(slot[1]).toMatch(/\bfont-variant-numeric:\s*tabular-nums;/);
+  });
+
   it("当前文案不在候选里：直接抛错，不悄悄撑宽", () => {
     expect(() => render(<LabelSlot current="重试" options={["检查", "检查中"]} />)).toThrow("不在候选里");
+  });
+
+  it("当前这条跟随祖先的显隐：放进 visibility: hidden 的隐形垫宽占位里时不自己露出来，平常照样显示", () => {
+    // 测试不处理 CSS 模块：把样式表里的类名换成组件实际拿到的类名再挂进文档，显隐按真实的层叠与继承算
+    const sheet = document.createElement("style");
+    sheet.textContent = readFileSync(resolve(__dirname, "LabelSlot.module.css"), "utf8").replace(
+      /\.(slot|option)\b/g,
+      (_, name: "slot" | "option") => `.${labelSlotStyles[name]}`,
+    );
+    document.head.append(sheet);
+    try {
+      const host = (hidden: boolean) => (
+        <div data-host={hidden ? "hidden" : "shown"} style={hidden ? { visibility: "hidden" } : undefined}>
+          <LabelSlot current="下一步" options={["下一步", "创建并开始安装"]} />
+        </div>
+      );
+      view = render(
+        <>
+          {host(true)}
+          {host(false)}
+        </>,
+      );
+      const visibility = (name: string) =>
+        [...one(`[data-host="${name}"]`).querySelectorAll("span > span")].map((el) => [el.textContent, getComputedStyle(el).visibility]);
+      expect(visibility("hidden")).toEqual([
+        ["下一步", "hidden"],
+        ["创建并开始安装", "hidden"],
+      ]);
+      expect(visibility("shown")).toEqual([
+        ["下一步", "visible"],
+        ["创建并开始安装", "hidden"],
+      ]);
+    } finally {
+      sheet.remove();
+    }
   });
 });

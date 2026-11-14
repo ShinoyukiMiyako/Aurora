@@ -1063,3 +1063,14 @@ export function crashFixKey(fix: CrashFix): string {
       return fix.kind;
   }
 }
+
+// ---------------------------------------------------------------- 资源包与光影
+
+/**
+ * 资源包与光影卡在内容读到之前占几行：光影恒为一行，资源包按实例列表里的数目一个一行，没有时也有一行「未添加资源包」。
+ * 列表不分页、不设上限，占位同样不设，读到之后卡片高度不变；数目读不出时按光影一行加资源包一行。
+ */
+export function packsPlaceholderRows(count: number | null): number {
+  if (count === null) return 2;
+  return 1 + Math.max(1, count);
+}

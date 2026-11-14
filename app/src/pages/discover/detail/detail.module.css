@@ -39,27 +39,6 @@
   white-space: nowrap;
 }
 
-/*
- * 安装主按钮的文案槽：当前文案与最长的「安装到 n 个实例」叠在同一格，宽度取后者，勾选数变化时按钮不变宽。
- * 占宽的那份是伪元素，不进文字内容；数字等宽，位数不变时宽度不变
- */
-.installLabel {
-  display: inline-grid;
-  justify-items: center;
-  font-variant-numeric: tabular-nums;
-}
-
-.installLabel > span,
-.installLabel::after {
-  grid-area: 1 / 1;
-  white-space: nowrap;
-}
-
-.installLabel::after {
-  content: attr(data-widest);
-  visibility: hidden;
-}
-
 /* ---- 头图 ---- */
 .hero {
   flex: none;

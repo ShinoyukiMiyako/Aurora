@@ -96,6 +96,21 @@ describe("累计量：按间隔换字", () => {
     expect(s).toEqual({ raw: 13 * MB, shown: 13 * MB, shownAt: T0 + SPEED_REFRESH_MS });
   });
 
+  // 显示停在 0 的那半拍里数据已经在流，旁边的百分数早已走起来
+  it("从 0 开始传：第一个非零值立即换上，不在 0 上停满一个间隔；之后照常等间隔", () => {
+    let s = startCount(0, T0);
+    s = feedCount(s, 0, TOTAL, T0 + 100);
+    expect(s).toEqual({ raw: 0, shown: 0, shownAt: T0 });
+    s = feedCount(s, 2 * MB, TOTAL, T0 + 200);
+    expect(s).toEqual({ raw: 2 * MB, shown: 2 * MB, shownAt: T0 + 200 });
+    s = feedCount(s, 3 * MB, TOTAL, T0 + 300);
+    expect(s).toEqual({ raw: 3 * MB, shown: 2 * MB, shownAt: T0 + 200 });
+    // 换源后从 0 重来，重来后的第一个非零值同样立即换上
+    s = feedCount(s, 0, TOTAL, T0 + 400);
+    s = feedCount(s, MB, TOTAL, T0 + 450);
+    expect(s).toEqual({ raw: MB, shown: MB, shownAt: T0 + 450 });
+  });
+
   it("变小了（换源后从 0 重来）立即换上，不停在作废的旧值上", () => {
     const s = feedCount(startCount(40 * MB, T0), 41 * MB, TOTAL, T0 + 100);
     expect(feedCount(s, 0, null, T0 + 200)).toEqual({ raw: 0, shown: 0, shownAt: T0 + 200 });
@@ -182,28 +197,31 @@ describe("显示速度与收尾的钩子", () => {
     return <span>{useDisplayCount(raw, total)}</span>;
   }
 
-  it("useDisplayCount：每 100 ms 一条进度，字每 500 ms 才换一次；进度停下后最后一条在间隔满时补上", () => {
+  it("useDisplayCount：从 0 开始传的第一条立即换上；之后每 100 ms 一条进度，字每 500 ms 才换一次；进度停下后最后一条在间隔满时补上", () => {
     const total = 100 * MB;
     view = render(<CountProbe raw={0} total={total} />);
     expect(shown()).toBe(0);
-    for (let i = 1; i <= 4; i++) {
+    act(() => void vi.advanceTimersByTime(100));
+    view.rerender(<CountProbe raw={MB} total={total} />);
+    expect(shown()).toBe(MB);
+    for (let i = 2; i <= 5; i++) {
       act(() => void vi.advanceTimersByTime(100));
       view.rerender(<CountProbe raw={i * MB} total={total} />);
-      expect(shown()).toBe(0);
+      expect(shown()).toBe(MB);
     }
-    // 间隔满的那一刻换上最近报上来的 4 MB，紧接着到的 5 MB 等下一个间隔
+    // 换上 1 MB 之后间隔满的那一刻换上最近报上来的 5 MB，紧接着到的 6 MB 等下一个间隔
     act(() => void vi.advanceTimersByTime(100));
-    expect(shown()).toBe(4 * MB);
-    view.rerender(<CountProbe raw={5 * MB} total={total} />);
-    expect(shown()).toBe(4 * MB);
-    // 进度停在 5 MB：不等下一条事件，到间隔满时补上
-    act(() => void vi.advanceTimersByTime(SPEED_REFRESH_MS - 1));
-    expect(shown()).toBe(4 * MB);
-    act(() => void vi.advanceTimersByTime(1));
     expect(shown()).toBe(5 * MB);
+    view.rerender(<CountProbe raw={6 * MB} total={total} />);
+    expect(shown()).toBe(5 * MB);
+    // 进度停在 6 MB：不等下一条事件，到间隔满时补上
+    act(() => void vi.advanceTimersByTime(SPEED_REFRESH_MS - 1));
+    expect(shown()).toBe(5 * MB);
+    act(() => void vi.advanceTimersByTime(1));
+    expect(shown()).toBe(6 * MB);
   });
 
-  it("useDisplayCount：换源后从 0 重来、传到总量都立即换上；总量后到、恰好等于已报的值时也立即换上", () => {
+  it("useDisplayCount：换源后从 0 重来、重来后的第一条、传到总量都立即换上；总量后到、恰好等于已报的值时也立即换上", () => {
     const total = 100 * MB;
     view = render(<CountProbe raw={40 * MB} total={total} />);
     act(() => void vi.advanceTimersByTime(100));
@@ -215,9 +233,12 @@ describe("显示速度与收尾的钩子", () => {
     view.rerender(<CountProbe raw={0} total={null} />);
     act(() => void vi.advanceTimersByTime(100));
     view.rerender(<CountProbe raw={MB} total={null} />);
-    expect(shown()).toBe(0);
-    view.rerender(<CountProbe raw={MB} total={MB} />);
     expect(shown()).toBe(MB);
+    act(() => void vi.advanceTimersByTime(100));
+    view.rerender(<CountProbe raw={2 * MB} total={null} />);
+    expect(shown()).toBe(MB);
+    view.rerender(<CountProbe raw={2 * MB} total={2 * MB} />);
+    expect(shown()).toBe(2 * MB);
   });
 
   function FinishingProbe({ done, hold }: { done: readonly FinishedItem[]; hold: number }) {

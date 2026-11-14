@@ -6,7 +6,7 @@ import { failureCopy, LAUNCH_COPY, LAUNCH_STAGES, MODPACK_REIMPORT_COPY, phaseLa
 import type { InstanceSummary } from "../domain/adapt";
 import { needsReimport } from "../domain/rules";
 import type { FailureCode, StopReason, Task } from "../domain/types";
-import { busyInstanceId, instanceTask, queuePosition } from "../state/selectors";
+import { busyInstanceId, installTask, queuePosition } from "../state/selectors";
 import { isLoadingPhase, sessionPlayedMinutes, type SessionState } from "../state/session";
 import type { LauncherState } from "../state/store";
 
@@ -21,9 +21,12 @@ export type LaunchView =
   | { kind: "crashed"; session: SessionState }
   | {
       kind: "installing";
-      /** 实例上挂着的前端任务；后端报告在安装、前端没有对应任务（另一次运行留下的标记）时为 null。 */
+      /**
+       * 实例上挂着的前端任务（见 selectors 的 installTask）：任务完成后、落地重扫回来之前是那个已完成的任务，按满格画；
+       * 后端报告在安装、前端没有对应任务（另一次运行留下的标记）时为 null。
+       */
       task: Task | null;
-      /** 排队中的名次（从 1 起）；进行中或没有任务为 null。 */
+      /** 排队中的名次（从 1 起）；进行中、已完成或没有任务为 null。 */
       queuePosition: number | null;
     }
   | {
@@ -53,7 +56,7 @@ export function launchView(state: LauncherState, inst: InstanceSummary): LaunchV
     }
   }
   if (inst.status === "installing") {
-    const task = instanceTask(state, inst.id);
+    const task = installTask(state, inst.id);
     return { kind: "installing", task, queuePosition: task === null ? null : queuePosition(state, task.id) };
   }
   if (inst.status === "broken") {

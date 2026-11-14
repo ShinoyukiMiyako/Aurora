@@ -94,13 +94,6 @@ function FactItem({ icon, text, late }: { icon: IconName; text: string | null; l
 
 const COVER_ITEMS = COVER_PRESETS.map((cover) => ({ value: cover.block }));
 
-/** 选中封面的勾标：换到哪一格就在那一格弹出（复选标记的出现），离开的那一格缩小淡出。减少动画时换成 popMark.reduced，只淡入淡出。 */
-const CHECK_MOTION = {
-  initial: { opacity: 0, scale: 0.6 },
-  animate: { opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } },
-  exit: { opacity: 0, scale: 0.6, transition: fade.out },
-} as const;
-
 /** 舞台上的方块：换了封面时从略小处弹回原大，看得出是这次操作换上的；挂载时不动。减少动画时只淡入。 */
 function StageBlock({ seed, cover }: { seed: string; cover: InstanceCover }) {
   const [scope, animate] = useAnimate<HTMLSpanElement>();
@@ -122,7 +115,8 @@ function StageBlock({ seed, cover }: { seed: string; cover: InstanceCover }) {
 function CoverPicker({ seed, value, onChange }: { seed: string; value: InstanceCover; onChange: (cover: InstanceCover) => void }) {
   const [anchor, setAnchor] = useState<Element | null>(null);
   const reduced = useReducedMotionConfig() === true;
-  const check = reduced ? popMark.reduced : CHECK_MOTION;
+  // 选中封面的勾标：换到哪一格就在那一格弹出，离开的那一格缩小淡出；减少动画时只淡入淡出
+  const check = reduced ? popMark.reduced : popMark.check;
   // 方向键在封面之间移动并立即换上（与单选组一致），点击换上并收起
   const roving = useRovingGroup(COVER_ITEMS, value.block, (block) => onChange(presetOf(block)), false);
   return (

@@ -1,14 +1,51 @@
 // @vitest-environment jsdom
 // 有用例要等退场播完、节点移除：整个文件只用真实计时器（假定时器下 framer 的帧循环一停，同文件后面的用例就推不动动画）。
-import { MotionConfig } from "framer-motion";
+import { AnimatePresence, motion, MotionConfig } from "framer-motion";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { act, useState } from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { fade, type SpringName } from "../lib/motion";
 import { keydown, render, waitForFrames, type Rendered } from "../test/dom";
 import { RadioTile, type RadioTileOption } from "./RadioTile";
 import styles from "./RadioTile.module.css";
+
+// jsdom 不做布局，让位本身不动：记下哪些容器挂了让位、挂了几次、停了几次。直接调 observeReflow 与经 useReflow 挂的都记，照常转给真的实现
+const reflowed = vi.hoisted(() => new Map<Element, { observed: number; stopped: number }>());
+vi.mock("../lib/reflow", async (orig) => {
+  const real = await orig<typeof import("../lib/reflow")>();
+  const { useCallback } = await import("react");
+  const track = (el: Element, stop: () => void) => {
+    let record = reflowed.get(el);
+    if (record === undefined) {
+      record = { observed: 0, stopped: 0 };
+      reflowed.set(el, record);
+    }
+    record.observed += 1;
+    const counted = record;
+    return () => {
+      counted.stopped += 1;
+      stop();
+    };
+  };
+  return {
+    ...real,
+    observeReflow: (container: HTMLElement, spring?: SpringName) => track(container, real.observeReflow(container, spring)),
+    useReflow: <T extends HTMLElement>(spring?: SpringName) => {
+      const ref = real.useReflow<T>(spring);
+      return useCallback(
+        (el: T | null) => {
+          if (el === null) return;
+          const stop = ref(el);
+          if (typeof stop !== "function") throw new Error("useReflow 挂上之后没有给出停止函数");
+          return track(el, stop);
+        },
+        [ref],
+      );
+    },
+  };
+});
 
 let view: Rendered | undefined;
 afterEach(() => {
@@ -40,6 +77,32 @@ describe("RadioTile：界面列出的选项组", () => {
     view = render(<Host values={["auto", "official", "mirror"]} openEnded={false} />);
     expect(items().map((el) => el.getAttribute("role"))).toEqual(["radio", "radio", "radio"]);
     expect(group().hasAttribute("data-open-ended")).toBe(false);
+  });
+
+  it("整组处在外层正在退场的子树里（标签面板、向导换步、弹窗）：焦点还在组里时方向键照常移动焦点并选中，首尾循环", () => {
+    // 外层 AnimatePresence 的退场子树还在 DOM 里淡出，里面每个 useIsPresent 都为假
+    const panel = (shown: boolean) => (
+      <AnimatePresence>
+        {shown && (
+          <motion.div key="panel" exit={{ opacity: 0, transition: fade.out }}>
+            <Host values={["auto", "official", "mirror"]} openEnded={false} />
+          </motion.div>
+        )}
+      </AnimatePresence>
+    );
+    view = render(panel(true));
+    act(() => radioOf("auto").focus());
+    view.rerender(panel(false));
+    expect(titles(live())).toEqual(["auto", "official", "mirror"]);
+
+    keydown(document.activeElement as HTMLElement, "ArrowDown");
+    expect(document.activeElement).toBe(radioOf("official"));
+    expect(radioOf("official").getAttribute("aria-checked")).toBe("true");
+    keydown(document.activeElement as HTMLElement, "ArrowDown");
+    expect(document.activeElement).toBe(radioOf("mirror"));
+    keydown(document.activeElement as HTMLElement, "ArrowDown");
+    expect(document.activeElement).toBe(radioOf("auto"));
+    expect(radioOf("auto").getAttribute("aria-checked")).toBe("true");
   });
 });
 
@@ -93,6 +156,29 @@ describe("RadioTile：选项来自运行时数据（openEnded）", () => {
     expect(document.activeElement).toBe(radioOf("jdk-21"));
     keydown(document.activeElement as HTMLElement, "ArrowDown");
     expect(document.activeElement).toBe(radioOf("auto"));
+  });
+});
+
+describe("RadioTile：其余块的让位", () => {
+  beforeEach(() => reflowed.clear());
+
+  it("运行时数据组在网格上自己挂一层让位：块增减时不重挂，卸载时停掉", () => {
+    view = render(<Host values={["auto", "jdk-17"]} />);
+    const grid = group();
+    expect([...reflowed.keys()]).toEqual([grid]);
+    expect(reflowed.get(grid)).toEqual({ observed: 1, stopped: 0 });
+
+    view.rerender(<Host values={["auto", "jdk-17", "jdk-21"]} />);
+    expect(reflowed.get(grid)).toEqual({ observed: 1, stopped: 0 });
+
+    view.unmount();
+    view = undefined;
+    expect(reflowed.get(grid)).toEqual({ observed: 1, stopped: 1 });
+  });
+
+  it("界面列出的选项组不挂让位：块不会在眼前增减", () => {
+    view = render(<Host values={["auto", "official", "mirror"]} openEnded={false} />);
+    expect(reflowed.size).toBe(0);
   });
 });
 

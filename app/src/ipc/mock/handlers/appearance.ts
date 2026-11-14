@@ -13,7 +13,7 @@ const COVER_STYLES: readonly AppearanceDto["cover_background"][] = ["art", "text
 const BOOLEAN_KEYS = ["petals", "panorama", "reduce_motion"] as const;
 
 // 与后端对齐：缺 patch 参数是 Tauri 自身的参数错误（纯字符串，前端归为 unknown）；patch 不是对象、
-// 含未知字段或非法取值由命令自己反序列化失败，报 invalid_argument。两种情况整次写入都不生效。
+// 含未知字段、字段给 null（键不出现才算不动）或取值非法由命令自己报 invalid_argument。两种情况整次写入都不生效。
 function parsePatch(args: MockArgs): Partial<AppearanceDto> {
   const raw = args.patch;
   if (raw === undefined) throw new IpcError("unknown", "invalid args `patch` for command `set_appearance`: missing required key patch");

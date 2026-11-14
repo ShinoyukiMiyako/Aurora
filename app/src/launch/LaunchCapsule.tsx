@@ -281,7 +281,7 @@ export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch
         {fill !== null && <Fill key="fill" value={fill.value} track={fill.track} tone={fill.tone} appear={mounted.current} />}
       </AnimatePresence>
       {/* 只播报 phase 的变化，计时与百分比不播报 */}
-      <span className={styles.srOnly} aria-live="polite">
+      <span className="sk-sr-only" aria-live="polite">
         {announce}
       </span>
       {/* 退场的面按这里的 custom 取退场变体：它的 props 停在离场那一刻，减少动画的设置在那之后变了也按当前的走 */}
@@ -306,10 +306,14 @@ export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch
   );
 }
 
+/**
+ * 进度填充。安装中面在任务完成后、落地重扫回来之前拿到的是那个已完成的任务（launchView 的 installing.task）：文字写着 100%，
+ * 填充也按满格留着，沿同一个 track 从完成前的位置走满，到就绪换面时才随面淡出，不在完成那一刻先没掉。
+ */
 export function fillOf(face: LaunchView, seat: boolean): { value: number; track: string; tone: "loading" | "info" } | null {
   if (face.kind === "loading") return { value: seat ? 1 : face.session.progress, track: face.session.taskId, tone: "loading" };
-  if (face.kind === "installing" && face.task !== null && face.task.status === "running") {
-    return { value: seat ? 1 : face.task.progress, track: progressTrack(face.task), tone: "info" };
+  if (face.kind === "installing" && face.task !== null && (face.task.status === "running" || face.task.status === "done")) {
+    return { value: seat || face.task.status === "done" ? 1 : face.task.progress, track: progressTrack(face.task), tone: "info" };
   }
   return null;
 }

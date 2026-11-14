@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
+import { visualElementStore } from "framer-motion";
 import { act, useLayoutEffect } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TOAST_COPY } from "../copy/flows";
 import { SHELL_ACTION_ERROR } from "../copy/shell";
 import { GAME_EXIT_EVENT } from "../ipc/launch";
+import type { ConfirmHandle } from "../launch/host";
 import type { ModpackExportOptions } from "../ipc/modpack";
 import type { UpdateDto } from "../ipc/system";
 import { CORE_EVENT } from "../ipc/tasks";
@@ -18,7 +20,7 @@ import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, emit, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { OverlayRoot } from "./overlay";
 import { pickSaveFile } from "./platform";
-import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "./shell";
+import { ShellProvider, useNav, usePetalsPaused, useShell, type NavApi, type ShellApi } from "./shell";
 import { browserWindowPort, WindowPortProvider, type WindowPort } from "./window";
 
 const PACK: ModpackExportOptions = { destination: "D:/分享/包.mrpack", name: "包", version: "1.0.0", summary: null, extras: [], include_disabled: false };
@@ -52,6 +54,14 @@ function Probe() {
   nav = useNav();
   shell = useShell();
   launcher = useLauncher();
+  return null;
+}
+
+let petalsPaused: boolean;
+
+/** 花瓣暂停的探针，只挂在要看它的用例里：它随浮层状态重渲染，不混进人人都挂的 Probe。 */
+function PetalsProbe() {
+  petalsPaused = usePetalsPaused();
   return null;
 }
 
@@ -494,6 +504,79 @@ describe("外壳：确认框与启动替换", () => {
     expect(document.activeElement).toBe(button(CONFIRM_CANCEL_LABEL));
   });
 
+  // 点了删除要等后端清点完才弹框，中间一段什么反应都没有；框先开、内容晚到时换内容不能当成顶替（重做聚焦、整框淡入）
+  it("openConfirm：框先开，内容到了原地换：同一个框、焦点不动、标题不重新淡入，确认键由不可按变成可按", async () => {
+    await mount();
+    let handle: ConfirmHandle | undefined;
+    act(() => {
+      handle = shell.openConfirm({ title: "删除「生存」？", body: "正在清点存档。", confirmLabel: "删除实例", tone: "danger", confirmDisabled: true });
+    });
+    if (handle === undefined) throw new Error("openConfirm 没有交回句柄");
+    const h = handle;
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]') as HTMLElement;
+    const title = dialog.querySelector<HTMLElement>("h2 > span") as HTMLElement;
+    const layoutKeyOf = () => visualElementStore.get(dialog)?.projection?.options.layoutDependency;
+    expect(button("删除实例").getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(button(CONFIRM_CANCEL_LABEL));
+    const before = layoutKeyOf();
+    expect(before).not.toBeUndefined();
+
+    act(() => h.update({ body: "2 个存档会一起移入回收站。", confirmLabel: "删除实例和 2 个存档", confirmDisabled: false }));
+    expect(document.querySelector('[role="dialog"]')).toBe(dialog);
+    expect(dialog.querySelector("h2 > span")).toBe(title);
+    expect(title.style.opacity).toBe("1");
+    expect(dialog.textContent).toContain("2 个存档会一起移入回收站。");
+    expect(dialog.textContent).not.toContain("正在清点存档。");
+    expect(button("删除实例和 2 个存档").getAttribute("aria-disabled")).toBeNull();
+    expect(document.activeElement).toBe(button(CONFIRM_CANCEL_LABEL));
+    // 换了内容的这一次面板要重新量布局；之后与它无关的重渲染不量
+    expect(layoutKeyOf()).not.toBe(before);
+
+    act(() => button("删除实例和 2 个存档").click());
+    await expect(h.result).resolves.toBe(true);
+  });
+
+  it("openConfirm 的 dismiss 按取消结算并关框；被新的确认顶掉之后，旧句柄的 update 与 dismiss 动不了新的框", async () => {
+    await mount();
+    let first: ConfirmHandle | undefined;
+    let second: ConfirmHandle | undefined;
+    act(() => {
+      first = shell.openConfirm({ title: "删除「生存」？", confirmLabel: "删除实例", tone: "danger", confirmDisabled: true });
+    });
+    act(() => {
+      second = shell.openConfirm({ title: "结束游戏？", confirmLabel: "结束游戏", tone: "danger" });
+    });
+    if (first === undefined || second === undefined) throw new Error("openConfirm 没有交回句柄");
+    const [stale, live] = [first, second];
+    await expect(stale.result).resolves.toBe(false);
+    let settled = false;
+    void live.result.then(() => {
+      settled = true;
+    });
+
+    act(() => stale.update({ title: "删除「创造」？", confirmLabel: "删除实例和 3 个存档" }));
+    act(() => stale.dismiss());
+    await flush();
+    expect(dialogTitle()).toBe("结束游戏？");
+    expect(button("结束游戏")).toBeDefined();
+    expect(document.querySelectorAll("[data-sk-modal-layer]:not([data-exiting])")).toHaveLength(1);
+    expect(settled).toBe(false);
+
+    act(() => live.dismiss());
+    await expect(live.result).resolves.toBe(false);
+    expect(document.querySelectorAll("[data-sk-modal-layer]:not([data-exiting])")).toHaveLength(0);
+    // 已经结算：再 dismiss 不会把之后的确认收掉
+    let third: Promise<boolean> | undefined;
+    act(() => {
+      third = shell.confirm({ title: "切换下载源？", confirmLabel: "切换并重下" });
+    });
+    act(() => live.dismiss());
+    act(() => live.update({ title: "删除「创造」？" }));
+    expect(dialogTitle()).toBe("切换下载源？");
+    act(() => button("切换并重下").click());
+    await expect(third).resolves.toBe(true);
+  });
+
   it("另一实例在运行时再点启动：弹替换确认，确认后结束旧的并启动新的", async () => {
     ipc.overrides.set("launch_game", () => ({ pid: 1 }));
     ipc.overrides.set("stop_game", () => {
@@ -791,6 +874,7 @@ describe("外壳：窗口焦点", () => {
         <LauncherProvider>
           <ShellProvider>
             <Probe />
+            <PetalsProbe />
             <OverlayRoot />
           </ShellProvider>
         </LauncherProvider>
@@ -800,17 +884,17 @@ describe("外壳：窗口焦点", () => {
     const windowFocus = (focused: boolean) => act(() => focusHandlers.forEach((handler) => handler(focused)));
 
     windowFocus(true);
-    expect(shell.petalsPaused).toBe(false);
+    expect(petalsPaused).toBe(false);
     windowFocus(false);
-    expect(shell.petalsPaused).toBe(true);
+    expect(petalsPaused).toBe(true);
     act(() => {
       window.dispatchEvent(new Event("focus"));
     });
-    expect(shell.petalsPaused).toBe(true);
+    expect(petalsPaused).toBe(true);
     await act(async () => answers.forEach((answer) => answer(true)));
-    expect(shell.petalsPaused).toBe(true);
+    expect(petalsPaused).toBe(true);
     windowFocus(true);
-    expect(shell.petalsPaused).toBe(false);
+    expect(petalsPaused).toBe(false);
   });
 
   it("订阅前读回的初值：窗口说失焦就按失焦", async () => {
@@ -819,6 +903,7 @@ describe("外壳：窗口焦点", () => {
         <LauncherProvider>
           <ShellProvider>
             <Probe />
+            <PetalsProbe />
             <OverlayRoot />
           </ShellProvider>
         </LauncherProvider>
@@ -828,7 +913,97 @@ describe("外壳：窗口焦点", () => {
       window.dispatchEvent(new Event("focus"));
     });
     await flush();
-    expect(shell.petalsPaused).toBe(true);
+    expect(petalsPaused).toBe(true);
+  });
+
+  it("窗口失焦聚焦：花瓣跟着暂停与恢复，只读 useShell 的组件一次都不重渲染", async () => {
+    const focusHandlers: ((focused: boolean) => void)[] = [];
+    let readerRenders = 0;
+    function ShellReader() {
+      useShell();
+      readerRenders += 1;
+      return null;
+    }
+    const port: WindowPort = {
+      ...browserWindowPort(),
+      isFocused: async () => true,
+      onFocusChanged: async (handler) => {
+        focusHandlers.push(handler);
+        return () => {};
+      },
+    };
+    view = render(
+      <WindowPortProvider port={port}>
+        <LauncherProvider>
+          <ShellProvider>
+            <Probe />
+            <ShellReader />
+            <PetalsProbe />
+            <OverlayRoot />
+          </ShellProvider>
+        </LauncherProvider>
+      </WindowPortProvider>,
+    );
+    await flush();
+    expect(petalsPaused).toBe(false);
+    const before = readerRenders;
+    expect(before).toBeGreaterThan(0);
+
+    const toggles = 2 + Math.floor(Math.random() * 4);
+    for (let i = 0; i < toggles; i++) {
+      act(() => focusHandlers.forEach((handler) => handler(false)));
+      expect(petalsPaused).toBe(true);
+      act(() => focusHandlers.forEach((handler) => handler(true)));
+      expect(petalsPaused).toBe(false);
+    }
+    expect(readerRenders).toBe(before);
+  });
+});
+
+describe("外壳：开关弹窗", () => {
+  // 弹窗的入场与退场动画在第一遍提交里就创建了；它登记浮层之后要是再引出一遍整页重渲染，
+  // 被堵住的那一段会记进动画时长，第一张可见帧就跳过一截
+  it("开关确认框：只读 useShell 的组件一次都不重渲染；花瓣在框开着时暂停，关上后恢复", async () => {
+    let readerRenders = 0;
+    function ShellReader() {
+      useShell();
+      readerRenders += 1;
+      return null;
+    }
+    view = render(
+      <LauncherProvider>
+        <ShellProvider>
+          <Probe />
+          <ShellReader />
+          <PetalsProbe />
+          <OverlayRoot />
+        </ShellProvider>
+      </LauncherProvider>,
+    );
+    await flush();
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await flush();
+    expect(petalsPaused).toBe(false);
+    const before = readerRenders;
+    expect(before).toBeGreaterThan(0);
+
+    const rounds = 2 + Math.floor(Math.random() * 4);
+    for (let i = 0; i < rounds; i++) {
+      let answer: Promise<boolean> | undefined;
+      act(() => {
+        answer = shell.confirm({ title: "删除「生存」？", confirmLabel: "删除实例", tone: "danger" });
+      });
+      await flush();
+      expect(dialogTitle()).toBe("删除「生存」？");
+      expect(petalsPaused).toBe(true);
+      act(() => button(CONFIRM_CANCEL_LABEL).click());
+      await expect(answer).resolves.toBe(false);
+      await flush();
+      expect(petalsPaused).toBe(false);
+    }
+    expect(readerRenders).toBe(before);
   });
 });
 
@@ -916,10 +1091,10 @@ describe("外壳：最小化期间的通知", () => {
     let pausedLog: boolean[];
     /** 花瓣暂停取决于窗口可见：记下每一次翻转，抖动就是多出来的项。 */
     function PausedLog() {
-      const { petalsPaused } = useShell();
+      const paused = usePetalsPaused();
       useLayoutEffect(() => {
-        pausedLog.push(petalsPaused);
-      }, [petalsPaused]);
+        pausedLog.push(paused);
+      }, [paused]);
       return null;
     }
     const mountLogged = async () => {

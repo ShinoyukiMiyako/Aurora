@@ -266,7 +266,7 @@ export const APPEARANCE_COPY = {
   panoramaDesc: "主页背景换成原版的樱花林全景，花瓣照常飘在它前面。全景图读取自你本机的游戏文件。",
   panoramaMissing: "本机还没有带樱花林全景的游戏版本，装好 1.20 系列任一版本后可以开启",
   reduceMotion: "减少动画",
-  reduceMotionDesc: "停掉花瓣飘落、卡面视差与页面过渡。系统开了「减少动态效果」时无论这里怎么设都会生效。",
+  reduceMotionDesc: "花瓣不再飘落，卡面视差、按下时的收缩等各处的位移缩放都停掉，页面切换只留淡入。系统开了「减少动态效果」时无论这里怎么设都会生效。",
   systemReduced: "系统已开启",
   coverBackground: "实例卡面默认背景",
   coverBackgroundDesc: "实例的卡面背景设为跟随时用它。方块平铺取封面方块的材质，读取自你本机的游戏文件。",

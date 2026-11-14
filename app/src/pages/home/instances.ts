@@ -73,6 +73,14 @@ export function recentInstances(instances: readonly InstanceSummary[], currentId
     .slice(0, count);
 }
 
+/**
+ * 记进界面形状的最近游玩张数：按最宽一档算，显示时再取它与当前档上限的较小值。
+ * 要是记按当前档截过的数，下次启动窗口变宽、落到更宽的档时就少画了。
+ */
+export function recentCardCount(instances: readonly InstanceSummary[], currentId: string | null): number {
+  return recentInstances(instances, currentId, RECENT_COUNT.wide).length;
+}
+
 export interface SwitchOption {
   id: string;
   name: string;

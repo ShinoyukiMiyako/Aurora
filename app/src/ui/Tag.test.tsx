@@ -5,10 +5,12 @@ import { resolve } from "node:path";
 import { createRef } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import { LOADER_KINDS, type LoaderKind } from "../domain/types";
+import { OverlayProvider, OverlayRoot } from "../shell/overlay";
 import { render, waitForFrames, type Rendered } from "../test/dom";
 import { Badge, BADGE_MAX, badgeText } from "./Badge";
 import { LOADER_LABEL, LoaderDot, LoaderTag, type LoaderTagKind } from "./LoaderTag";
 import { Tag, TAG_ICON_SIZE } from "./Tag";
+import { Tooltip } from "./Tooltip";
 
 let view: Rendered | undefined;
 afterEach(() => {
@@ -42,6 +44,26 @@ describe("Tag", () => {
 
   it("sm 用 12、md 用 14", () => {
     expect(TAG_ICON_SIZE).toEqual({ sm: 12, md: 14 });
+  });
+
+  it("包在 Tooltip 里：气泡显示时标签经 aria-describedby 关联到它", () => {
+    const LABEL = "可更新到 0.6.14+mc1.21.4-fabric.build.2077";
+    mount(
+      <OverlayProvider>
+        <Tooltip content={LABEL} open>
+          <Tag size="sm" tone="accent">
+            {LABEL}
+          </Tag>
+        </Tooltip>
+        <OverlayRoot />
+      </OverlayProvider>,
+    );
+    const tag = document.querySelector<HTMLElement>("[data-tone]");
+    const bubble = document.querySelector<HTMLElement>('[role="tooltip"]');
+    if (tag === null || bubble === null) throw new Error("标签或提示气泡没有渲染出来");
+    expect(bubble.id).not.toBe("");
+    expect(tag.getAttribute("aria-describedby")).toBe(bubble.id);
+    expect(document.getElementById(bubble.id)?.textContent).toBe(LABEL);
   });
 
   it("样式：卡面换底时字色、垫底色、描边色与卡面文字同一拍过渡；描边用向内收的 outline，不用不能过渡的内阴影", () => {
@@ -234,6 +256,24 @@ describe("LoaderTag", () => {
 
   it("版本号是空字符串时抛错，不静默当成没有版本", () => {
     expect(() => mount(<LoaderTag loader="fabric" version="" />)).toThrow(/空字符串/);
+  });
+
+  it("包在 Tooltip 里：气泡显示时加载器标签经 aria-describedby 关联到它", () => {
+    const VERSION = "0.16.14+mc1.21.4-build.2077";
+    mount(
+      <OverlayProvider>
+        <Tooltip content={VERSION} open>
+          <LoaderTag loader="fabric" version={VERSION} size="sm" />
+        </Tooltip>
+        <OverlayRoot />
+      </OverlayProvider>,
+    );
+    const tag = document.querySelector<HTMLElement>('[data-tone="outline"]');
+    const bubble = document.querySelector<HTMLElement>('[role="tooltip"]');
+    if (tag === null || bubble === null) throw new Error("加载器标签或提示气泡没有渲染出来");
+    expect(bubble.id).not.toBe("");
+    expect(tag.getAttribute("aria-describedby")).toBe(bubble.id);
+    expect(document.getElementById(bubble.id)?.textContent).toBe(VERSION);
   });
 
   it("圆点可用 6 档", () => {

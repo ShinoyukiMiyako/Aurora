@@ -11,7 +11,7 @@
 import { AnimatePresence, motion, useReducedMotionConfig, type HTMLMotionProps } from "framer-motion";
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Icon } from "../art/Icon";
-import type { SkinRef } from "../art/skin/layout";
+import type { SkinSource } from "../art/skin/layout";
 import { AccountAvatar } from "../art/skin/AccountAvatar";
 import { ACTION_ERROR, NEXT_LAUNCH_SUFFIX, TOAST_COPY, accountKindLabel } from "../copy/flows";
 import type { Account } from "../domain/adapt";
@@ -20,7 +20,7 @@ import { fade, popMark, springs } from "../lib/motion";
 import { useMounted } from "../lib/useMounted";
 import { isImeComposing } from "../lib/util";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
-import { useSkinInfo } from "../state/queries/home";
+import { skinSource, useSkinInfo } from "../state/queries/home";
 import { activeAccount, busyInstanceId } from "../state/selectors";
 import { Popover } from "../ui/Popover";
 import { Skeleton } from "../ui/Skeleton";
@@ -52,16 +52,18 @@ export const SLIDES_WITH_CAPSULE: Pick<HTMLMotionProps<"button">, "layout" | "la
  */
 const SKELETON_BAR = { name: 48, kind: 40, nameHeight: 10, kindHeight: 8 } as const;
 
-/** 账户的皮肤；读取失败经外层统一错误处理报告，头像退回剪影（与「没有皮肤」同样的画法）。 */
-export function useAccountSkin(uuid: string): SkinRef | null {
+/**
+ * 账户的皮肤，说法同 skinSource：还在读时是「读取中」，头像留着正在显示的脸。读取失败经外层统一错误处理报告，
+ * 重取失败时沿用上一次读到的皮肤，从没读到过的头像退回剪影（与「没有皮肤」同样的画法）。
+ */
+export function useAccountSkin(uuid: string): SkinSource {
   const skin = useSkinInfo(uuid);
   const run = useRunner();
   const error = skin.status === "error" ? skin.error : null;
   useEffect(() => {
     if (error !== null) void run(() => Promise.reject(error), SHELL_ACTION_ERROR.skin);
   }, [error, run]);
-  if (skin.status === "loading" || skin.data === undefined) return null;
-  return skin.data;
+  return skinSource(skin);
 }
 
 /** 账户行的第二行：需要重新登录时说明这一点，否则写账户类型。 */

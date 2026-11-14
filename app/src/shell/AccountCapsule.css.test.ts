@@ -36,9 +36,8 @@ describe("账户胶囊的按压", () => {
   });
 
   it("compact 档的正圆胶囊不裁：头像右上角的提醒点伸出内圆，裁了会被削掉一角", () => {
+    // 多一个属性选择器，特异性比 .capsule 高，compact 档的 visible 总能盖住它的 hidden，与两条规则的先后无关
     expect(rule(".capsule[data-compact]")).toMatch(/\soverflow:\s*visible;/);
-    // 同一特异性，写在 .capsule 之后才盖得住它的 hidden
-    expect(css.indexOf(".capsule[data-compact] {")).toBeGreaterThan(css.indexOf(".capsule {"));
   });
 });
 

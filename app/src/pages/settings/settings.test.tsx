@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
-import { act } from "react";
+import { act, memo } from "react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { IpcError } from "../../ipc/errors";
@@ -15,6 +15,7 @@ import {
   setMockUpdaterVersion,
   setMockUpdateSourceFailures,
 } from "../../ipc/mock/handlers/system";
+import { REFLOW_SKIP_ATTR } from "../../lib/reflow";
 import { catalogFromDto, setBlockCatalog } from "../../mc/catalog";
 import { OverlayRoot } from "../../shell/overlay";
 import { pickFile } from "../../shell/platform";
@@ -39,6 +40,19 @@ vi.mock("../../shell/platform", async (orig) => {
   const actual = await orig<typeof import("../../shell/platform")>();
   return { ...actual, pickFile: vi.fn(actual.pickFile) };
 });
+// 分区导航自己不订阅状态，只随设置页根一起渲染：包一层计数，数设置页根渲染了几次
+const navRenders = vi.hoisted(() => ({ count: 0 }));
+vi.mock("./SettingsNav", async (orig) => {
+  const mod = await orig<typeof import("./SettingsNav")>();
+  const { createElement } = await import("react");
+  return {
+    ...mod,
+    SettingsNav: (props: Parameters<typeof mod.SettingsNav>[0]) => {
+      navRenders.count++;
+      return createElement(mod.SettingsNav, props);
+    },
+  };
+});
 // 「下载原版材质」由它自己的测试覆盖；外观分区只管放不放、放在哪、用不用紧凑版
 vi.mock("../shared/cover-picker/ArtDownload", async () => {
   const { createElement } = await import("react");
@@ -50,10 +64,13 @@ let nav: NavApi;
 let launcher: LauncherApi;
 let commands: SettingsCommands & { calls: string[] };
 
+/** 与外壳的页面槽一样路由不变就不重渲染：Harness 订阅了整份状态，不隔开的话状态每变一次设置页都跟着重渲染。 */
+const RoutedSettingsPage = memo(SettingsPage);
+
 function Harness() {
   nav = useNav();
   launcher = useLauncher();
-  return nav.route.page === "settings" ? <SettingsPage route={nav.route} /> : null;
+  return nav.route.page === "settings" ? <RoutedSettingsPage route={nav.route} /> : null;
 }
 
 function fakeCommands(): SettingsCommands & { calls: string[] } {
@@ -343,6 +360,33 @@ describe("设置页：骨架与分区导航", () => {
     await click(button("重试"));
     expect(text()).not.toContain("配置载入失败");
     expect(radio("镜像源优先").getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("配置已读到后再读一遍：读的过程与读失败都不让设置页根重渲染，错误卡照样换上，重试成功后回到分区", async () => {
+    await mount("general");
+    expect(text()).toContain("游戏启动后");
+    const again = deferred<unknown>();
+    ipc.overrides.set("get_config", () => again.promise);
+    const before = navRenders.count;
+    let reloading: Promise<void> | undefined;
+    act(() => {
+      reloading = launcher.actions.reload("settings");
+    });
+    await flush();
+    expect([launcher.state.status.settings.kind, navRenders.count]).toEqual(["loading", before]);
+    await act(async () => {
+      again.reject(new IpcError("config_invalid", "config.json 第 7 行格式不对"));
+      await reloading;
+      await settle(20);
+    });
+    expect([launcher.state.status.settings.kind, navRenders.count]).toEqual(["error", before]);
+    // 错误卡由分区门自己订阅状态换上，不靠设置页根重渲染
+    expect(text()).toContain("config.json 第 7 行格式不对");
+    ipc.overrides.delete("get_config");
+    await click(button("重试"));
+    expect(launcher.state.status.settings.kind).toBe("ready");
+    expect(text()).not.toContain("配置载入失败");
+    expect(text()).toContain("游戏启动后");
   });
 });
 
@@ -1428,6 +1472,15 @@ describe("设置页：外观", () => {
     expect(callsOf(ipc, "set_appearance")).toEqual([{ patch: { mode: "night" } }, { patch: { petals: false } }]);
   });
 
+  it("「减少动画」的说明照实写：花瓣定格、位移缩放停掉、页面切换只留淡入，并写明系统偏好盖过这里", async () => {
+    await mount("appearance");
+    const row = button("减少动画").closest('[class*="row"]');
+    // 页面换场时旧页直接卸下、只有新页淡入，所以不能写成「页面过渡停掉」或「淡入淡出」
+    expect(row?.querySelector('[class*="description"]')?.textContent).toBe(
+      "花瓣不再飘落，卡面视差、按下时的收缩等各处的位移缩放都停掉，页面切换只留淡入。系统开了「减少动态效果」时无论这里怎么设都会生效。",
+    );
+  });
+
   it("实例卡面默认背景：两档各写出外观补丁；本机没有原版材质时这一行下面放紧凑的材质下载，有了就收起", async () => {
     onTestFinished(() => setBlockCatalog(null));
     await mount("appearance");
@@ -1484,15 +1537,22 @@ describe("设置页：关于与启动器更新", () => {
     await click(button("下载更新"));
     const [download] = callsOf(ipc, "download_update");
     expect(typeof download.taskId).toBe("string");
-    // 假后端每 120 ms 报一次进度，共 12 MB。卡片主句的百分比条条都换，面板与卡片的已下大小按 500 ms 的节拍换字
+    // 假后端每 120 ms 报一次进度，共 12 MB。卡片主句的百分数在第一条到时直接写出，之后与进度条同一条平滑逐帧走；
+    // 面板与卡片的已下大小从 0 开始传的第一条立即换上，之后按 500 ms 的节拍换字
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(250);
+      await vi.advanceTimersByTimeAsync(130);
     });
-    expect(text()).toContain("正在下载 0.2.0 · 40%");
+    expect(text()).toContain("正在下载 0.2.0 · 20%");
+    expect(text()).toContain("2.4 MB / 12.0 MB");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120);
+    });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(300);
     });
-    expect(text()).toContain("9.6 MB / 12.0 MB");
+    // 换上 2.4 MB 之后还不满 500 ms：其后报上来的几条都还没换上
+    expect(text()).toContain("2.4 MB / 12.0 MB");
+    expect(text()).not.toContain("9.6 MB");
     expect(button("后台下载").textContent).toBe("后台下载");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(300);
@@ -1697,8 +1757,9 @@ describe("设置页：关于与启动器更新", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(130);
     });
-    // 已下大小的字按 500 ms 的节拍换，第一个源报的这一条只在卡片主句的百分比上
+    // 已下大小从 0 开始传的第一条立即换上，与卡片主句的百分数同时到
     expect(text()).toContain("正在下载 0.2.0 · 20%");
+    expect(text()).toContain("2.4 MB / 12.0 MB");
     expect(text()).not.toContain("已换用备用下载源");
     // 换源提示要让读屏念出来：status 节点在第一个源时就挂着、是空的，换源时只换文字
     const panel = openDialogs()[0];
@@ -1714,11 +1775,16 @@ describe("设置页：关于与启动器更新", () => {
     expect(panel?.textContent).not.toContain("2.4 MB");
     expect(text()).toContain("0 B · 已换用备用下载源（2/4）");
 
-    // 换源那一刻字回到 0 B，从那时起满 500 ms 换上最近报上来的一条
+    // 换源那一刻字回到 0 B；新源报上来的第一条立即换上，之后按 500 ms 的节拍换
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(500);
+      await vi.advanceTimersByTimeAsync(120);
     });
-    expect(text()).toContain("9.6 MB / 12.0 MB · 已换用备用下载源（2/4）");
+    expect(text()).toContain("2.4 MB / 12.0 MB · 已换用备用下载源（2/4）");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(380);
+    });
+    expect(text()).toContain("2.4 MB / 12.0 MB · 已换用备用下载源（2/4）");
+    expect(text()).not.toContain("9.6 MB");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(150);
     });
@@ -1835,9 +1901,10 @@ describe("设置页：关于与启动器更新", () => {
       await click(button("检查更新"));
       await click(button("查看更新"));
       await click(button("下载更新"));
-      await advance(250);
+      // 第一条进度到时百分数直接写出；之后的随平滑逐帧走，到哪一格不在这里核对
+      await advance(130);
       await click(button("后台下载"));
-      expect(status()[0]).toBe("正在下载 0.2.0 · 40%");
+      expect(status()[0]).toBe("正在下载 0.2.0 · 20%");
 
       await click(radio("测试版"));
       expect(all(OPEN_DIALOG + " h2").map((h) => h.textContent)).toEqual(["把更新通道改成测试版？"]);
@@ -2029,9 +2096,12 @@ describe("设置页：关于与启动器更新", () => {
     expect(loading()?.hasAttribute("data-pending")).toBe(true);
     expect(loading()?.textContent).toBe("正在读取协议全文…");
     // 转圈所在的骨架层对读屏隐藏：读取中的说明另有一份在它外面，转圈显形时才写进去，读屏念得到
-    const status = dialog.querySelector<HTMLElement>('[role="status"]');
-    if (status === null) throw new Error("弹窗里没有给读屏的读取中说明");
-    expect([status.closest('[aria-hidden="true"]'), status.textContent]).toEqual([null, ""]);
+    const statuses = [...dialog.querySelectorAll<HTMLElement>('[role="status"]')].filter((el) => el.closest('[aria-hidden="true"]') === null);
+    if (statuses.length !== 1) throw new Error(`弹窗里读屏听得到的读取中说明应只有一份，实际有 ${statuses.length} 份`);
+    const [status] = statuses;
+    expect(status.textContent).toBe("");
+    // 用的是加载层自带的那一份：紧挨着加载层的根（带 aria-busy），带着不参与让位的标记
+    expect([status.nextElementSibling?.getAttribute("aria-busy"), status.hasAttribute(REFLOW_SKIP_ATTR)]).toEqual(["true", true]);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(300);
     });

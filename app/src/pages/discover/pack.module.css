@@ -363,27 +363,3 @@
   align-items: center;
   gap: var(--sk-space-4);
 }
-
-/* 清单主按钮的文案在「我已下载，重新检查」「正在检查…」「继续导入 / 重新安装」之间换：三条叠在同一格，
-   按最宽的留宽，同一排的「关闭」不被挤动。没在显示的两条只画在伪元素里，按钮的文字与可访问名称只有当前这条 */
-.primaryLabel {
-  display: inline-grid;
-  justify-items: center;
-}
-
-.primaryLabel > span,
-.primaryLabel::before,
-.primaryLabel::after {
-  grid-area: 1 / 1;
-  white-space: nowrap;
-}
-
-.primaryLabel::before {
-  content: attr(data-reserve-a);
-  visibility: hidden;
-}
-
-.primaryLabel::after {
-  content: attr(data-reserve-b);
-  visibility: hidden;
-}

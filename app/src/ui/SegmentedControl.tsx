@@ -2,10 +2,11 @@
 // 切换内容面板用标签页；值要提交才生效的用单选组。不允许横向滚动，compact 档放不下就该换下拉选择。
 // 选中块在项之间滑动；同一个 layoutId 只在本实例内部使用，不会飞到别的分段控件上。
 
-import { motion } from "framer-motion";
+import { motion, useReducedMotionConfig } from "framer-motion";
 import { useId } from "react";
 import { Icon, type IconName } from "../art/Icon";
-import { springs } from "../lib/motion";
+import { fade, springs } from "../lib/motion";
+import { useMounted } from "../lib/useMounted";
 import { cssVars, cx } from "../lib/util";
 import { assertRadioCount, useGroupName } from "./RadioGroup";
 import { useRovingGroup } from "./roving";
@@ -57,6 +58,10 @@ export function SegmentedControl<T extends string>({ value, onChange, options, s
   const name = useGroupName("SegmentedControl", ariaLabel);
   const roving = useRovingGroup(options, value, onChange, disabled);
   const thumbId = `${useId()}-thumb`;
+  // 减少动画时布局动画一步到位，选中块会从旧项瞬移到新项：改为在新项里从透明淡入，旧项里的那一块直接卸载、不留退场。
+  // 挂载时就在的那一块跟着所在的页面或弹窗出现，自己不淡
+  const mounted = useMounted();
+  const thumbFade = useReducedMotionConfig() === true ? { initial: mounted.current ? { opacity: 0 } : false, animate: { opacity: 1, transition: fade.in } } : undefined;
   return (
     <div
       role="radiogroup"
@@ -86,7 +91,7 @@ export function SegmentedControl<T extends string>({ value, onChange, options, s
             }}
           >
             {/* 依赖取选中值：控件只是重渲染（上方内容变高、计数变化）时不量布局，选中块随项一起到位，不从旧坐标滑过来 */}
-            {checked && <motion.span layoutId={thumbId} layoutDependency={value} className={styles.thumb} style={{ borderRadius: SEGMENT_THUMB_RADIUS }} transition={springs.settle} />}
+            {checked && <motion.span layoutId={thumbId} layoutDependency={value} className={styles.thumb} style={{ borderRadius: SEGMENT_THUMB_RADIUS }} transition={springs.settle} {...thumbFade} />}
             <span className={styles.content}>
               {option.dot !== undefined && <span className={styles.dot} data-loader={option.dot} />}
               {option.icon !== undefined && <Icon name={option.icon} size={ICON_SIZE[size]} />}

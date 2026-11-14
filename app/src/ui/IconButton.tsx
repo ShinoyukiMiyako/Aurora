@@ -39,6 +39,7 @@ export interface IconButtonProps extends NativeButton {
   /**
    * 强制显示提示（转给 Tooltip 的 open）：为真时立即显示，转为假时收起这一次显示。操作结果要让指针用户也看得见时用，
    * 例如复制后的「已复制」：按下时悬停出来的提示已经收起，名称换了也看不到。tooltip={false} 且没有禁用原因时无效。
+   * 例外同 Tooltip 的 open：键盘聚焦打开的那一次，转为假时焦点还在按钮上（按回车复制）就不收起，转回普通显示、换上此刻的 label。
    */
   tooltipOpen?: boolean;
   /** 右上角角标（计数等），偏移 −4 / −4。 */

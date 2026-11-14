@@ -83,7 +83,7 @@ const BATCH_COUNT_WIDEST = 999;
 /** 「新增」标签按小时刷新就够：边界在第 7 天，差一小时没人在意。 */
 const NEW_TAG_TICK_MS = 60 * 60 * 1000;
 /**
- * 更新检查结束后，紧凑档第二行的让位再挂多久（毫秒）。结果到达的那次提交改了第二行，观察者要到下一帧才报上来，
+ * 更新检查、Mod 列表重读结束后，紧凑档第二行的让位再挂多久（毫秒）。结果到达的那次提交改了第二行，观察者要到下一帧才报上来，
  * 同一次提交里摘掉会连同没报的变化一起丢掉。留一个 settle 弹簧的时长，余量足够；已经起步的滑动不随摘除中断。
  */
 const ROW_REFLOW_HOLD_MS = SPRING_PARAMS.settle.duration * 1000;
@@ -204,15 +204,39 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
 
   useEffect(() => registerFind(() => searchRef.current?.focus()), [registerFind]);
 
-  // 玩家可能刚在资源管理器里动过 mods 目录：页面按标签挂载，切过来就重读一次；回到前台的重读在状态层
+  // 玩家可能刚在资源管理器里动过 mods 目录：页面按标签挂载，切过来就重读一次；回到前台的重读在状态层。
+  // 等第一帧画出来之后再发：重读一发出快照就换成「重读中」，经外部订阅同步重渲染整张表。点标签是离散事件，
+  // 挂载后的 effect 在第一帧之前同步跑完，这一遍渲染就算进了面板入场的时长，第一帧直接从半透明起步。
+  // 挂载时已有读取在路上（第一次打开的初次加载、回到前台刚发出的重读）就不排：读回来的已是此刻盘上的，等到第一帧之后再读是白读一遍
   const { refresh } = mods;
+  const reading = mods.status === "loading" || (mods.status === "ready" && mods.refreshing);
+  const readingRef = useRef(reading);
+  useLayoutEffect(() => {
+    readingRef.current = reading;
+  });
   useEffect(() => {
-    if (queryId !== null) refresh();
+    if (queryId === null || readingRef.current) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    // rAF 回调在这一帧绘制之前跑，再排一个任务才落到绘制之后
+    const frame = requestAnimationFrame(() => {
+      timer = setTimeout(refresh, 0);
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      if (timer !== null) clearTimeout(timer);
+    };
   }, [queryId, refresh]);
 
-  // 列表换了一份（启停后的重扫）就以磁盘为准，丢掉乐观的开关值
+  // 列表换了一份（启停后的重扫）就以磁盘为准，丢掉乐观的开关值。只在一份读到的列表换成另一份时清：
+  // 挂载时清一次也会在第一帧之前多引发一遍整表的同步重渲染，而那时还没有任何乐观值
   const modsData = mods.status === "ready" ? mods.data : null;
-  useEffect(() => setOverrides(new Map()), [modsData]);
+  const shownData = useRef(modsData);
+  useEffect(() => {
+    if (modsData === null || modsData === shownData.current) return;
+    const replaced = shownData.current !== null;
+    shownData.current = modsData;
+    if (replaced) setOverrides(new Map());
+  }, [modsData]);
 
   // 标签角标与库卡片读实例摘要，回到前台时的重扫有节流：列表数出来和摘要对不上就补扫一次，不然这一页写 13、角标写 12。
   // 只在数字变了时比对：整合包的列表可以少于摘要，常年对不上也不能每重读一次就扫一次
@@ -436,10 +460,14 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   };
 
   const checkLoading = checking || updates.status === "loading" || updates.refreshing;
-  // 紧凑档第二行的让位只在它会变的这一段挂：更新检查进行中与结果刚到时（插拔状态标签、挤掉标注），以及忽略、恢复更新
-  // 还没回来时（回来后重读出来的状态标签换文案、变宽变窄；它在写卷宗那一刻就成立，重读的结果再快也赶在挂好之后）。
+  // 紧凑档第二行的让位只在它会变的这一段挂：更新检查进行中与结果刚到时（插拔状态标签、挤掉标注），忽略、恢复更新
+  // 还没回来时（回来后重读出来的状态标签换文案、变宽变窄；它在写卷宗那一刻就成立，重读的结果再快也赶在挂好之后），
+  // 以及 Mod 列表重读期间与刚回来时：「不检查更新」「已锁定版本」与「前置 · 由 X 带入」来自列表而不是更新检查，
+  // 忽略回来、拖入 jar 之后列表可能比更新检查晚回来不止一个停留时长（离线时更新检查很快就以失败结束）。
+  // 代价是切到这一页与回到前台的那次重读也会挂一下，只在重读期间加一个停留时长。
   // 平时不挂：每个让位各带一对观察者，挂上时还要找滚动祖先，超过 100 行的表格虚拟化后滚动中行反复挂卸，这笔开销会落在每一次滚动上
-  const rowReflow = useHeld(checkLoading || holdsInFlight > 0, ROW_REFLOW_HOLD_MS);
+  const modsRefreshing = mods.status === "ready" && mods.refreshing;
+  const rowReflow = useHeld(checkLoading || holdsInFlight > 0 || modsRefreshing, ROW_REFLOW_HOLD_MS);
   // 表格卡的加载门：错误与列表都算到了，卡里按查询结果画
   const tableView = loadableView(load.view);
   const compact = tier === "compact";
@@ -761,7 +789,8 @@ function SourceTag({ row }: { row: ModRow }) {
 
 /**
  * 更新状态那一格：设了更新检查（不检查更新、已锁定版本）时顶替「可更新到」，玩家先要知道这行的更新被自己管着；
- * 都没有为 null。
+ * 都没有为 null。「可更新到」带的是平台上的版本号，可能很长：版本列里压成一行、放不下就截断，悬停总能看到全文。
+ * key 挂在最外层：出入场按它认出是同一个标签。
  */
 function statusTag(row: ModRow): ReactElement | null {
   if (row.hold !== null) {
@@ -772,10 +801,13 @@ function statusTag(row: ModRow): ReactElement | null {
     );
   }
   if (row.update === null) return null;
+  const label = MODS_COPY.updateTo(row.update.latest.version_number);
   return (
-    <Tag key="status" size="sm" tone="accent" icon="sparkle" className={styles.updateTag}>
-      {MODS_COPY.updateTo(row.update.latest.version_number)}
-    </Tag>
+    <Tooltip key="status" content={label}>
+      <Tag size="sm" tone="accent" icon="sparkle" className={styles.updateTag}>
+        <span className={styles.updateTagText}>{label}</span>
+      </Tag>
+    </Tooltip>
   );
 }
 
@@ -875,8 +907,11 @@ function modColumns({ compact, rowReflow, lock, holdLock, now, isUpdating, isTog
       tiers: ["regular", "wide"],
       cell: (r) => (
         <div className={styles.versionCell}>
-          <span className={styles.modVersion}>{r.version === null ? MODS_COPY.versionUnknown : r.version}</span>
-          {/* 状态标签随更新检查晚到：整格钉在单元格顶部、按两行标签留好位置，标签出现时版本号不动；标签自己淡入淡出 */}
+          {/* 真实版本号又长又没有断点（1.14.2+kotlin.2.4.21）：压成一行截断，悬停看全文。「版本未知」没有更多可看 */}
+          <Tooltip content={r.version} disabled={r.version === null}>
+            <span className={styles.modVersion}>{r.version === null ? MODS_COPY.versionUnknown : r.version}</span>
+          </Tooltip>
+          {/* 状态标签随更新检查晚到：格高按版本号一行加单行标签固定，标签出现时版本号不动；标签自己淡入淡出 */}
           <Appear itemClassName={styles.appearInline}>{statusTag(r)}</Appear>
         </div>
       ),

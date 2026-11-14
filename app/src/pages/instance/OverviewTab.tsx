@@ -9,6 +9,7 @@ import { hueOf } from "../../art/illustrations/seed";
 import { ACTION_ERROR, CRASH_COPY, crashCategoryLabel, INSTANCE_IN_USE_COPY, lockReason, MODPACK_REIMPORT_COPY, modpackLabel, REINSTALL_LOADER_LABEL, taskPhaseText } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatBytes, formatDate, formatMemory, formatRelative, formatSpeed } from "../../domain/format";
+import type { TaskPhase } from "../../domain/types";
 import { canReinstallLoader, lostLoaderLibrary, needsReimport } from "../../domain/rules";
 import type { LaunchView } from "../../launch/launchView";
 import { useLaunch } from "../../launch/useLaunch";
@@ -35,7 +36,7 @@ import {
 import type { ResourceResult } from "../../state/resource";
 import { reimportRoute, type InstanceTab } from "../../state/route";
 import { instanceTask } from "../../state/selectors";
-import { progressTrack } from "../../state/tasks";
+import { isActiveTask, progressTrack } from "../../state/tasks";
 import { Appear } from "../../ui/Appear";
 import { Badge } from "../../ui/Badge";
 import { Banner, BannerSlot } from "../../ui/Banner";
@@ -66,6 +67,7 @@ import {
   modRows,
   modTotals,
   overviewBanner,
+  packsPlaceholderRows,
   PEEK_TILE,
   peekLayout,
   peekPerRow,
@@ -107,8 +109,9 @@ export function OverviewTab({ inst, queryId, ops, view, crash, crashAt, crashAct
   // 上次崩溃由列表时刻先判定：报告还在读就先画横幅（正文写正在读取），不等报告到了再插进来把下面整块推下去。
   // 报告读不到或读出来是空的时不画，与读到之前的口径一致
   const crashShown = banner === "crashed" && (crash.status === "loading" || (crash.status === "ready" && crash.data !== null));
-  // 补全装完的那一刻实例就不再按安装中画：横幅先把进度推满、停一拍再走。这一拍里状态层还拿着补全之前扫的那份列表，
-  // 原先损坏的实例会被说成损坏，等重扫回来才对，所以损坏横幅让给收尾；启动失败与上次崩溃照常优先
+  // 横幅画着的任务完成后先把进度推满、停一拍再走，这一拍从完成时刻算起。状态层在这次完成触发的重扫落定之前照旧按安装中派生
+  // （见 RawState.landing），重扫比这一拍晚回来时横幅本来就还在；重扫在这一拍里就回来时实例已不按安装中画，横幅撑到这一拍结束。
+  // 这时重扫的结论（没有横幅，或补全过仍然损坏）等这一拍走完再出；启动失败与上次崩溃照常优先
   const install = useInstallingBanner(inst.id, banner === "installing" && view.kind === "installing");
   const holdInstall = install.holding && (banner === null || banner === "broken");
   const installing = (banner === "installing" && view.kind === "installing") || holdInstall;
@@ -278,20 +281,26 @@ export function useInstallingBanner(instanceId: string, shown: boolean): { holdi
 /** held：本实例没有进行中的任务时接着画的那个已完成任务（见 useInstallingBanner），按进行中、满格画。 */
 export function InstallingBanner({ instanceId, held }: { instanceId: string; held: string | null }) {
   const { go } = useNav();
+  // 退场中的这一条，props 停在撤下之前的那次渲染。减少动画时没有收尾那一拍，那次的 held 还是空的，任务一完成本实例又没有
+  // 进行中的任务了，淡出的这一下会翻成排队中、进度回 0：所以记住自己画过的任务，退场时它完成了就接着按满格画它。
+  // 在场时不用它：退场途中被叫回来（同一个 key 复用的是这一份）而没有任务时照常写排队中，不拿撤下之前的任务充数
+  const present = useIsPresent();
+  const [seen, setSeen] = useState<string | null>(null);
   // 进度每个任务约 100 ms 一次：横幅自己订阅本实例的任务，页面拿到的启动视图里的任务进度可能是旧的
   const task = useLauncherSelector((s) => {
     const active = instanceTask(s, instanceId);
-    if (active !== null || held === null) return active;
-    const done = s.tasks.find((t) => t.id === held);
-    return done === undefined ? null : done;
+    if (active !== null) return active;
+    const id = held !== null ? held : present ? null : seen;
+    if (id === null) return null;
+    const done = s.tasks.find((t) => t.id === id);
+    return done === undefined || done.status !== "done" ? null : done;
   });
+  if (task !== null && isActiveTask(task) && task.id !== seen) setSeen(task.id);
   const finished = task !== null && task.status === "done";
   const running = task !== null && (task.status === "running" || finished);
   // 完成时后端把速度归零：收尾那一拍接着显示完成前的速度，进度推满的同时文字不跳成 0
   const lastSpeed = useRef(0);
   if (task !== null && task.status === "running") lastSpeed.current = task.speedBps;
-  // 速度按固定间隔换字、带平滑，不随每 100 ms 的上报跳；百分数与进度条同一份平滑（同一个 track）
-  const speed = formatSpeed(useDisplaySpeed(running ? (finished ? lastSpeed.current : task.speedBps) : 0));
   const title = task === null ? OVERVIEW_COPY.queuedTitle : task.title;
   const track = task === null ? undefined : progressTrack(task);
   const progress = finished ? 1 : running ? task.progress : 0;
@@ -303,10 +312,9 @@ export function InstallingBanner({ instanceId, held }: { instanceId: string; hel
         <span className={styles.num}>
           {running && track !== undefined ? (
             <>
+              {/* 百分数与进度条同一份平滑（同一个 track） */}
               <SmoothPercent value={progress} track={track} />
-              {task.phase === null
-                ? OVERVIEW_COPY.installProgressTail(speed, task.totalBytes === null ? null : formatBytes(task.totalBytes))
-                : OVERVIEW_COPY.installStepProgressTail(taskPhaseText(task.phase, "long"), speed)}
+              <InstallTail speedBps={finished ? lastSpeed.current : task.speedBps} totalBytes={task.totalBytes} phase={task.phase} />
             </>
           ) : (
             OVERVIEW_COPY.queuedBody
@@ -315,6 +323,17 @@ export function InstallingBanner({ instanceId, held }: { instanceId: string; hel
       </div>
     </Banner>
   );
+}
+
+/**
+ * 安装横幅百分数后面的那段：速度与总量，分步的任务写当前步骤与速度。速度按固定间隔换字、带平滑，不随每 100 ms 的上报跳
+ * （lib/progress-display 的 useDisplaySpeed）。节拍放在这一小段里：定时器到点补字时只重画这段文字，整条横幅不跟着重渲染。
+ */
+function InstallTail({ speedBps, totalBytes, phase }: { speedBps: number; totalBytes: number | null; phase: TaskPhase | null }) {
+  const speed = formatSpeed(useDisplaySpeed(speedBps));
+  return phase === null
+    ? OVERVIEW_COPY.installProgressTail(speed, totalBytes === null ? null : formatBytes(totalBytes))
+    : OVERVIEW_COPY.installStepProgressTail(taskPhaseText(phase, "long"), speed);
 }
 
 // ---------------------------------------------------------------- 四格数据
@@ -908,14 +927,15 @@ function PacksCard({ inst, content }: { inst: InstanceSummary; content: Resource
   const vanilla = inst.loader === "vanilla";
   const discover = () => go({ page: "discover", kind: "resourcepack", forInstance: inst.id });
   const load = useModuleView(content);
-  // 光影一行加资源包至少一行，读到之前就按这两行占位；包多出来的那几行撑高卡片时，底部说明从原位置滑下去
+  // 读到之前按实例列表里的资源包数占位（见 packsPlaceholderRows），读到之后行数一样、卡片不长高；
+  // 列表是早先扫的，期间在游戏外增删过包时行数会差几行，那时底部说明从原位置滑过去
   const body = useReflow<HTMLDivElement>();
 
   return (
     <Card>
       <CardHeader icon="image" title={OVERVIEW_COPY.packsTitle} actions={<IconButton icon="compass" label={OVERVIEW_COPY.findPacks} size="sm" onClick={discover} />} />
       <div ref={body} className={styles.packsBody}>
-        <Loadable view={loadableView(load.view)} skeleton={<RowSkeletons rows={2} />}>
+        <Loadable view={loadableView(load.view)} skeleton={<RowSkeletons rows={packsPlaceholderRows(inst.resourcePackCount)} />}>
           {() => {
             if (content.status === "loading") throw new Error("加载门已放行，资源包查询却还在加载");
             if (content.status === "error") return <ModuleError title={OVERVIEW_COPY.packsError} error={content.error} onRetry={content.reload} />;

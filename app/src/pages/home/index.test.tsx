@@ -5,6 +5,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
+import { SLOW_LOADING_HINT } from "../../copy/flows";
 import { LOADING_DELAY_MS, SLOW_HINT_MS } from "../../domain/limits";
 import type { InstanceDto } from "../../ipc/instances";
 import { IpcError } from "../../ipc/errors";
@@ -13,11 +14,13 @@ import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
+import { DEFAULT_UI_SHAPE, UiShapeProvider } from "../../state/ui-shape";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../test/fake-bridge";
 import { accountDto, bootOverrides, configDto, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import HomePage from "./index";
+import { SKELETON_SIZE } from "./layout";
 import { world } from "./test-data";
 import s from "./home.module.css";
 
@@ -87,15 +90,17 @@ function playStats(args: IpcArgs) {
 function Shell({ page }: { page: boolean }) {
   return (
     <AppearanceProvider initial={DEFAULT_APPEARANCE}>
-      <LauncherProvider>
-        <ShellProvider>
-          <RemoteImageProvider resolve={async (url) => url}>
-            <Probe />
-            {page && <HomePage route={{ page: "home" }} />}
-          </RemoteImageProvider>
-          <OverlayRoot />
-        </ShellProvider>
-      </LauncherProvider>
+      <UiShapeProvider initial={DEFAULT_UI_SHAPE}>
+        <LauncherProvider>
+          <ShellProvider>
+            <RemoteImageProvider resolve={async (url) => url}>
+              <Probe />
+              {page && <HomePage route={{ page: "home" }} />}
+            </RemoteImageProvider>
+            <OverlayRoot />
+          </ShellProvider>
+        </LauncherProvider>
+      </UiShapeProvider>
     </AppearanceProvider>
   );
 }
@@ -157,6 +162,11 @@ function heroSkeleton(): HTMLElement {
 
 const heights = (els: Iterable<Element>) => [...els].map((el) => (el as HTMLElement).style.height);
 
+/** 页面上写着慢提示的那些节点（取最内层的文字节点所在元素）。 */
+function slowHints(): HTMLElement[] {
+  return [...document.querySelectorAll<HTMLElement>(`.${s.slowHint}`)].filter((el) => el.textContent === SLOW_LOADING_HINT);
+}
+
 function weekBars(): HTMLButtonElement[] {
   return [...document.querySelectorAll<HTMLButtonElement>('[aria-label="近 7 天每日游玩时长"] > button')];
 }
@@ -193,7 +203,7 @@ describe("继续游玩大卡：加载、空态与实例之间始终是同一张�
     expect(empty?.textContent).toContain("instances 目录读不出来");
   });
 
-  it("骨架逐行照大卡画：顶行是标签与小按钮，标题区是名称、标签、信息行三行；慢提示落在顶行里，不另起一行", async () => {
+  it("骨架逐行照大卡画：顶行是标签与小按钮，标题区是名称、标签、信息行三行", async () => {
     const list = deferred<InstanceDto[]>();
     ipc.overrides.set("list_instances", () => list.promise);
     await mount();
@@ -206,14 +216,76 @@ describe("继续游玩大卡：加载、空态与实例之间始终是同一张�
     expect(heights(top.querySelectorAll('[style*="height"]'))).toEqual(["18px", "30px"]);
     expect([...title.children].map((el) => (el as HTMLElement).style.height)).toEqual(["34px", "18px", ""]);
     expect(title.children[2].classList.contains(s.heroLine)).toBe(true);
-
-    const rows = skeleton.querySelector(`.${s.heroInner}`)?.children.length;
-    await advance(SLOW_HINT_MS);
-    const hint = [...skeleton.querySelectorAll<HTMLElement>(`.${s.slowHint}`)].find((el) => el.textContent?.includes("比平时慢一些"));
-    expect(hint?.closest(`.${s.heroTop}`)).toBe(top);
-    expect(skeleton.querySelector(`.${s.heroInner}`)?.children.length).toBe(rows);
     list.resolve(instances);
     await flush();
+  });
+
+  it("加载超过慢提示时长：提示在骨架层之外、读屏读得到，压在顶行标签与按钮之间那一格上，骨架的行与顶行都不变", async () => {
+    const list = deferred<InstanceDto[]>();
+    ipc.overrides.set("list_instances", () => list.promise);
+    await mount();
+    await advance(LOADING_DELAY_MS);
+    const skeleton = heroSkeleton();
+    const top = skeleton.querySelector<HTMLElement>(`.${s.heroTop}`);
+    if (top === null) throw new Error("骨架缺顶行");
+    const topCells = [...top.children];
+    const rows = [...(skeleton.querySelector(`.${s.heroInner}`)?.children ?? [])];
+    await advance(SLOW_HINT_MS - LOADING_DELAY_MS - 100);
+    expect(slowHints()).toEqual([]);
+
+    await advance(100);
+    const [hint] = slowHints();
+    if (hint === undefined) throw new Error("加载超过慢提示时长，慢提示没有出现");
+    expect(hint.closest('[aria-hidden="true"]')).toBeNull();
+    expect(skeleton.contains(hint)).toBe(false);
+    expect(continueCard().contains(hint)).toBe(true);
+    // 出现时从透明淡入
+    expect(hint.style.opacity).toBe("0");
+    // 骨架顶行仍是标签、留白、按钮三格，标题区与胶囊的行一个没多
+    expect([...top.children]).toEqual(topCells);
+    expect(topCells).toHaveLength(3);
+    expect([...(skeleton.querySelector(`.${s.heroInner}`)?.children ?? [])]).toEqual(rows);
+    // 定位层的左右边界照骨架顶行的标签宽与按钮宽、行高照小按钮高
+    const slot = hint.closest<HTMLElement>(`.${s.heroSlowHint}`);
+    expect(slot?.style.getPropertyValue("--hero-hint-start")).toBe(`${SKELETON_SIZE.continueTag}px`);
+    expect(slot?.style.getPropertyValue("--hero-hint-end")).toBe(`${SKELETON_SIZE.switchButton}px`);
+    expect(slot?.style.getPropertyValue("--hero-hint-height")).toBe(`${SKELETON_SIZE.buttonSm}px`);
+    list.resolve(instances);
+    await flush();
+  });
+
+  it("慢加载后内容到达：提示在内容开始淡入时已离开 DOM，不与顶行的「上次」叠在同一格里交叉淡化", async () => {
+    const list = deferred<InstanceDto[]>();
+    ipc.overrides.set("list_instances", () => list.promise);
+    await mount();
+    await advance(SLOW_HINT_MS);
+    expect(slowHints()).toHaveLength(1);
+
+    list.resolve(instances);
+    await flush();
+    const loaded = continueCard().querySelector<HTMLElement>(`.${s.heroLoaded}:not([inert])`);
+    expect(loaded?.querySelector(`.${s.heroWhen}`)?.textContent).toBe("上次 2 分钟前");
+    // 内容层还在淡入（jsdom 不跑完动画）：骨架正淡出，提示若跟着骨架退场，这时就会和「上次」叠着
+    expect(loaded?.style.opacity).toBe("0");
+    expect(text()).not.toContain(SLOW_LOADING_HINT);
+  });
+
+  it("没有实例、目录列表读得慢：同一句提示同样在骨架层之外，目录列表到了随即离开", async () => {
+    instances = [];
+    bootOverrides(ipc, { instances: [] });
+    const dirs = deferred<unknown>();
+    ipc.overrides.set("list_game_directories", () => dirs.promise);
+    await mount();
+    await advance(SLOW_HINT_MS);
+    const [hint] = slowHints();
+    if (hint === undefined) throw new Error("目录列表读得慢，慢提示没有出现");
+    expect(hint.closest('[aria-hidden="true"]')).toBeNull();
+    expect(continueCard().contains(hint)).toBe(true);
+
+    dirs.resolve([{ name: "默认目录", path: "D:\\Games\\.minecraft", is_current: true, available: true, version_count: 0 }]);
+    await flush();
+    expect(continueCard().textContent).toContain("还没有可以继续的实例");
+    expect(text()).not.toContain(SLOW_LOADING_HINT);
   });
 
   it("设置晚于实例列表：大卡占着骨架等设置里的当前实例，不先画最近玩的那个再换一面", async () => {
@@ -490,5 +562,129 @@ describe("游玩卡：加载前后是同一组元素，换内容只淡化", () =
     const days = [...document.querySelectorAll<HTMLElement>(`.${s.dayDetail} .${s.dayBody}`)];
     const next = days.find((el) => el.textContent?.includes("30 分钟"));
     expect(next?.style.opacity).toBe("0");
+  });
+});
+
+// 游玩记录通常比实例列表（要扫盘）先到：按还空着的列表算，会先写出「暂无」「0 个实例」「已被删除」，列表一到再一帧换字
+describe("游玩卡：要按实例列表算的几块等列表读完", () => {
+  const WEEK = "近 7 天 2.1 小时，前 7 天没有记录";
+  const STREAK = "连续游玩 1 天，继续保持";
+
+  function insightsCard(): HTMLElement {
+    const card = document.querySelector('[aria-label="近 7 天每日游玩时长"]')?.closest<HTMLElement>("[data-span]");
+    if (card === null || card === undefined) throw new Error("找不到洞察卡");
+    return card;
+  }
+
+  /** 洞察卡里在场的数据块名称：退场中的（在带 inert 的层里）与近 7 天柱那一组不算。 */
+  const tileLabels = () =>
+    [...insightsCard().querySelectorAll<HTMLElement>('[role="group"][aria-label]')]
+      .filter((el) => el.closest("[inert]") === null && el.getAttribute("aria-label") !== "近 7 天每日游玩时长")
+      .map((el) => el.getAttribute("aria-label"));
+
+  function dayDetail(): HTMLElement {
+    const el = document.querySelector<HTMLElement>(`.${s.dayDetail}`);
+    if (el === null) throw new Error("找不到当日详情");
+    return el;
+  }
+
+  /** 当日详情里在场的实例行。 */
+  const dayLinks = () =>
+    [...dayDetail().querySelectorAll<HTMLElement>('[aria-label^="打开「"]')].filter((el) => el.closest("[inert]") === null).map((el) => el.getAttribute("aria-label"));
+
+  /** 推迟实例列表的读取，返回放行函数。 */
+  function holdInstances() {
+    const list = deferred<InstanceDto[]>();
+    ipc.overrides.set("list_instances", () => list.promise);
+    return async () => {
+      list.resolve(instances);
+      await flush();
+    };
+  }
+
+  const failInstances = () =>
+    ipc.overrides.set("list_instances", () => {
+      throw new IpcError("io_failed", "versions 目录读不出来");
+    });
+
+  it("列表晚到：常玩加载器、累计时长与当天玩过的实例画骨架，不按空列表算；近 7 天、连续游玩与当天时长照常先出，列表到了再淡入", async () => {
+    const release = holdInstances();
+    await mount();
+    expect(launcher.state.status.instances.kind).toBe("loading");
+    expect(tileLabels()).toEqual([WEEK, STREAK]);
+    const skeletons = [...insightsCard().querySelectorAll<HTMLElement>(`.${s.statSkeleton}`)];
+    expect(skeletons).toHaveLength(2);
+    for (const tile of skeletons) {
+      expect(tile.children).toHaveLength(3);
+      expect(tile.children[1].classList.contains(s.statSkeletonValue)).toBe(true);
+    }
+    expect(insightsCard().textContent).not.toContain("暂无");
+    expect(insightsCard().textContent).not.toContain("个实例");
+    expect(dayDetail().textContent).toContain("1 小时 35 分钟");
+    expect(dayDetail().textContent).not.toContain("已被删除");
+    expect(dayDetail().querySelectorAll(`[aria-hidden="true"] .${s.dayList} > li`)).toHaveLength(1);
+
+    await release();
+    expect(tileLabels()).toEqual([WEEK, STREAK, "常玩加载器 原版，近 30 天占 100%", "累计时长 41 小时，1 个实例"]);
+    expect(insightsCard().querySelectorAll(`.${s.statSkeleton}`)).toHaveLength(0);
+    const top = insightsCard().querySelector<HTMLElement>('[role="group"][aria-label^="常玩加载器"]');
+    expect(top?.closest('[style*="opacity: 0"]')).not.toBeNull();
+    expect(dayLinks()).toEqual(["打开「生存」"]);
+    expect(dayDetail().querySelector('[aria-label="打开「生存」"]')?.closest('[style*="opacity: 0"]')).not.toBeNull();
+  });
+
+  it("当天玩过几个实例，列表骨架就画几行；读到后已删除的那个不列", async () => {
+    const days: PlayDayDto[] = [
+      {
+        date: "2026-10-30",
+        minutes: 125,
+        instances: [
+          { version_id: "生存", minutes: 95 },
+          { version_id: "已删除", minutes: 30 },
+        ],
+      },
+    ];
+    ipc.overrides.set("play_stats", (args: IpcArgs) => ({ ...playStats(args), days }));
+    const release = holdInstances();
+    await mount();
+    expect(dayDetail().querySelectorAll(`[aria-hidden="true"] .${s.dayList} > li`)).toHaveLength(2);
+    await release();
+    expect(dayLinks()).toEqual(["打开「生存」"]);
+  });
+
+  it("列表读取失败：这几块不停在骨架，写读不到，不说实例已被删除；错误由大卡原位报", async () => {
+    failInstances();
+    await mount();
+    expect(launcher.state.status.instances.kind).toBe("error");
+    await advance(LOADING_DELAY_MS);
+    expect(insightsCard().querySelectorAll(`.${s.statSkeleton}`)).toHaveLength(0);
+    expect(tileLabels()).toEqual([WEEK, STREAK, "常玩加载器 读不到", "累计时长 读不到，实例列表读不出来"]);
+    expect(dayDetail().textContent).toContain("实例列表读不出来");
+    expect(dayDetail().textContent).not.toContain("已被删除");
+    expect(dayDetail().querySelector(`.${s.dayList}`)).toBeNull();
+    expect(continueCard().textContent).toContain("实例列表读不出来");
+  });
+
+  it("读取失败后点重试：重读期间留着读不到、不退回骨架；读到后原位换上", async () => {
+    failInstances();
+    await mount();
+    const retry = deferred<InstanceDto[]>();
+    ipc.overrides.set("list_instances", () => retry.promise);
+    const button = [...continueCard().querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "重试");
+    if (button === undefined) throw new Error("大卡没有重试按钮");
+    act(() => {
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 }));
+    });
+    await flush();
+    expect(launcher.state.status.instances.kind).toBe("loading");
+    await advance(LOADING_DELAY_MS);
+    expect(insightsCard().querySelectorAll(`.${s.statSkeleton}`)).toHaveLength(0);
+    expect(dayDetail().querySelector(`[aria-hidden="true"] .${s.dayList}`)).toBeNull();
+    expect(tileLabels()).toEqual([WEEK, STREAK, "常玩加载器 读不到", "累计时长 读不到，实例列表读不出来"]);
+
+    retry.resolve(instances);
+    await flush();
+    expect(tileLabels()).toEqual([WEEK, STREAK, "常玩加载器 原版，近 30 天占 100%", "累计时长 41 小时，1 个实例"]);
+    expect(dayLinks()).toEqual(["打开「生存」"]);
   });
 });

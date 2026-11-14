@@ -2,7 +2,7 @@
 // @module-tag heavy-page
 // 快览行的进度文字、完成收尾与退场后的布局键。要让 framer-motion 把百分数的平滑与行的退场播完，帧跟着假时钟走：
 // 用 stepFrames 逐帧推进，收尾时先卸载、再排空帧循环，同文件后面的用例才推得动。
-import { visualElementStore } from "framer-motion";
+import { MotionConfig, visualElementStore } from "framer-motion";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PEEK_COPY } from "../copy/shell";
@@ -14,7 +14,8 @@ import { feedSpeed, publishSpeed, SPEED_REFRESH_MS, startSpeed } from "../lib/pr
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { drainFrames, render, stepFrames, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { bootOverrides, deferred, emit, resetRecorder, settle, type Deferred } from "../test/launcher";
+import type { InstanceDto } from "../ipc/instances";
+import { bootOverrides, deferred, emit, instanceDto, resetRecorder, settle, type Deferred } from "../test/launcher";
 import { DownloadPeek, peekLayoutKey, peekRows, ROW_STATE_WIDEST } from "./DownloadPeek";
 import styles from "./DownloadPeek.module.css";
 import { OverlayRoot } from "./overlay";
@@ -23,6 +24,20 @@ import { ShellProvider } from "./shell";
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
+// 快览行每画一次就画一次它的进度条：按进度条的读屏名称计数，数的就是各行的渲染次数。计数外壳直接调用原组件函数
+const barRenders = vi.hoisted(() => new Map<string, number>());
+vi.mock("../ui/ProgressBar", async (orig) => {
+  const mod = await orig<typeof import("../ui/ProgressBar")>();
+  return {
+    ...mod,
+    ProgressBar: (props: Parameters<typeof mod.ProgressBar>[0]) => {
+      const key = props.label === undefined ? "" : props.label;
+      barRenders.set(key, (barRenders.get(key) ?? 0) + 1);
+      return mod.ProgressBar(props);
+    },
+  };
+});
+
 let view: Rendered | undefined;
 let launcher: LauncherApi;
 let runs: Map<number, Deferred<unknown>>;
@@ -30,6 +45,20 @@ let runs: Map<number, Deferred<unknown>>;
 function Host() {
   launcher = useLauncher();
   return <DownloadPeek />;
+}
+
+/** 整棵树。外层的 MotionConfig 一直在：切到减少动画时 rerender 只换它的参数，状态容器与快览不重新挂载。 */
+function tree(reduced: boolean) {
+  return (
+    <MotionConfig reducedMotion={reduced ? "always" : "never"}>
+      <LauncherProvider>
+        <ShellProvider>
+          <Host />
+          <OverlayRoot />
+        </ShellProvider>
+      </LauncherProvider>
+    </MotionConfig>
+  );
 }
 
 const flush = () =>
@@ -119,14 +148,7 @@ beforeEach(async () => {
     runs.set(Number(args.requiredMajor), d);
     return d.promise;
   });
-  view = render(
-    <LauncherProvider>
-      <ShellProvider>
-        <Host />
-        <OverlayRoot />
-      </ShellProvider>
-    </LauncherProvider>,
-  );
+  view = render(tree(false));
   await flush();
 });
 afterEach(async () => {
@@ -163,6 +185,32 @@ describe("快览行的进度文字", () => {
     expect(shown).toBeGreaterThan(1_000_000);
     expect(shown).toBeLessThan(3_000_000);
     expect(stateText(java.title)).toBe(PEEK_COPY.progress("60%", formatSpeed(shown)));
+  });
+
+  it("速度到点补字只重画状态文字那一段：行本身（标题、进度条、取消键）不跟着重渲染", async () => {
+    const java = await startJava(21);
+    await openPeek();
+    const download = (bytes: number, speed: number) =>
+      act(() => emit(CORE_EVENT, { kind: "download", task_id: `${java.id}#1`, total: 3, finished: 1, bytes, total_bytes: 1_000, speed }));
+    const speedText = () => {
+      const text = stateText(java.title);
+      if (text === null) throw new Error("状态文字是空的");
+      return text.split(" · ").at(-1);
+    };
+    const t0 = Date.now();
+    // 从 0 起步的速度直接换上；同一刻再报一个快得多的，字先停在上一拍
+    download(300, 1_000_000);
+    download(400, 3_000_000);
+    expect(speedText()).toBe(formatSpeed(1_000_000));
+    const label = PEEK_COPY.rowProgress(java.title);
+    const before = barRenders.get(label);
+    if (before === undefined) throw new Error("快览行的进度条没有画过");
+
+    act(() => void vi.advanceTimersByTime(SPEED_REFRESH_MS));
+    const shown = publishSpeed(feedSpeed(startSpeed(1_000_000, t0), 3_000_000, t0), t0 + SPEED_REFRESH_MS).shown;
+    expect(formatSpeed(shown)).not.toBe(formatSpeed(1_000_000));
+    expect(speedText()).toBe(formatSpeed(shown));
+    expect(barRenders.get(label)).toBe(before);
   });
 
   it("状态文字下面叠着不可见的最宽字样撑住宽度：排队中与运行中的行都有，读屏读不到", async () => {
@@ -246,6 +294,99 @@ describe("快览行收尾期间的速度", () => {
     expect(panelLayoutKey()[0]).toEqual([]);
     expect(rowOf(java.title)).toBeNull();
     expect(stateText(java.title, "leaving")).toBe(PEEK_COPY.progress(shownPercent("leaving"), formatSpeed(2_000_000)));
+  });
+});
+
+describe("减少动画下完成的行退场", () => {
+  /** 一行里的进度条、取消键、左侧详情与右侧状态文字。 */
+  const partsOf = (li: HTMLElement) => {
+    const bar = li.querySelector('[role="progressbar"]');
+    const cancelKey = li.querySelector(`button[aria-label="${PEEK_COPY.cancel}"]`);
+    const detail = li.querySelector(`.${styles.rowDetail}`);
+    const state = li.querySelector(`.${styles.rowState} > .${styles.rowStateText}`);
+    if (bar === null || cancelKey === null || detail === null || state === null) throw new Error("快览行缺了进度条、取消键、详情或状态文字");
+    return { valueNow: bar.getAttribute("aria-valuenow"), cancelDisabled: cancelKey.getAttribute("aria-disabled"), detail: detail.textContent, state: state.textContent };
+  };
+
+  /** 把 Java 任务报到 95%、速度 2 MB/s，再让它完成；返回完成前那一行的样子与完成后的任务。 */
+  async function finishAt95(major: number, id: string, title: string) {
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: `${id}#1`, total: 3, finished: 2, bytes: 950, total_bytes: 1_000, speed: 2_000_000 }));
+    await flush();
+    await stepFrames(2);
+    const before = partsOf(row(title));
+    expect([before.valueNow, before.cancelDisabled, before.state]).toEqual(["95", null, PEEK_COPY.progress("95%", formatSpeed(2_000_000))]);
+
+    runs.get(major)?.resolve(javaResult(major));
+    await flush();
+    const done = launcher.state.tasks.find((t) => t.id === id);
+    if (done === undefined) throw new Error(`任务 ${id} 不在任务表里`);
+    expect(done.status).toBe("done");
+    // 完成后详情换成装好的版本：退场副本要写的是这一句，不是完成前那句
+    expect(done.detail).not.toBe(before.detail);
+    return done;
+  }
+
+  it("还有别的行在：完成的行没有收尾这一拍，当场原处淡出，淡出时是完成的样子（满格、取消键不可用、详情与速度照完成时）", async () => {
+    view?.rerender(tree(true));
+    await flush();
+    const java = await startJava(21);
+    const other = await startJava(17);
+    await openPeek();
+
+    const done = await finishAt95(21, java.id, java.title);
+    expect(panelLayoutKey()[0]).toEqual([other.id]);
+    expect(rowOf(java.title)).toBeNull();
+    // 淡出还没播完（减少动画的退场 120 ms）：只走两帧让百分数跳到目标
+    await stepFrames(2);
+    expect(partsOf(row(java.title, "leaving"))).toEqual({
+      valueNow: "100",
+      cancelDisabled: "true",
+      detail: done.detail,
+      state: PEEK_COPY.progress("100%", formatSpeed(2_000_000)),
+    });
+  });
+
+  it("最后一行：跟着整块列表淡出，行自己仍算在场，同样按完成画", async () => {
+    view?.rerender(tree(true));
+    await flush();
+    const java = await startJava(21);
+    await openPeek();
+
+    const done = await finishAt95(21, java.id, java.title);
+    expect(panelLayoutKey()[0]).toEqual([]);
+    expect(rowOf(java.title)).toBeNull();
+    await stepFrames(2);
+    expect(partsOf(row(java.title, "leaving"))).toEqual({
+      valueNow: "100",
+      cancelDisabled: "true",
+      detail: done.detail,
+      state: PEEK_COPY.progress("100%", formatSpeed(2_000_000)),
+    });
+  });
+});
+
+describe("快览的「清除已结束」", () => {
+  it("补全成功、落地重扫还没回来：清除不算这一条，底栏不出这个键、布局键也不算有；重扫回来才出", async () => {
+    const repair = deferred<unknown>();
+    ipc.overrides.set("repair_instance", () => repair.promise);
+    await act(() => launcher.actions.repairInstance("生存"));
+    await flush();
+    await openPeek();
+    const scan = deferred<InstanceDto[]>();
+    ipc.overrides.set("list_instances", () => scan.promise);
+    repair.resolve({ reinstalled: false, libraries: 3, assets: 0, natives: 0 });
+    await flush();
+    await stepFrames(30);
+    expect(launcher.state.tasks.map((t) => t.status)).toEqual(["done"]);
+    const clearKeys = () => [...panel().querySelectorAll("button")].filter((b) => b.closest("[inert]") === null && b.textContent === PEEK_COPY.clearFinished(1));
+    expect(clearKeys()).toHaveLength(0);
+    expect(panelLayoutKey()[3]).toBe(false);
+
+    scan.resolve([instanceDto("生存"), instanceDto("创造")]);
+    await flush();
+    await stepFrames(30);
+    expect(clearKeys()).toHaveLength(1);
+    expect(panelLayoutKey()[3]).toBe(true);
   });
 });
 

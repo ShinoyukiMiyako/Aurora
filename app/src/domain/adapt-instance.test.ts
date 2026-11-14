@@ -15,6 +15,7 @@ function instanceDto(id: string, overrides: Partial<InstanceDto> = {}): Instance
     quick_play: { singleplayer: true, multiplayer: true },
     mod_count: 0,
     world_count: 0,
+    resource_pack_count: 0,
     isolated: false,
     description: null,
     cover: null,
@@ -126,21 +127,21 @@ describe("实例 DTO 适配：状态", () => {
     expect(instanceFromDto(instanceDto("Other"), { pins: ["生存 1.21"], busyTaskInstanceIds: new Set() }).pinned).toBe(false);
   });
 
-  it("存档数、隔离生效值、自定内存与最近崩溃原样带过，读不出的原因各自保留", () => {
+  it("存档数、资源包数、隔离生效值、自定内存与最近崩溃原样带过，读不出的原因各自保留", () => {
     const inst = instanceFromDto(
-      instanceDto("隔离", { world_count: 3, isolated: true, memory_mb: 6144, last_crash_at: 1_720_000_000_000, modpack_error: "整合包记录解析失败" }),
+      instanceDto("隔离", { world_count: 3, resource_pack_count: 4, isolated: true, memory_mb: 6144, last_crash_at: 1_720_000_000_000, modpack_error: "整合包记录解析失败" }),
       idle,
     );
-    expect(inst).toMatchObject({ worldCount: 3, isolated: true, memoryMb: 6144, lastCrashAt: 1_720_000_000_000, lastCrashError: null, modpack: null, modpackError: "整合包记录解析失败" });
-    const unread = instanceFromDto(instanceDto("坏", { world_count: null, isolated: null, last_crash_error: "格式版本是 9" }), idle);
-    expect(unread).toMatchObject({ worldCount: null, isolated: null, memoryMb: null, lastCrashAt: null, lastCrashError: "格式版本是 9" });
+    expect(inst).toMatchObject({ worldCount: 3, resourcePackCount: 4, isolated: true, memoryMb: 6144, lastCrashAt: 1_720_000_000_000, lastCrashError: null, modpack: null, modpackError: "整合包记录解析失败" });
+    const unread = instanceFromDto(instanceDto("坏", { world_count: null, resource_pack_count: null, isolated: null, last_crash_error: "格式版本是 9" }), idle);
+    expect(unread).toMatchObject({ worldCount: null, resourcePackCount: null, isolated: null, memoryMb: null, lastCrashAt: null, lastCrashError: "格式版本是 9" });
   });
 
   it("游玩记录读不出：时长为 null、原因带过；实例目录读不出的原因同样带过", () => {
     const unread = instanceFromDto(instanceDto("坏", { playtime_min: null, last_played_at: null, play_error: "解析 游玩记录 失败" }), idle);
     expect(unread).toMatchObject({ playtimeMin: null, lastPlayedAt: null, playError: "解析 游玩记录 失败", dirError: null });
-    const dir = instanceFromDto(instanceDto("目录", { mod_count: null, world_count: null, isolated: null, dir_error: "文件 IO 失败: mods" }), idle);
-    expect(dir).toMatchObject({ modCount: null, worldCount: null, isolated: null, dirError: "文件 IO 失败: mods", playtimeMin: 0, playError: null });
+    const dir = instanceFromDto(instanceDto("目录", { mod_count: null, world_count: null, resource_pack_count: null, isolated: null, dir_error: "文件 IO 失败: mods" }), idle);
+    expect(dir).toMatchObject({ modCount: null, worldCount: null, resourcePackCount: null, isolated: null, dirError: "文件 IO 失败: mods", playtimeMin: 0, playError: null });
   });
 
   it("继承链上的基底正忙：是哪个基底、在做什么原样带过；基底闲着为 null", () => {

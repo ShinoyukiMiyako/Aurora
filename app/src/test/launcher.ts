@@ -79,6 +79,7 @@ export function instanceDto(id: string, overrides: Partial<InstanceDto> = {}): I
     quick_play: { singleplayer: true, multiplayer: true },
     mod_count: 0,
     world_count: 0,
+    resource_pack_count: 0,
     isolated: false,
     memory_mb: null,
     description: null,

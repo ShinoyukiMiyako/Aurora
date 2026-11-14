@@ -20,7 +20,8 @@ import { useMounted } from "../../lib/useMounted";
 import { useNav, useShell } from "../../shell/shell";
 import { useLauncherSelector } from "../../state/launcher";
 import { reimportRoute } from "../../state/route";
-import { canPinMore, instanceTask } from "../../state/selectors";
+import { canPinMore, installTask } from "../../state/selectors";
+import { isActiveTask } from "../../state/tasks";
 import { Card } from "../../ui/Card";
 import { Cover } from "../../ui/Cover";
 import { IconButton } from "../../ui/IconButton";
@@ -30,9 +31,10 @@ import type { MenuEntry } from "../../ui/Menu";
 import { MoreMenu } from "../../ui/MoreMenu";
 import { Tag } from "../../ui/Tag";
 import { TextInput } from "../../ui/TextInput";
-import { HERO_COPY, SOURCE_LABEL } from "./copy";
+import { HERO_COPY, LOCK_REASON, SOURCE_LABEL } from "./copy";
 import { ExportModpackModal } from "./ExportModpackModal";
 import styles from "./instance.module.css";
+import { CREATE_COMMANDS } from "./model";
 import { MoveInstanceModal } from "./MoveInstanceModal";
 import type { InstanceOps } from "./ops";
 
@@ -57,6 +59,9 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
   const cover = useInstanceCover(inst);
   const backdrop = useCoverBackdrop(inst);
   const pinBlocked = useLauncherSelector((s) => !inst.pinned && !canPinMore(s));
+  // 导入中的整合包占位项：实例目录建好之前后端不认这个名字，固定只会报找不到。新建的占位项不在此列，
+  // 状态层替它记着装好后要不要固定。与实例库卡片同一个判断，只在占位项上才去翻任务表
+  const importing = useLauncherSelector((s) => inst.placeholder && s.tasks.some((t) => t.kind === "modpack" && t.instanceId === inst.id && isActiveTask(t)));
   const renameReason = lockReason(ops.locks.rename, "rename");
   const repairReason = lockReason(ops.locks.repair, "repair");
   const deleteReason = lockReason(ops.locks.delete, "delete");
@@ -80,13 +85,15 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
   const [edited, setEdited] = useState(false);
   if (editing && !edited) setEdited(true);
 
-  const pinLabel = pinBlocked ? TOAST_COPY.pinLimit : inst.pinned ? HERO_COPY.unpin : HERO_COPY.pin;
-  const pinReason = pinBlocked ? TOAST_COPY.pinLimit : undefined;
+  // 导入中：图钉按带原因的禁用画，点击无效，悬停提示在名称下写原因。侧栏满了不同：点了由状态层弹上限提示，
+  // 所以图钉只标 aria-disabled、名称换成上限那一句
+  const pinLabel = pinBlocked && !importing ? TOAST_COPY.pinLimit : inst.pinned ? HERO_COPY.unpin : HERO_COPY.pin;
+  const pinReason = importing ? LOCK_REASON.pinImporting : pinBlocked ? TOAST_COPY.pinLimit : undefined;
   // 禁用原因走菜单项的悬停提示气泡，不放右侧提示位：那一位与标签同一行、不折行，长原因会把标签挤成省略号
   const menu: MenuEntry[] = [
     { label: HERO_COPY.rename, icon: "edit", disabled: renameReason !== undefined, disabledReason: renameReason, onSelect: () => onRenamingChange(true) },
     ...(compact
-      ? [{ label: inst.pinned ? HERO_COPY.unpin : HERO_COPY.pin, icon: inst.pinned ? ("pin-off" as const) : ("pin" as const), disabled: pinBlocked, disabledReason: pinReason, onSelect: ops.togglePin }]
+      ? [{ label: inst.pinned ? HERO_COPY.unpin : HERO_COPY.pin, icon: inst.pinned ? ("pin-off" as const) : ("pin" as const), disabled: pinReason !== undefined, disabledReason: pinReason, onSelect: ops.togglePin }]
       : []),
     { label: HERO_COPY.openFolder, icon: "folder", disabled: folderReason !== undefined, disabledReason: folderReason, onSelect: () => ops.openFolder("instance") },
     { label: HERO_COPY.exportModpack, icon: "modpack", disabled: exportReason !== undefined, disabledReason: exportReason, onSelect: () => setExporting(true) },
@@ -182,7 +189,16 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
               </div>
             </div>
             {!compact && (
-              <IconButton icon="pin" label={pinLabel} size="lg" variant="secondary" pressed={inst.pinned} aria-disabled={pinBlocked || undefined} onClick={ops.togglePin} />
+              <IconButton
+                icon="pin"
+                label={pinLabel}
+                size="lg"
+                variant="secondary"
+                pressed={inst.pinned}
+                disabledReason={importing ? LOCK_REASON.pinImporting : undefined}
+                aria-disabled={pinBlocked || undefined}
+                onClick={ops.togglePin}
+              />
             )}
             <MoreMenu items={menu} size="lg" />
             <LaunchCapsule instanceId={inst.id} size="lg" />
@@ -226,8 +242,12 @@ function StatusChip({ ref, appear, children }: { ref?: Ref<HTMLSpanElement>; app
 /** 头图上的安装标签：自己订阅本实例任务的百分比文字，进度怎么走都只换这一枚标签，头图其余部分不重渲染。 */
 function InstallingTag({ instanceId }: { instanceId: string }) {
   const pct = useLauncherSelector((s) => {
-    const task = instanceTask(s, instanceId);
-    return task !== null && task.status === "running" ? percent(task.progress) : null;
+    const task = installTask(s, instanceId);
+    if (task === null) return null;
+    if (task.status === "running") return percent(task.progress);
+    // 新建、导入装好之后到落地重扫回来之前，实例还是安装中：写满格，与概览推满的横幅、「正在刷新」的说明卡一致，
+    // 不翻回「等待安装」（那会在同一格里换成另一宽度的字）。补全不在其中
+    return task.status === "done" && CREATE_COMMANDS.has(task.spec.command) ? percent(1) : null;
   });
   // 排队时就按「等待安装」本身的宽度，不为还没开始的百分比在胶囊里留白；开始之后等宽数字、按最宽的「100%」占住并居中，
   // 百分比逐次变化时标签不变宽，个位数时留白分在两侧。排队换成安装中是换了一件事，标签变宽由标签行的让位接住

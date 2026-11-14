@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubResizeObserver, type ResizeObserverStub } from "../test/dom";
-import { springAt } from "./motion";
+import { springAt, type SpringName } from "./motion";
 import { closestScroller, observeReflow, REFLOW_HARD_MAX_ITEMS, REFLOW_MAX_ITEMS, REFLOW_PAUSED_ATTR, REFLOW_SKIP_ATTR } from "./reflow";
 
 // jsdom 不做布局：每个元素的位置、定位祖先与样式由这张表给出
@@ -18,17 +18,30 @@ interface Box {
   height: number;
   /** getBoundingClientRect 的上沿（视口坐标）。 */
   viewTop: number;
+  clientHeight: number;
+}
+
+interface FakeAnimation {
+  currentTime: number | null;
+  playState: AnimationPlayState;
+  cancel: ReturnType<typeof vi.fn>;
+  pause: ReturnType<typeof vi.fn>;
+  play: ReturnType<typeof vi.fn>;
+  onfinish: (() => void) | null;
+  oncancel: (() => void) | null;
 }
 
 interface Call {
   el: HTMLElement;
   frames: Keyframe[];
   options: KeyframeAnimationOptions;
-  animation: { currentTime: number | null; cancel: ReturnType<typeof vi.fn>; onfinish: (() => void) | null; oncancel: (() => void) | null };
+  animation: FakeAnimation;
 }
 
 const boxes = new Map<Element, Box>();
 let calls: Call[] = [];
+/** 排着的动画帧回调：用例用 frame() 一帧一帧地走。 */
+let frameQueue: FrameRequestCallback[] = [];
 let sizes: ResizeObserverStub;
 let stop: (() => void) | undefined;
 /** 读了多少次定位祖先与偏移（布局读取）。 */
@@ -39,7 +52,7 @@ const SAMPLE_S = 1 / 120;
 
 function place(el: HTMLElement, box: Partial<Box>): void {
   const was = boxes.get(el);
-  boxes.set(el, { left: 0, top: 0, parent: null, clientWidth: 0, clientTop: 0, overflowY: "visible", translate: "none", display: "block", height: 0, viewTop: 0, ...was, ...box });
+  boxes.set(el, { left: 0, top: 0, parent: null, clientWidth: 0, clientTop: 0, overflowY: "visible", translate: "none", display: "block", height: 0, viewTop: 0, clientHeight: 0, ...was, ...box });
 }
 
 const box = (el: Element): Box => {
@@ -61,8 +74,16 @@ const callsOn = (el: HTMLElement) => calls.filter((c) => c.el === el);
 /** MutationObserver 的回调在微任务里。 */
 const flushMutations = () => Promise.resolve();
 
+/** 走一帧：跑完此刻排着的动画帧回调，回调里新排的留到下一帧。 */
+function frame(): void {
+  const due = frameQueue;
+  frameQueue = [];
+  for (const callback of due) callback(performance.now());
+}
+
 beforeEach(() => {
   calls = [];
+  frameQueue = [];
   layoutReads = 0;
   positionReads = 0;
   sizes = stubResizeObserver();
@@ -89,6 +110,13 @@ beforeEach(() => {
   vi.spyOn(Element.prototype, "clientTop", "get").mockImplementation(function (this: Element) {
     return box(this).clientTop;
   });
+  vi.spyOn(Element.prototype, "clientHeight", "get").mockImplementation(function (this: Element) {
+    return box(this).clientHeight;
+  });
+  vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+    frameQueue.push(callback);
+    return frameQueue.length;
+  });
   vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
     const { viewTop, height, clientWidth } = box(this);
     return { top: viewTop, bottom: viewTop + height, left: 0, right: clientWidth, width: clientWidth, height, x: 0, y: viewTop, toJSON: () => ({}) } as DOMRect;
@@ -102,7 +130,23 @@ beforeEach(() => {
     configurable: true,
     writable: true,
     value(this: HTMLElement, frames: Keyframe[], options: KeyframeAnimationOptions) {
-      const animation = { currentTime: 0, cancel: vi.fn(), onfinish: null, oncancel: null };
+      // 与 Web Animations 一致：建好就在播；暂停不挪时间；取消之后回到 idle、没有当前时间
+      const animation: FakeAnimation = {
+        currentTime: 0,
+        playState: "running",
+        cancel: vi.fn(() => {
+          animation.playState = "idle";
+          animation.currentTime = null;
+        }),
+        pause: vi.fn(() => {
+          animation.playState = "paused";
+        }),
+        play: vi.fn(() => {
+          animation.playState = "running";
+        }),
+        onfinish: null,
+        oncancel: null,
+      };
       calls.push({ el: this, frames, options, animation });
       return animation;
     },
@@ -283,6 +327,63 @@ describe("observeReflow：不做动画的情况", () => {
     expect(calls).toHaveLength(0);
   });
 
+  /** b、c 被挤下去起飞，都播到 50ms。 */
+  function inFlight() {
+    const col = column();
+    place(col.b, { top: 220 });
+    place(col.c, { top: 320 });
+    sizes.resize(col.a, 800);
+    const [flyB] = callsOn(col.b);
+    const [flyC] = callsOn(col.c);
+    flyB.animation.currentTime = 50;
+    flyC.animation.currentTime = 50;
+    return { ...col, flyB, flyC };
+  }
+
+  it("容器宽度变了时还在飞的项：被新布局挪动的取消、直接落到新位置，没被挪动的接着飞；之后再被挤从静止出发", () => {
+    const { container, b, c, flyB, flyC } = inFlight();
+    // 容器变窄，c 跟着重排挪到 360，b 原地不动
+    place(container, { clientWidth: 790 });
+    place(c, { top: 360 });
+    sizes.resize(container, 790);
+    expect(flyC.animation.cancel).toHaveBeenCalledTimes(1);
+    expect(flyB.animation.cancel).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(2);
+    // 登记当场清掉：再被挤 40 从静止出发，不按已取消的轨迹算此刻的位置
+    place(c, { top: 400 });
+    sizes.resize(b, 790);
+    expect(callsOn(c)).toHaveLength(2);
+    expect(start(callsOn(c)[1])).toBe("0px -40px");
+  });
+
+  it.each<[string, () => void]>([
+    [
+      "窗口高度变了",
+      () => {
+        window.innerHeight -= 80;
+      },
+    ],
+    [
+      "减少动画刚打开",
+      () => {
+        document.documentElement.setAttribute("data-sk-reduced", "");
+      },
+    ],
+  ])("%s时还在飞的项：被新布局挪动的取消，没被挪动的接着飞", (_cause, apply) => {
+    const height = window.innerHeight;
+    try {
+      const { a, c, flyB, flyC } = inFlight();
+      apply();
+      place(c, { top: 360 });
+      sizes.resize(a, 800);
+      expect(flyC.animation.cancel).toHaveBeenCalledTimes(1);
+      expect(flyB.animation.cancel).not.toHaveBeenCalled();
+      expect(calls).toHaveLength(2);
+    } finally {
+      window.innerHeight = height;
+    }
+  });
+
   it(`子项超过 ${REFLOW_HARD_MAX_ITEMS} 个：整趟不读位置、不动；回到上限以内的第一趟只记位置，不拿超限之前的旧位置补滑`, async () => {
     const container = document.createElement("div");
     document.body.append(container);
@@ -348,6 +449,36 @@ describe("observeReflow：不做动画的情况", () => {
     place(z, { top: 140 });
     sizes.resize(z, 800);
     expect(start(callsOn(z)[0])).toBe("0px -40px");
+  });
+
+  it(`子项超过 ${REFLOW_HARD_MAX_ITEMS} 个时还在飞的项：当场落定、登记清掉；回到上限以内再被挤从静止出发`, async () => {
+    const { container, b, c, flyB, flyC } = inFlight();
+    const extra = Array.from({ length: REFLOW_HARD_MAX_ITEMS }, (_, i) => child(container, 400 + i * 10));
+    await flushMutations();
+    expect(flyB.animation.cancel).toHaveBeenCalledTimes(1);
+    expect(flyC.animation.cancel).toHaveBeenCalledTimes(1);
+    for (const el of extra) el.remove();
+    await flushMutations();
+    expect(calls).toHaveLength(2);
+    place(c, { top: 360 });
+    sizes.resize(b, 800);
+    expect(callsOn(c)).toHaveLength(2);
+    expect(start(callsOn(c)[1])).toBe("0px -40px");
+  });
+
+  it(`包裹层展开之后才超过 ${REFLOW_HARD_MAX_ITEMS} 个时还在飞的项：同样当场落定，一个位置也不读`, async () => {
+    const { container, flyB, flyC } = inFlight();
+    // 200 层还没认过的包裹，每层两个按钮：没展开时数到 203，展开之后才是 403
+    for (let i = 0; i < 200; i++) {
+      const host = contents(container);
+      inside(host, container, 400 + i * 20);
+      inside(host, container, 410 + i * 20);
+    }
+    positionReads = 0;
+    await flushMutations();
+    expect(positionReads).toBe(0);
+    expect(flyB.animation.cancel).toHaveBeenCalledTimes(1);
+    expect(flyC.animation.cancel).toHaveBeenCalledTimes(1);
   });
 
   it("没有 ResizeObserver 的环境：不观察也不抛错", () => {
@@ -650,6 +781,306 @@ describe("observeReflow：途中再被挤", () => {
     sizes.resize(a, 800);
     const now = springAt("morph", -120, 0, 0.05);
     expect(start(callsOn(b)[1])).toBe(`0px ${Math.round((now.x - 40) * 100) / 100}px`);
+  });
+});
+
+describe("observeReflow：从静止起步等新排布画出来再计时", () => {
+  it("增删引起的（提交后的微任务里）：先暂停在起点，第二帧才开始走", async () => {
+    const { container, b, c } = column();
+    const banner = document.createElement("div");
+    place(banner, { top: 100, parent: container });
+    place(b, { top: 140 });
+    place(c, { top: 240 });
+    container.insertBefore(banner, b);
+    await flushMutations();
+    const [flyB] = callsOn(b);
+    const [flyC] = callsOn(c);
+    expect(start(flyB)).toBe("0px -40px");
+    expect(flyB.animation.pause).toHaveBeenCalledTimes(1);
+    expect(flyB.animation.playState).toBe("paused");
+    expect(flyC.animation.playState).toBe("paused");
+    // 这一帧画的就是新排布：还停在起点
+    frame();
+    expect(flyB.animation.play).not.toHaveBeenCalled();
+    frame();
+    expect(flyB.animation.play).toHaveBeenCalledTimes(1);
+    expect(flyC.animation.play).toHaveBeenCalledTimes(1);
+    expect(frameQueue).toHaveLength(0);
+  });
+
+  it("尺寸变化引起的（这一帧的渲染步骤里，新排布就在这一帧画出）：下一帧开始走", () => {
+    const { a, b } = column();
+    place(b, { top: 220 });
+    sizes.resize(a, 800);
+    const [fly] = callsOn(b);
+    expect(fly.animation.playState).toBe("paused");
+    frame();
+    expect(fly.animation.play).toHaveBeenCalledTimes(1);
+  });
+
+  it("同一次提交里内层增删、外层尺寸变化各起的让位：同一帧开始走", async () => {
+    const outer = document.createElement("div");
+    document.body.append(outer);
+    place(document.body, {});
+    place(outer, { parent: document.body, clientWidth: 800 });
+    const inner = child(outer, 0);
+    place(inner, { clientWidth: 800 });
+    const below = child(outer, 100);
+    const p = child(inner, 0);
+    const q = child(inner, 50);
+    const stopOuter = observeReflow(outer);
+    const stopInner = observeReflow(inner);
+    stop = () => {
+      stopOuter();
+      stopInner();
+    };
+    sizes.resize(outer, 800);
+    sizes.resize(inner, 800);
+    // 内层插进一项：增删观察在提交后的微任务里报
+    const added = document.createElement("div");
+    place(added, { top: 50, parent: inner });
+    place(q, { top: 90 });
+    inner.insertBefore(added, q);
+    await flushMutations();
+    const [flyQ] = callsOn(q);
+    expect(callsOn(p)).toHaveLength(0);
+    frame();
+    // 内层随之长高：尺寸观察在这一帧的渲染步骤里报，外层下面的兄弟被挤
+    place(below, { top: 140 });
+    sizes.resize(inner, 800);
+    const [flyBelow] = callsOn(below);
+    expect(start(flyBelow)).toBe("0px -40px");
+    expect(flyQ.animation.play).not.toHaveBeenCalled();
+    frame();
+    expect(flyQ.animation.play).toHaveBeenCalledTimes(1);
+    expect(flyBelow.animation.play).toHaveBeenCalledTimes(1);
+  });
+
+  // 先被挤开的距离取多组，含随机：欠阻尼弹簧的解析解在 t=0 算出的速度带舍入误差，±34 这类起点得出 ±1e-13 而不是 0
+  const firstPushes = [34, -34, 56, 120, ...Array.from({ length: 6 }, () => 1 + Math.floor(Math.random() * 400))];
+  it.each(firstPushes)("等待期间又被挤（先被挤开 %ipx）：从起点加上新位移出发，仍先暂停；被顶替的那段不再播", (d) => {
+    const { a, b } = column();
+    place(b, { top: 100 + d });
+    sizes.resize(a, 800);
+    const [first] = callsOn(b);
+    expect(first.animation.playState).toBe("paused");
+    place(b, { top: 140 + d });
+    sizes.resize(a, 800);
+    expect(first.animation.cancel).toHaveBeenCalledTimes(1);
+    const second = callsOn(b)[1];
+    // 暂停中的动画当前时间是 0：此刻就在起点，速度为 0
+    expect(start(second)).toBe(`0px ${-d - 40}px`);
+    expect(second.frames[1].translate).toBe(`0px ${Math.round(springAt("settle", -d - 40, 0, SAMPLE_S).x * 100) / 100}px`);
+    expect(second.animation.pause).toHaveBeenCalledTimes(1);
+    expect(second.animation.playState).toBe("paused");
+    frame();
+    expect(first.animation.play).not.toHaveBeenCalled();
+    expect(second.animation.play).toHaveBeenCalledTimes(1);
+  });
+
+  it("等待期间被落定（容器宽度变了）：当场取消，之后也不再播", () => {
+    const { container, a, b } = column();
+    place(b, { top: 220 });
+    sizes.resize(a, 800);
+    const [fly] = callsOn(b);
+    place(container, { clientWidth: 790 });
+    place(b, { top: 300 });
+    sizes.resize(container, 790);
+    expect(fly.animation.cancel).toHaveBeenCalledTimes(1);
+    frame();
+    frame();
+    expect(fly.animation.play).not.toHaveBeenCalled();
+    // 登记已清：再被挤从静止的新位移出发
+    place(b, { top: 340 });
+    sizes.resize(a, 790);
+    expect(start(callsOn(b)[1])).toBe("0px -40px");
+  });
+
+  it("已经在走的途中再被挤：带着速度当场接着走，不再暂停", () => {
+    const { a, b } = column();
+    place(b, { top: 220 });
+    sizes.resize(a, 800);
+    const [first] = callsOn(b);
+    frame();
+    expect(first.animation.play).toHaveBeenCalledTimes(1);
+    first.animation.currentTime = 50;
+    place(b, { top: 260 });
+    sizes.resize(a, 800);
+    const second = callsOn(b)[1];
+    const now = springAt("settle", -120, 0, 0.05);
+    expect(start(second)).toBe(`0px ${Math.round((now.x - 40) * 100) / 100}px`);
+    expect(second.animation.pause).not.toHaveBeenCalled();
+    expect(second.animation.playState).toBe("running");
+  });
+
+  it("走 morph 的（与 framer-motion 的形变同拍）：不暂停，与形变同一刻起步", () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    place(document.body, {});
+    place(container, { parent: document.body, clientWidth: 800 });
+    const a = child(container, 0);
+    const b = child(container, 100);
+    stop = observeReflow(container, "morph");
+    sizes.resize(container, 800);
+    place(b, { top: 220 });
+    sizes.resize(a, 800);
+    const [fly] = callsOn(b);
+    expect(fly.animation.pause).not.toHaveBeenCalled();
+    expect(fly.animation.playState).toBe("running");
+    expect(frameQueue).toHaveLength(0);
+  });
+
+  it("停止观察时还在等的：照常开始走，不会停在起点", () => {
+    const { a, b } = column();
+    place(b, { top: 220 });
+    sizes.resize(a, 800);
+    const [fly] = callsOn(b);
+    stop?.();
+    stop = undefined;
+    frame();
+    expect(fly.animation.play).toHaveBeenCalledTimes(1);
+  });
+
+  it("减少动画：不起动画，也不排帧回调", () => {
+    const { a, b } = column();
+    document.documentElement.setAttribute("data-sk-reduced", "");
+    place(b, { top: 220 });
+    sizes.resize(a, 800);
+    expect(calls).toHaveLength(0);
+    expect(frameQueue).toHaveLength(0);
+  });
+});
+
+describe("observeReflow：容器长高、新插入的项开了新的一行", () => {
+  /** 右对齐、可折行的一行按钮（宽 300，下内边距 16）：起初只有 logs 一枚，在 (230, 0)，行高 26。 */
+  function actionRow(spring: SpringName) {
+    const container = document.createElement("div");
+    document.body.append(container);
+    place(document.body, {});
+    place(container, { parent: document.body, clientWidth: 300, clientHeight: 42 });
+    const logs = child(container, 0, 230);
+    stop = observeReflow(container, spring);
+    sizes.resize(container, 300);
+    return { container, logs };
+  }
+
+  /** 加进 dismiss 与 fix 两枚：dismiss 挤进第一行，fix 放不下、折到第二行（行高 26 加间距 8），容器长高 34。 */
+  async function wrap(container: HTMLElement, logs: HTMLElement) {
+    const dismiss = document.createElement("div");
+    const fix = document.createElement("div");
+    place(dismiss, { top: 0, left: 160, parent: container });
+    place(fix, { top: 34, left: 200, parent: container });
+    place(logs, { left: 90 });
+    place(container, { clientHeight: 76 });
+    container.append(dismiss, fix);
+    await flushMutations();
+    return { dismiss, fix };
+  }
+
+  it("走 morph：折到新一行的项从 -Δh 起步、速度为 0，沿 morph 跟着外框下沿下来；挤进原有行的照常就地出现", async () => {
+    const { container, logs } = actionRow("morph");
+    const { dismiss, fix } = await wrap(container, logs);
+    const [ride] = callsOn(fix);
+    expect(start(ride)).toBe("0px -34px");
+    expect(ride.frames[1].translate).toBe(`0px ${Math.round(springAt("morph", -34, 0, SAMPLE_S).x * 100) / 100}px`);
+    expect(ride.frames[ride.frames.length - 1].translate).toBe("0px 0px");
+    // 与外框的形变同一刻起步
+    expect(ride.animation.pause).not.toHaveBeenCalled();
+    expect(callsOn(dismiss)).toHaveLength(0);
+    expect(start(callsOn(logs)[0])).toBe("140px 0px");
+  });
+
+  it("走 settle（容器下沿一步到位：卡片、页面）：新的一行就地淡入，不滑", async () => {
+    const { container, logs } = actionRow("settle");
+    const { fix } = await wrap(container, logs);
+    expect(callsOn(fix)).toHaveLength(0);
+    expect(start(callsOn(logs)[0])).toBe("140px 0px");
+  });
+
+  /** 竖排的 morph 列表：a 在 0、b 在 50，容器高 100。 */
+  function stack() {
+    const container = document.createElement("div");
+    document.body.append(container);
+    place(document.body, {});
+    place(container, { parent: document.body, clientWidth: 300, clientHeight: 100 });
+    const a = child(container, 0);
+    const b = child(container, 50);
+    stop = observeReflow(container, "morph");
+    sizes.resize(container, 300);
+    return { container, a, b };
+  }
+
+  it("末尾追加一项：它在原有各项之下，同样跟着下沿从 -Δh 下来", async () => {
+    const { container, a, b } = stack();
+    const c = document.createElement("div");
+    place(c, { top: 100, parent: container });
+    place(container, { clientHeight: 150 });
+    container.append(c);
+    await flushMutations();
+    expect(start(callsOn(c)[0])).toBe("0px -50px");
+    expect(callsOn(a)).toHaveLength(0);
+    expect(callsOn(b)).toHaveLength(0);
+  });
+
+  it("插在中间（没有开新的一行）：新项就地出现，后面的兄弟照常让位", async () => {
+    const { container, b } = stack();
+    const x = document.createElement("div");
+    place(x, { top: 50, parent: container });
+    place(b, { top: 100 });
+    place(container, { clientHeight: 150 });
+    container.insertBefore(x, b);
+    await flushMutations();
+    expect(callsOn(x)).toHaveLength(0);
+    expect(start(callsOn(b)[0])).toBe("0px -50px");
+  });
+
+  it("容器没长高（定高）：落在原有各项之下的新项也不动", async () => {
+    const { container } = stack();
+    place(container, { clientHeight: 300 });
+    sizes.resize(container, 300);
+    const c = document.createElement("div");
+    place(c, { top: 100, parent: container });
+    container.append(c);
+    await flushMutations();
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each<[string, (container: HTMLElement) => void]>([
+    [
+      "减少动画",
+      () => {
+        document.documentElement.setAttribute("data-sk-reduced", "");
+      },
+    ],
+    [
+      "容器带暂停属性",
+      (container) => {
+        container.setAttribute(REFLOW_PAUSED_ATTR, "");
+      },
+    ],
+  ])("%s：新的一行不动", async (_cause, apply) => {
+    const { container, logs } = actionRow("morph");
+    apply(container);
+    await flushMutations();
+    const { fix } = await wrap(container, logs);
+    expect(callsOn(fix)).toHaveLength(0);
+    expect(calls).toHaveLength(0);
+  });
+
+  it(`超过 ${REFLOW_HARD_MAX_ITEMS} 个之后回到上限以内的第一趟：只记位置，长高了也不当成开了新行`, async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    place(document.body, {});
+    place(container, { parent: document.body, clientWidth: 800, clientHeight: REFLOW_HARD_MAX_ITEMS * 10, viewTop: 0 });
+    for (let i = 0; i < REFLOW_HARD_MAX_ITEMS; i++) place(child(container, i * 10), { height: 10 });
+    stop = observeReflow(container, "morph");
+    sizes.resize(container, 800);
+    const extra = child(container, REFLOW_HARD_MAX_ITEMS * 10);
+    await flushMutations();
+    extra.remove();
+    place(container, { clientHeight: REFLOW_HARD_MAX_ITEMS * 10 + 100 });
+    await flushMutations();
+    expect(calls).toHaveLength(0);
   });
 });
 

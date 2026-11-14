@@ -13,6 +13,7 @@ import { useLauncherActions } from "../../state/launcher";
 import type { BlockedFileDto, ClaimReportDto } from "../../state/store";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
+import { LabelSlot } from "../../ui/LabelSlot";
 import { List, ListRow } from "../../ui/ListRow";
 import { Modal } from "../../ui/Modal";
 import { Tag } from "../../ui/Tag";
@@ -107,20 +108,6 @@ export function Fade({ id, block = false, children }: { id: string | null; block
   );
 }
 
-/**
- * 主按钮会换的三条文案叠在同一格，按最宽的那条留宽：检查开始、结束与全部找到时按钮不变宽变窄，同一排的「关闭」不被挤动。
- * 没在显示的两条只画在伪元素里（data-reserve-a / -b），按钮的文字与可访问名称只有当前这一条。
- */
-function ReservedLabel({ current, options }: { current: string; options: readonly [string, string, string] }) {
-  const others = options.filter((option) => option !== current);
-  if (others.length !== 2) throw new Error(`主按钮文案「${current}」不在候选里，或候选有重复：${options.join("、")}`);
-  return (
-    <span className={styles.primaryLabel} data-reserve-a={others[0]} data-reserve-b={others[1]}>
-      <span>{current}</span>
-    </span>
-  );
-}
-
 export function BlockedFilesModal({ open, files, origin, onClose, onAllFound }: BlockedFilesModalProps) {
   const actions = useLauncherActions();
   const run = useRunner();
@@ -193,7 +180,8 @@ export function BlockedFilesModal({ open, files, origin, onClose, onAllFound }: 
   };
 
   const finalLabel = origin === "import" ? BLOCKED_COPY.continueImport : BLOCKED_COPY.reinstall;
-  // 同一颗按钮换文案、换图标（图标位自己交叉淡化），不重挂：聚焦着它时检查完焦点还在
+  // 同一颗按钮换文案、换图标（图标位自己交叉淡化），不重挂：聚焦着它时检查完焦点还在。
+  // 三条文案叠在同一格按最宽的留宽：检查开始、结束与全部找到时按钮不变宽变窄，同一排的「关闭」不被挤动
   const primary = (
     <Button
       ref={primaryRef}
@@ -202,7 +190,7 @@ export function BlockedFilesModal({ open, files, origin, onClose, onAllFound }: 
       loading={!allFound && checking}
       onClick={allFound ? onAllFound : check}
     >
-      <ReservedLabel current={allFound ? finalLabel : checking ? BLOCKED_COPY.checking : BLOCKED_COPY.check} options={[BLOCKED_COPY.check, BLOCKED_COPY.checking, finalLabel]} />
+      <LabelSlot current={allFound ? finalLabel : checking ? BLOCKED_COPY.checking : BLOCKED_COPY.check} options={[BLOCKED_COPY.check, BLOCKED_COPY.checking, finalLabel]} />
     </Button>
   );
   // 说明块只有一个槽：文件夹读不了的错误顶替检查结果，而不是插在列表与结果之间把结果推下去

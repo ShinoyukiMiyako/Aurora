@@ -2,7 +2,7 @@
 
 import { useId } from "react";
 import { formatBytes, formatSpeed } from "../../domain/format";
-import { useDisplayCount } from "../../lib/progress-display";
+import { useDisplayCount, useDisplaySpeed } from "../../lib/progress-display";
 import { cssVars } from "../../lib/util";
 import { Card } from "../../ui/Card";
 import { ProgressRing } from "../../ui/ProgressRing";
@@ -24,8 +24,6 @@ const CHART_SCROLL = cssVars({
 
 export interface ThroughputCardProps {
   overview: Overview;
-  /** 写出来的总速度：平滑过、换字有节制的那个（lib/progress-display 的 useDisplaySpeed），不是瞬时值。 */
-  speed: number;
   /** 总进度环的平滑标识（overviewTrack）：有任务结束或换批次时环直接跳到新值，不倒退着扫回去。 */
   track: string;
   history: readonly ThroughputSample[];
@@ -35,11 +33,12 @@ export interface ThroughputCardProps {
 
 /**
  * 卡上的文字：总速度、剩余字节与时间、两枚小统计。已下字节按节拍换字（lib/progress-display 的 useDisplayCount），
- * 「已下载」与「剩余 …」用同一个值、同一拍换，剩余时间也跟着这一拍。节拍放在这一段里，到点补字时只重画文字，
- * 进度环与曲线不跟着重渲染。
+ * 「已下载」与「剩余 …」用同一个值、同一拍换，剩余时间也跟着这一拍；总速度写平滑过、按同一间隔换字的那个（useDisplaySpeed），
+ * 不是瞬时值。节拍放在这一段里，到点补字时只重画文字，进度环与曲线不跟着重渲染。
  */
-function FlowFigures({ overview, speed, history }: Pick<ThroughputCardProps, "overview" | "speed" | "history">) {
+function FlowFigures({ overview, history }: Pick<ThroughputCardProps, "overview" | "history">) {
   const downloaded = useDisplayCount(overview.downloaded, overview.total);
+  const speed = useDisplaySpeed(overview.speed);
   const etaSpeed = usePacedEtaSpeed(downloaded, totalEtaSpeed(history, overview.speed));
   return (
     <>
@@ -62,7 +61,7 @@ function FlowFigures({ overview, speed, history }: Pick<ThroughputCardProps, "ov
   );
 }
 
-export function ThroughputCard({ overview, speed, track, history, frame }: ThroughputCardProps) {
+export function ThroughputCard({ overview, track, history, frame }: ThroughputCardProps) {
   // 渐变要按 id 引用；useId 的结果带冒号一类字符，在 url(#…) 里不合法
   const gradientId = `tasks-flow-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
   const chart = chartGeometry(history.map((s) => s.total), frame.ceiling);
@@ -79,7 +78,7 @@ export function ThroughputCard({ overview, speed, track, history, frame }: Throu
           label={TASKS_COPY.flow.ringLabel}
           emptyText={active ? TASKS_COPY.flow.ringEmpty.unknown : TASKS_COPY.flow.ringEmpty.idle}
         />
-        <FlowFigures overview={overview} speed={speed} history={history} />
+        <FlowFigures overview={overview} history={history} />
       </div>
       <div className={styles.chart} style={CHART_SCROLL} aria-hidden="true">
         {/* 每个新采样换一次键：画布从头滑起，最新的一点从右缘外滑进来 */}

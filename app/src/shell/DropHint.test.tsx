@@ -23,6 +23,8 @@ describe("放置提示的读屏播报", () => {
     expect(liveRegions()).toHaveLength(1);
     expect(region.textContent).toBe("");
     expect(region.hasAttribute("data-hint")).toBe(false);
+    // 视觉隐藏走全局类，不在模块样式里另写一份
+    expect(region.className).toBe("sk-sr-only");
 
     view.rerender(ui("modpack"));
     expect(liveRegions()).toEqual([region]);

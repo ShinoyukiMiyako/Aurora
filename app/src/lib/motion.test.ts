@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { ambientFade, fade, faceSwap, insertItem, insertItemFade, lineSwap, lineSwapFade, pageItem, popMark, rootTransition, shake, SPRING_PARAMS, springAt, springs, stepPane, stepPaneFade, tabPanel, TOOLTIP_TIMING, tweenAt, twoParam, type PanelFrom, type SpringName } from "./motion";
+import { ambientFade, fade, faceSwap, insertItem, insertItemFade, lineSwap, lineSwapFade, pageItem, popMark, rootTransition, shake, SPRING_PARAMS, springAt, springs, stepPane, stepPaneFade, successMark, tabPanel, TOOLTIP_TIMING, tweenAt, twoParam, type PanelFrom, type SpringName } from "./motion";
 
 const TOKENS = readFileSync(new URL("../styles/tokens.css", import.meta.url), "utf8");
 
@@ -241,6 +241,28 @@ describe("变体与时机", () => {
     });
     expect(popMark.tag.animate).toEqual(popMark.glyph.animate);
     expect(popMark.tag.exit).toEqual(popMark.glyph.exit);
+  });
+
+  it("小标记的勾标档：从 0.6 弹出同标签档，退场缩回 0.6 淡出同点档；弹入那一段与别的档共用一份", () => {
+    expect(popMark.check).toEqual({
+      initial: { opacity: 0, scale: 0.6 },
+      animate: { opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } },
+      exit: { opacity: 0, scale: 0.6, transition: fade.out },
+    });
+    expect(popMark.check.animate).toBe(popMark.tag.animate);
+    expect(popMark.check.initial).toEqual(popMark.tag.initial);
+    expect(popMark.check.exit).toEqual(popMark.dot.exit);
+    // 与标签档的差别只在退场：同一组里的旧勾标是被新格取代，要缩回去，不是原地淡掉
+    expect(popMark.check.exit).not.toEqual(popMark.tag.exit);
+  });
+
+  it("成功的落点大勾：从 0.6 弹出走 base 弹簧加淡入补间，只有入场；比小标记回弹足，不与 popMark 共用弹簧", () => {
+    expect(successMark).toEqual({
+      initial: { opacity: 0, scale: 0.6 },
+      animate: { opacity: 1, scale: 1, transition: { ...springs.base, opacity: fade.in } },
+    });
+    expect(successMark).not.toHaveProperty("exit");
+    expect(successMark.animate).not.toEqual(popMark.tag.animate);
   });
 
   it("换一枚小控件：换成别的东西取标签档，减少动画取小标记的减少动画档，同一组参数只留一份", () => {

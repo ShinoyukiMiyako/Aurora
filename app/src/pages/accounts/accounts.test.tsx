@@ -345,6 +345,52 @@ describe("账户页：皮肤", () => {
     expect(launcher.state.toasts).toEqual([]);
     expect(warn.mock.calls.some(([message]) => String(message).includes("皮肤信息读不出来"))).toBe(true);
   });
+
+  it("刷新账户后皮肤信息重取失败：沿用上次读到的皮肤，不退回剪影，也不重取材质；原因写进控制台", async () => {
+    ipc.overrides.set("skin_info", () => ({ kind: "remote", sha1: "ab".repeat(20), model: "wide", hat: true }));
+    ipc.overrides.set("refresh_account", () => ({ ...hanami, last_verified_at: NOW }));
+    const texture = vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob(["skin"]) }));
+    vi.stubGlobal("fetch", texture);
+    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ width: 64, height: 64 })));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await mount();
+    await flush();
+    const arts = () => [...page().querySelectorAll<HTMLElement>('[data-sk-art="skin"]')].map((f) => f.dataset.art);
+    expect(arts()).toEqual(["skin", "skin", "skin"]);
+    const skinCalls = callsOf(ipc, "skin_info").length;
+    const textureCalls = texture.mock.calls.length;
+
+    ipc.overrides.set("skin_info", () => {
+      throw new IpcError("io", "账户文件读不出来");
+    });
+    await click(buttonIn(page().querySelector("section") as HTMLElement, "刷新账户信息"));
+    await flush();
+    expect(callsOf(ipc, "skin_info").slice(skinCalls)).toEqual([{ accountUuid: hanami.uuid }]);
+    expect(arts()).toEqual(["skin", "skin", "skin"]);
+    expect(texture.mock.calls.length).toBe(textureCalls);
+    // 这一次以失败落定（不是还停在重取中）：聚光卡与 Hanami 的账户卡各在控制台留一条，写的是实际画出来的样子
+    const skinWarnings = warn.mock.calls.filter(([message]) => String(message).includes("皮肤信息读不出来")).map(([message]) => message);
+    expect(skinWarnings).toEqual(["[accounts] Hanami 的皮肤信息读不出来，沿用上次读到的皮肤", "[accounts] Hanami 的皮肤信息读不出来，沿用上次读到的皮肤"]);
+    expect(toastTitles()).toEqual(["success:账户信息已更新"]);
+  });
+
+  it("已知没有皮肤的账户刷新后重取失败：仍是剪影，不弹错误通知", async () => {
+    ipc.overrides.set("refresh_account", () => ({ ...hanami, last_verified_at: NOW }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await mount();
+    const arts = () => [...page().querySelectorAll<HTMLElement>('[data-sk-art="skin"]')].map((f) => f.dataset.art);
+    expect(arts()).toEqual(["silhouette", "silhouette", "silhouette"]);
+
+    ipc.overrides.set("skin_info", () => {
+      throw new IpcError("io", "账户文件读不出来");
+    });
+    await click(buttonIn(page().querySelector("section") as HTMLElement, "刷新账户信息"));
+    await flush();
+    const skinWarnings = warn.mock.calls.filter(([message]) => String(message).includes("皮肤信息读不出来")).map(([message]) => message);
+    expect(skinWarnings).toEqual(["[accounts] Hanami 的皮肤信息读不出来，显示剪影", "[accounts] Hanami 的皮肤信息读不出来，显示剪影"]);
+    expect(arts()).toEqual(["silhouette", "silhouette", "silhouette"]);
+    expect(toastTitles()).toEqual(["success:账户信息已更新"]);
+  });
 });
 
 describe("账户页：删除", () => {

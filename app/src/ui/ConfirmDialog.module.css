@@ -17,23 +17,42 @@
   line-height: 1.6;
 }
 
-/* 顶替时补读新问题的状态区：只给读屏，不占位、不可见 */
-.announce {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: -1px;
-  padding: 0;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-  border: 0;
-}
-
-/* 底栏里的按钮行撑满底栏、靠右排：行宽不随确认键的文案变，让位才接得住「取消」的横移 */
+/* 底栏里的按钮行撑满底栏、靠右排 */
 .actions {
   display: flex;
   flex: 1 1 auto;
   justify-content: flex-end;
   gap: var(--sk-space-10);
+}
+
+/* 两个按钮外面那层形变节点：宽高随按钮，按弹性盒排、不生行框，高度不比按钮多出基线下的余量 */
+.cancel,
+.confirm {
+  display: flex;
+}
+
+/*
+ * 按钮文字的裁切层：按钮随文案形变时文字保持原宽，新文案比形变途中的按钮宽，伸出按钮的部分裁掉。
+ * 这一层不抵消缩放，裁切框跟着按钮缩放：左右放出按钮的内边距（md 按钮），裁切边落在按钮的内边距框上；
+ * 上下放宽半个行高，按钮的行高是 1，字形会高出行框
+ */
+.labelClip {
+  display: inline-block;
+  clip-path: inset(-50% calc(-1 * var(--sk-space-14)));
+}
+
+/* 文字的位置节点：transform 只对盒子生效，行内元素上的抵消缩放不起作用，文字会跟着按钮一起被压扁。淡出的旧字按它定位 */
+.labelTrack {
+  position: relative;
+  display: inline-block;
+}
+
+/* 一条文案：popLayout 按量到的宽高把淡出的旧字抽出布局，行内元素量不出宽度，旧字会留在行里把新字挤开 */
+.labelText {
+  display: inline-block;
+}
+
+/* 淡出中的旧字：字画在伪元素上，不留在按钮的文字内容里 */
+.labelText[data-text]::before {
+  content: attr(data-text);
 }

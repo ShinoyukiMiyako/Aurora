@@ -12,10 +12,14 @@
 // - 位移走独立的 translate 属性：页面入场用的是 transform，两者叠加，互不覆盖。
 // - 位移交给 Web Animations，关键帧由 settle 弹簧的解析解采样而来：整段在合成线程上播，数据到达时主线程正忙着渲染也不掉帧。
 // - 途中又被挤一次：按解析解算出此刻的位置与速度，带着速度接着走，不从零速重新起步。
+// - 从静止起步的先暂停在起点，等新排布画出来的下一帧才开始计时：画一整片新内容的那一帧很长，从提交就计时的话第一步跳一大截。
+//   跟着 framer-motion 形变走的（传 morph）不等，与形变同一刻起步。
+// - 新插入的项自己不动、就地淡入。例外是传 morph 的容器长高、新项开了新的一行：它跟着外框下沿从 -Δh 滑下来。
 // - 测量只发生在观察者报了变化的那一帧，先读完再写，不来回触发布局。
 //
 // 不补位移的情况：容器宽度或窗口尺寸变了（窗口缩放、分档切换引起的重排不做动画）、减少动画、
-// 容器带暂停属性（REFLOW_PAUSED_ATTR）、子项超过 REFLOW_HARD_MAX_ITEMS。
+// 容器带暂停属性（REFLOW_PAUSED_ATTR）、子项超过 REFLOW_HARD_MAX_ITEMS。这些时候被挪动的项若还在飞，当场落到新位置；
+// 超过硬上限时不读位置、认不出谁被挪动，还在飞的全部落定。
 // 子项超过 REFLOW_MAX_ITEMS 时位置照记，每一趟只给可见范围附近的至多 REFLOW_MAX_ITEMS 个起动画，其余被挪动的直接到位：
 // 长列表删一行，可见的那段照样滑上去。
 // 滚动锚定：内容在视口上方变高时浏览器会同步调整滚动位置，可见内容本来就没动，这时也不补。容器自己就是滚动容器时同样认得。
@@ -37,7 +41,7 @@ import { elapsedSeconds, springTrack } from "./slide";
  */
 export const REFLOW_MAX_ITEMS = 40;
 /**
- * 让位项（display: contents 的包裹层展开之后数）超过这么多就整趟放弃，连位置也不读；回到这以内的第一趟只记位置。
+ * 让位项（display: contents 的包裹层展开之后数）超过这么多就整趟放弃，连位置也不读，还在飞的当场落定；回到这以内的第一趟只记位置。
  * 头一次遇到的包裹层要读一次定位祖先与计算样式才认得出，这份读取不论超没超限都要付，之后不再复查。
  * 依据：每一趟按子项数线性地读布局（每项 offsetParent、offsetTop、offsetLeft 三次读取，布局已干净时都是不触发重排的
  * 快速读取，比 getBoundingClientRect 少一次变换换算、也不分配 DOMRect），再建表比对；400 项是一千出头次读取，
@@ -99,6 +103,18 @@ interface Launch {
   replaces: Animation | null;
 }
 
+/** 暂停在起点、等新排布画出来的一段：frames 是还要等的动画帧回调数。 */
+interface Hold {
+  el: HTMLElement;
+  flight: Flight;
+  frames: number;
+}
+
+/** 增删观察报在提交后的微任务里：下一帧才画出新排布，再下一帧开始计时。 */
+const HOLD_AFTER_MUTATION = 2;
+/** 尺寸观察报在这一帧的渲染步骤里：新排布就在这一帧画出，下一帧开始计时。 */
+const HOLD_AFTER_RESIZE = 1;
+
 const flights = new WeakMap<HTMLElement, Flight>();
 
 /**
@@ -133,6 +149,9 @@ export function closestScroller(el: HTMLElement): HTMLElement | null {
 /**
  * 开始观察 container 的直接子项，返回停止函数。
  * spring：让位走哪条弹簧。默认 settle；容器里有自己按 morph 变宽的子项（启动胶囊）时传 morph，兄弟与它的边缘同步。
+ * 传 morph 即表示让位与 framer-motion 的布局形变（浮层与弹窗的外框、启动胶囊）同拍：形变的时钟从提交那一刻走，
+ * 这里从静止起步也就当场计时，不等新排布画出来；容器长高、新插入的项落在原有各项之下时，它们沿 morph 从 -Δh 起步，
+ * 跟着外框下沿下来。
  * 运行环境没有 ResizeObserver 或 Web Animations 时什么也不做：组件测试用的 jsdom 既不做布局也没有这两个接口，
  * 让位在那里无从谈起；真机的 WebView2 两者都有。
  */
@@ -140,6 +159,7 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
   const doc = container.ownerDocument;
   const view = doc.defaultView;
   if (view === null || typeof ResizeObserver === "undefined" || typeof container.animate !== "function") return () => {};
+  const morphSynced = spring === "morph";
 
   // 只在开始观察时找一次
   const scroller = closestScroller(container);
@@ -148,6 +168,8 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
   let spots = new Map<HTMLElement, Spot>();
   // 第一趟只记位置：此前没有「旧位置」可言
   let width: number | null = null;
+  // 容器上一趟的高度，只有传 morph 的才读：长高时认出新开的一行。超限的那几趟作废，回到上限以内的第一趟只记
+  let height: number | null = null;
   let viewport = { width: view.innerWidth, height: view.innerHeight };
   let scroll = readScroll();
 
@@ -155,9 +177,11 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
     if (Math.abs(tx) < MOVE_EPSILON_PX && Math.abs(ty) < MOVE_EPSILON_PX) return null;
     const flying = flights.get(el);
     if (flying !== undefined) {
+      // 时间还没走（暂停在起点等新排布画出来、或刚建好）：此刻就是起步时记下的位置与速度，不经解析解换算。
+      // 欠阻尼弹簧在 t=0 算出的速度带舍入误差（±1e-13），从静止起步的会被当成在动，launch 就不再先暂停
       const t = elapsedSeconds(flying.animation);
-      const x = springAt(flying.spring, flying.x0, flying.vx, t);
-      const y = springAt(flying.spring, flying.y0, flying.vy, t);
+      const x = t === 0 ? { x: flying.x0, v: flying.vx } : springAt(flying.spring, flying.x0, flying.vx, t);
+      const y = t === 0 ? { x: flying.y0, v: flying.vy } : springAt(flying.spring, flying.y0, flying.vy, t);
       return { el, x0: x.x + tx, vx: x.v, y0: y.x + ty, vy: y.v, additive: flying.additive, replaces: flying.animation };
     }
     // 元素自己就靠 translate 定位或悬停位移时，位移叠加在它上面而不是顶替它（叠加模式不上合成线程，但不会把它甩离原位）
@@ -166,7 +190,27 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
     return { el, x0: tx, vx: 0, y0: ty, vy: 0, additive, replaces: null };
   };
 
-  const launch = ({ el, x0, vx, y0, vy, additive, replaces }: Launch) => {
+  const holds: Hold[] = [];
+  let ticking = false;
+  // 停止观察时不取消：还在等的照常开始走，不然会停在起点（同一元素换弹簧重新观察时也是先停后挂）
+  const tick = () => {
+    let kept = 0;
+    for (const hold of holds) {
+      if (--hold.frames > 0) {
+        holds[kept++] = hold;
+        continue;
+      }
+      // 等待期间被顶替或落定的不再播：已取消的动画 play 会从头重播
+      const { el, flight } = hold;
+      if (flights.get(el) === flight && flight.animation.playState === "paused") flight.animation.play();
+    }
+    holds.length = kept;
+    ticking = kept > 0;
+    if (ticking) view.requestAnimationFrame(tick);
+  };
+
+  /** wait：从静止起步时要等的动画帧回调数（HOLD_AFTER_MUTATION / HOLD_AFTER_RESIZE）。 */
+  const launch = ({ el, x0, vx, y0, vy, additive, replaces }: Launch, wait: number) => {
     replaces?.cancel();
     const { frames, duration } = springTrack(spring, x0, vx, y0, vy);
     const animation = el.animate(frames, { duration, easing: "linear", composite: additive ? "add" : "replace" });
@@ -177,6 +221,15 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
     };
     animation.onfinish = clear;
     animation.oncancel = clear;
+    // 时钟从这一刻走，新排布却要等这一帧渲染完才上屏：一次提交要画一整片新内容时这一帧要几十毫秒，
+    // 弹簧开头那一截没上屏就过去了，第一步跳一大截。先停在起点（首帧当场生效，时钟不走），等新排布画出来的下一帧再播。
+    // 途中再被挤的带着速度当场接着走：停两帧就是在动的东西顿一下。跟着 framer 形变走的不等，见 observeReflow
+    if (morphSynced || vx !== 0 || vy !== 0) return;
+    animation.pause();
+    holds.push({ el, flight, frames: wait });
+    if (ticking) return;
+    ticking = true;
+    view.requestAnimationFrame(tick);
   };
 
   /**
@@ -224,14 +277,17 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
     return ranked.slice(0, REFLOW_MAX_ITEMS).map((r) => r.shift);
   };
 
-  /** quiet：这一趟按暂停处理（暂停开关刚增删过）。 */
-  const pass = (quiet: boolean) => {
+  /** quiet：这一趟按暂停处理（暂停开关刚增删过）。wait 见 launch。 */
+  const pass = (quiet: boolean, wait: number) => {
     // 先数，再认包裹层，展开之后再数一次，最后才量：超过硬上限时一个位置也不读。
-    // 旧位置跟着作废：超限期间的变化没有跟踪，回到上限以内时拿它补滑，会把用户早已看着跳完的位移再播一遍
+    // 旧位置跟着作废：超限期间的变化没有跟踪，回到上限以内时拿它补滑，会把用户早已看着跳完的位移再播一遍。
+    // 还在飞的一并落定：不读位置就认不出谁被挪动了，剩下的轨迹又是相对旧排布起的；落定只走 DOM 与登记表，不读布局
     const items = collect(container, []);
     // 数只走 DOM，已认出的包裹层在这里已经展开；超限时连定位祖先也不读
     if (items.length > REFLOW_HARD_MAX_ITEMS) {
       spots = new Map();
+      height = null;
+      for (const item of items) land(item);
       return;
     }
     // 认包裹层：只读定位祖先，没有盒子的再读一次计算样式，位置留到确认没超限之后再读。
@@ -257,6 +313,8 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
     }
     if (count > REFLOW_HARD_MAX_ITEMS) {
       spots = new Map();
+      height = null;
+      for (const item of items) land(item);
       return;
     }
     const next = new Map<HTMLElement, Spot>();
@@ -269,6 +327,7 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
       next.set(el, { left: el.offsetLeft - (own ? 0 : baseLeft), top: el.offsetTop - (own ? 0 : baseTop) });
     }
     const nextWidth = container.clientWidth;
+    const nextHeight = morphSynced ? container.clientHeight : null;
     const nextViewport = { width: view.innerWidth, height: view.innerHeight };
     const nextScroll = readScroll();
 
@@ -280,21 +339,40 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
       doc.documentElement.hasAttribute("data-sk-reduced");
     const before = spots;
     const drift = { x: nextScroll.left - scroll.left, y: nextScroll.top - scroll.top };
+    const grown = height === null || nextHeight === null ? 0 : nextHeight - height;
     spots = next;
     width = nextWidth;
+    height = nextHeight;
     viewport = nextViewport;
     scroll = nextScroll;
-    if (still) return;
 
     const moved: { el: HTMLElement; top: number; dx: number; dy: number }[] = [];
+    const fresh: { el: HTMLElement; top: number }[] = [];
     for (const [el, spot] of next) {
       const was = before.get(el);
-      if (was === undefined) continue;
+      if (was === undefined) {
+        fresh.push({ el, top: spot.top });
+        continue;
+      }
       const dx = was.left - spot.left;
       const dy = was.top - spot.top;
       if (Math.abs(dx) >= MOVE_EPSILON_PX || Math.abs(dy) >= MOVE_EPSILON_PX) moved.push({ el, top: spot.top, dx, dy });
     }
-    if (moved.length === 0) return;
+    if (still) {
+      // 新排布一步换上：被它挪动的若还在飞就落定；没被挪动的接着飞，它的轨迹仍对得上新排布，打断反而多跳一下
+      for (const m of moved) land(m.el);
+      return;
+    }
+    // 传 morph 的容器长高时，外框下沿沿 morph 跟过来。新插入、落在原有各项之下的（开了新的一行）从 -Δh 起步跟着下沿走；
+    // 不跟的话它从第一帧就在终点，下沿还没到，被外框裁掉半截。只看顶边，不读各项的高度。
+    // settle 的容器（卡片、页面）下沿是一步到位的，新的一行就地淡入：滑下来只会压在上一行上
+    const opened: typeof moved = [];
+    if (grown >= MOVE_EPSILON_PX) {
+      let lowest = -Infinity;
+      for (const spot of before.values()) lowest = Math.max(lowest, spot.top);
+      for (const f of fresh) if (f.top - lowest >= MOVE_EPSILON_PX) opened.push({ el: f.el, top: f.top, dx: 0, dy: -grown });
+    }
+    if (moved.length === 0 && opened.length === 0) return;
 
     if (quiet || container.hasAttribute(REFLOW_PAUSED_ATTR)) {
       // 新排布整批一步换上了：还在飞的一并落定
@@ -302,12 +380,13 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
       return;
     }
 
-    // 滚动位置在这一趟布局里变了，且恰好抵消了某个子项的位移：这是滚动锚定，按抵消后的量算
+    // 滚动位置在这一趟布局里变了，且恰好抵消了某个子项的位移：这是滚动锚定，按抵消后的量算。
+    // 只拿真被挪动的项来认：新开一行的起点是凑出来的，不是布局位移
     const anchored =
       (drift.x !== 0 || drift.y !== 0) && moved.some((m) => Math.abs(m.dx + drift.x) < MOVE_EPSILON_PX && Math.abs(m.dy + drift.y) < MOVE_EPSILON_PX);
     // 抵消之后不到 1px 的在眼前并没有动：不占挑选的名额，还在飞的接着飞
     const shifts: Shift[] = [];
-    for (const m of moved) {
+    for (const m of [...moved, ...opened]) {
       const tx = m.dx + (anchored ? drift.x : 0);
       const ty = m.dy + (anchored ? drift.y : 0);
       if (Math.abs(tx) >= MOVE_EPSILON_PX || Math.abs(ty) >= MOVE_EPSILON_PX) shifts.push({ el: m.el, top: m.top, tx, ty });
@@ -322,10 +401,10 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
       const planned = plan(s.el, s.tx, s.ty);
       if (planned !== null) launches.push(planned);
     }
-    for (const item of launches) launch(item);
+    for (const item of launches) launch(item, wait);
   };
 
-  const sizes = new ResizeObserver(() => pass(false));
+  const sizes = new ResizeObserver(() => pass(false, HOLD_AFTER_RESIZE));
   // 每个让位项各自登记，不对整棵子树开观察：子项内部再怎么频繁改 DOM（日志、进度文字）都不会惊动这里
   const watch = (node: HTMLElement) => {
     sizes.observe(node, { box: "border-box" });
@@ -354,7 +433,7 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
       for (const node of record.addedNodes) if (node instanceof HTMLElement) watch(node);
       for (const node of record.removedNodes) if (node instanceof HTMLElement) unwatch(node);
     }
-    pass(toggled);
+    pass(toggled, HOLD_AFTER_MUTATION);
   });
   // 用户自己滚动不算位移：滚动事件先于布局派发，这里记下的就是布局之前的滚动位置
   const onScroll = () => {

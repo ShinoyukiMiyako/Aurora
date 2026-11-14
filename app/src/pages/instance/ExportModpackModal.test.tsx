@@ -17,7 +17,6 @@ import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, callsOf, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import { bundledTotals, defaultExportFileName, effectiveExtras, skippedCount } from "./ExportModpackModal";
-import exportStyles from "./export.module.css";
 import InstancePage from "./index";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -192,17 +191,19 @@ async function reasonOf(el: HTMLElement): Promise<string | null | undefined> {
   return reason;
 }
 
-/** 读取中那一块（转圈与「正在读取」）。 */
+/** 读取中那一块（转圈与「正在读取」）。它在对读屏隐藏的骨架层里，播报区写着同一句话，按这一点区分。 */
 function readingBlock(): HTMLElement {
-  const label = [...dialog().querySelectorAll("span")].find((el) => el.textContent === "正在读取 Mod 与配置…");
+  const label = [...dialog().querySelectorAll("span")].find((el) => el.textContent === "正在读取 Mod 与配置…" && el.closest('[aria-hidden="true"]') !== null);
   if (label === undefined || label.parentElement === null) throw new Error("没有读取中的那一块");
   return label.parentElement;
 }
 
-/** 「正在读取」的读屏播报区：随弹窗预先挂着，不在骨架那层对读屏隐藏的子树里。 */
+/** 「正在读取」的读屏播报区：Loadable 的 busyLabel，挂在加载层根元素的前面，不在骨架那层对读屏隐藏的子树里。只在读取中取。 */
 function readingStatus(): HTMLElement {
-  const found = dialog().querySelector<HTMLElement>(`.${exportStyles.status}`);
-  if (found === null) throw new Error("弹窗里没有读取的播报区");
+  const root = readingBlock().closest<HTMLElement>("[aria-busy]");
+  if (root === null) throw new Error("读取块不在加载层里");
+  const found = root.previousElementSibling;
+  if (!(found instanceof HTMLElement)) throw new Error("弹窗里没有读取的播报区");
   expect(found.getAttribute("role")).toBe("status");
   expect(found.closest('[aria-hidden="true"]')).toBeNull();
   return found;

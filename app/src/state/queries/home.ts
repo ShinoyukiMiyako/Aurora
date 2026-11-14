@@ -52,3 +52,16 @@ export function useSkinInfo(accountUuid: string | null): ResourceResult<SkinInfo
     return skinInfo(accountUuid);
   });
 }
+
+/**
+ * 皮肤读取结果交给头像与立绘时的说法，即 art/skin 的 SkinSource（state/ 不引入 art/，这里按结构写出同一个并集）。
+ * 还在读时说「读取中」而不是「没有」：换到皮肤信息没缓存的账户时留着正在显示的那一张直到读到，一次交叉换上，
+ * 不先落回剪影再淡入。刷新账户后重取失败时资源的 error 态带着上一次读到的结果，沿用它，
+ * 已知有皮肤的账户不因一次重取失败退回剪影；从没读到过的才当作没有皮肤。
+ */
+export function skinSource(skin: ResourceResult<SkinInfoDto | null>): SkinInfoDto | null | "loading" {
+  if (skin.status === "loading") return "loading";
+  if (skin.status === "ready") return skin.data;
+  if (skin.data === undefined) return null;
+  return skin.data;
+}

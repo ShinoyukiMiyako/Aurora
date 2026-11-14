@@ -742,25 +742,22 @@
 }
 
 /*
- * 版本号在上、更新状态标签在下：整格钉在单元格顶部，不随单元格垂直居中，标签随更新检查晚到时只往下长，版本号不动。
- * 上边距按最坏的常见情况留：版本号一行、间距、折成两行的「可更新到」标签（真实版本号大多会折成两行）在行内居中，
- * 行高扣掉 1px 下边线。代价是版本号不再和 Mod 列的名称首行对齐（高出约 9px）：按名称首行对齐时标签下面只剩一行的位置，
- * 两行标签的底部会被单元格的 overflow: hidden 裁掉。三行以上的标签极少见，从底部裁掉，版本号照样不动。
- * 标签的行高与上下内边距在这里定义，下方 .updateTag 读同一组变量：留出的高度与标签实际的高度不会各改各的。
+ * 版本号在上、更新状态标签在下，两者都压成一行。格高固定为 Mod 列文字列的高度（名称一行、间距、第二行），和它一样随单元格垂直居中：
+ * 版本号与名称首行、标签与第二行各自落在同一高度，与行高、密度、末行有没有下边线都无关。
+ * 格高不随内容变：标签随更新检查晚到、有无更新的行混排，版本号都在同一处。单行标签（Tag 的 sm 档）与第二行的行高同为 18，
+ * 版本号一行、间距、标签正好放满。
  */
 .versionCell {
-  --update-tag-lh: 1.3;
-  --update-tag-pad: var(--sk-space-2);
   display: flex;
   flex-direction: column;
-  align-self: flex-start;
+  align-self: center;
   align-items: flex-start;
   gap: var(--sk-space-2);
   min-width: 0;
-  padding-top: calc((var(--table-row) - 1px - var(--sk-lh-body) - var(--sk-space-2) - 2 * var(--update-tag-lh) * var(--sk-fs-caption) - 2 * var(--update-tag-pad)) / 2);
+  height: calc(var(--sk-lh-body) + var(--sk-space-2) + var(--sk-lh-caption));
 }
 
-/* 行内出入场（状态标签、行内更新按钮）的包裹层：自己是 flex，标签与按钮不落进行盒，高度与不包时相同；不被压窄，长标签照常在格内换行 */
+/* 行内出入场（状态标签、行内更新按钮）的包裹层：自己是 flex，标签与按钮不落进行盒，高度与不包时相同；不被压窄，最宽到所在的格，长标签在里面截断 */
 .appearInline {
   display: flex;
   flex: none;
@@ -768,21 +765,31 @@
   max-width: 100%;
 }
 
-/* 真实版本号又长又没有断点（1.14.2+kotlin.2.4.21），单元格是 overflow: hidden，不让它换行就被静默切掉尾巴 */
+/* 真实版本号又长又没有断点（1.14.2+kotlin.2.4.21）：压成一行，放不下的截成省略号，全文在悬停提示里。折行的话会把标签挤出格子 */
 .versionCell .modVersion {
   flex: none;
   max-width: 100%;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
+/* 标签的基础样式不收缩（flex: none）：版本列里要能被压到格宽，省略号落在里面的文字层上 */
 .versionCell .updateTag {
-  height: auto;
-  min-height: var(--tag-height);
-  max-width: 100%;
-  padding-block: var(--update-tag-pad);
-  line-height: var(--update-tag-lh);
-  white-space: normal;
-  overflow-wrap: anywhere;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/*
+ * 「可更新到」里可截断的文字层：标签里的文字是匿名的 flex 项，省略号挂不上去。行高取标签高度，裁切框与标签同高，降部不被切掉；
+ * 两者都在标签里居中，字的位置与不包这一层时相同。紧凑档的标签不收缩，这一层在那里不截。
+ */
+.updateTagText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: var(--tag-height);
 }
 
 .modInstalled {
@@ -1026,6 +1033,16 @@
   min-height: var(--sk-lh-small);
 }
 
+/*
+ * 取自哪个实例的那一句：来源实例名最长 32 字，连同前后两段在窄列里会折成两行，存下、清除时这一行就变高变矮。
+ * 整句一行排开，只让实例名收窄（.ellipsis 单行截断，悬停看全名），前后两段不收窄、照常写全
+ */
+.templateSource {
+  display: flex;
+  min-width: 0;
+  white-space: nowrap;
+}
+
 /* 默认设置一行的「清除」：常驻占位，有默认设置时淡入，没有时淡出（不可交互由 inert 管）；只动透明度 */
 .clearSlot {
   display: inline-flex;
@@ -1116,18 +1133,6 @@
   flex: 1 1 auto;
   flex-direction: column;
   padding: var(--sk-space-16) var(--sk-space-18);
-}
-
-/* 加载期间只给读屏的卡片标题：占位整层对读屏隐藏，看得见的那个标题在占位里 */
-.consoleHeading {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-  border: 0;
 }
 
 /* 慢提示在占位外面、卡片底部，左右内边距与日志区的骨架行对齐 */

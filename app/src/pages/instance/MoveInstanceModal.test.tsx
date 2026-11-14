@@ -24,7 +24,6 @@ import { RemoteImageProvider } from "../../ui/remote-image";
 import { PickFolderProvider, type PickFolder } from "../discover/platform";
 import InstancePage from "./index";
 import { moveCheckView, moveSubmitReason } from "./MoveInstanceModal";
-import moveStyles from "./move.module.css";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -200,9 +199,9 @@ function previewSkeleton(): HTMLElement | null {
   return layer === undefined ? null : layer;
 }
 
-/** 「正在检查」的读屏播报区：随预检区预先挂着，不在骨架那层对读屏隐藏的子树里。 */
+/** 「正在检查」的读屏播报区：随预检区预先挂着、套全局的视觉隐藏类，不在骨架那层对读屏隐藏的子树里。 */
 function checkStatus(): HTMLElement {
-  const found = dialog().querySelector<HTMLElement>(`.${moveStyles.status}`);
+  const found = dialog().querySelector<HTMLElement>('section[aria-live] > .sk-sr-only[role="status"]');
   if (found === null) throw new Error("预检区没有播报区");
   expect(found.getAttribute("role")).toBe("status");
   expect(found.closest('[aria-hidden="true"]')).toBeNull();

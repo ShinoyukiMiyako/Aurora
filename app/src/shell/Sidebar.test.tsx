@@ -10,7 +10,7 @@ import { stubCanvas } from "../art/illustrations/test-canvas";
 import { AVATAR_LINE, LAUNCH_COPY, PAGE_LABEL, STOPPED_LABEL } from "../copy/flows";
 import type { InstanceSummary } from "../domain/adapt";
 import type { LaunchView } from "../launch/launchView";
-import { springs, TOOLTIP_TIMING } from "../lib/motion";
+import { fade, springs, TOOLTIP_TIMING } from "../lib/motion";
 import { startSession } from "../state/session";
 import type { Task } from "../domain/types";
 import { LauncherProvider, useLauncherActions } from "../state/launcher";
@@ -564,45 +564,56 @@ describe("侧栏", () => {
     }
   });
 
-  it("拖动安装中自动固定的项：提交了显示顺序也没变，各项按 pop 弹回原位；之后不相干的增删不再给它用 pop", async () => {
+  /** 已固定 pins，另有一个安装一直不结束的新实例「新世界」停在「安装中、自动固定」，排在固定区末尾。 */
+  async function mountWithInstalling(pins: string[]) {
+    stubRowLayout();
+    // 松手点要落在胶囊里才算提交：jsdom 不做布局，给一个足够大的矩形
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, right: 1000, bottom: 1000, width: 1000, height: 1000, x: 0, y: 0, toJSON: () => ({}) });
+    bootOverrides(ipc, { instances: [instanceDto("生存"), instanceDto("创造")], pins });
+    ipc.overrides.set("install_version", () => new Promise(() => undefined));
+    await mount();
+    await act(async () => {
+      await launcher.createInstance({ name: "新世界", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "grass" });
+    });
+    await flush();
+  }
+
+  const pinOrder = () => [...document.querySelectorAll<HTMLElement>("[data-sidebar-item^='pin:']")].map((el) => el.dataset.sidebarItem);
+
+  /** 按住 key 那一项从 fromY 拖到 toY 松手（指针 7）。 */
+  function dragPin(key: string, fromY: number, toY: number): HTMLLIElement {
+    const pin = item(key);
+    const row = pin.closest("li");
+    if (row === null) throw new Error("固定项不在列表项里");
+    const pointer = (type: string, clientY: number) =>
+      act(() => {
+        pin.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, button: 0, pointerId: 7, clientX: 10, clientY }));
+      });
+    pointer("pointerdown", fromY);
+    pointer("pointermove", toY);
+    motionCalls.length = 0;
+    pointer("pointerup", toY);
+    return row;
+  }
+
+  it("拖动安装中自动固定的项越过已落库的项：已落库的顺序没变，不写入，松手当场放下，各项按 pop 弹回原位；之后不相干的增删不再给它用 pop", async () => {
     Object.defineProperty(HTMLElement.prototype, "setPointerCapture", { configurable: true, value: () => undefined });
     try {
-      stubRowLayout();
-      vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, right: 1000, bottom: 1000, width: 1000, height: 1000, x: 0, y: 0, toJSON: () => ({}) });
-      bootOverrides(ipc, { instances: [instanceDto("生存"), instanceDto("创造")], pins: ["生存"] });
-      // 安装一直不结束：新实例停在「安装中、自动固定」，排在固定区末尾
-      ipc.overrides.set("install_version", () => new Promise(() => undefined));
-      await mount();
-      await act(async () => {
-        await launcher.createInstance({ name: "新世界", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "grass" });
-      });
-      await flush();
-      const order = () => [...document.querySelectorAll<HTMLElement>("[data-sidebar-item^='pin:']")].map((el) => el.dataset.sidebarItem);
-      expect(order()).toEqual(["pin:生存", "pin:新世界"]);
+      await mountWithInstalling(["生存"]);
+      expect(pinOrder()).toEqual(["pin:生存", "pin:新世界"]);
 
-      const pin = item("pin:新世界");
-      const pointer = (type: string, clientY: number) =>
-        act(() => {
-          pin.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, button: 0, pointerId: 7, clientX: 10, clientY }));
-        });
-      const row = pin.closest("li");
-      if (row === null) throw new Error("固定项不在列表项里");
-      pointer("pointerdown", 200);
-      pointer("pointermove", 200 - PIN_STEP);
-      motionCalls.length = 0;
-      pointer("pointerup", 200 - PIN_STEP);
-      expect(row.hasAttribute("data-dragging")).toBe(true);
-      await flush();
-      // 占位项不写进固定列表：写入的顺序和原来一样，显示顺序也没变
-      expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["生存"] }]);
-      expect(order()).toEqual(["pin:生存", "pin:新世界"]);
-      // 提交落定时放下；被拖项从松手处、被越过的项从让位处，一起弹回原位
+      const row = dragPin("pin:新世界", 200, 200 - PIN_STEP);
+      // 松手那一次提交里就放下，不等写入往返：被拖项从松手处、被越过的项从让位处，一起弹回原位
       expect(row.hasAttribute("data-dragging")).toBe(false);
       expect(row.hasAttribute("data-landing")).toBe(true);
       const back = motionCalls.filter((call) => call.transition === springs.pop);
       expect(back).toHaveLength(2);
       expect(back.map((call) => call.from)).toContain(-PIN_STEP);
       expect(motionCalls.filter((call) => call.transition === springs.settle)).toEqual([]);
+      await flush();
+      // 占位项写不进固定列表，写下去的内容与现状一样：不发这次写入
+      expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
+      expect(pinOrder()).toEqual(["pin:生存", "pin:新世界"]);
       // 下一次按下固定项：按下的缩小走平常的 tap，放下的记号清掉
       act(() => {
         item("pin:生存").dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, pointerId: 8, clientX: 10, clientY: 100 }));
@@ -615,7 +626,7 @@ describe("侧栏", () => {
         await launcher.togglePin("创造");
       });
       await flush();
-      expect(order()).toEqual(["pin:生存", "pin:创造", "pin:新世界"]);
+      expect(pinOrder()).toEqual(["pin:生存", "pin:创造", "pin:新世界"]);
       // 新世界被新固定的创造挤到下一格：照常 settle，不再当成刚松手的那一项
       expect(motionCalls.filter((call) => call.transition === springs.pop)).toEqual([]);
       expect(motionCalls.filter((call) => call.transition === springs.settle).length).toBeGreaterThan(0);
@@ -624,44 +635,82 @@ describe("侧栏", () => {
     }
   });
 
-  it("松手后等写入落定期间按下另一项、还没拖起来时按 Esc：Esc 照常放行，随后的点击照常进实例页", async () => {
+  it("已落库的末项拖过排在它后面的安装中的项：已落库的顺序没变，不写入，松手当场放下并弹回原位", async () => {
+    Object.defineProperty(HTMLElement.prototype, "setPointerCapture", { configurable: true, value: () => undefined });
+    try {
+      await mountWithInstalling(["生存", "创造"]);
+      expect(pinOrder()).toEqual(["pin:生存", "pin:创造", "pin:新世界"]);
+
+      const row = dragPin("pin:创造", 150, 150 + PIN_STEP);
+      expect(row.hasAttribute("data-dragging")).toBe(false);
+      expect(row.hasAttribute("data-landing")).toBe(true);
+      // 三项都按 pop 归位，被拖项从松手处（下面一格）弹回
+      const back = motionCalls.filter((call) => call.transition === springs.pop);
+      expect(back).toHaveLength(3);
+      expect(back.map((call) => call.from)).toContain(PIN_STEP);
+      expect(motionCalls.filter((call) => call.transition === springs.settle)).toEqual([]);
+      await flush();
+      expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
+      expect(pinOrder()).toEqual(["pin:生存", "pin:创造", "pin:新世界"]);
+    } finally {
+      delete (HTMLElement.prototype as { setPointerCapture?: unknown }).setPointerCapture;
+    }
+  });
+
+  it("有安装中的项时把已落库的两项换了位：写入不含占位项的新顺序，不等写入回来就按新顺序落位", async () => {
+    Object.defineProperty(HTMLElement.prototype, "setPointerCapture", { configurable: true, value: () => undefined });
+    try {
+      await mountWithInstalling(["生存", "创造"]);
+      // 写入一直停在路上：落位只能来自乐观更新
+      ipc.overrides.set("set_sidebar_pins", () => new Promise(() => undefined));
+
+      const row = dragPin("pin:生存", 100, 100 + PIN_STEP);
+      await flush();
+      expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["创造", "生存"] }]);
+      expect(pinOrder()).toEqual(["pin:创造", "pin:生存", "pin:新世界"]);
+      expect(row.hasAttribute("data-dragging")).toBe(false);
+      expect(row.hasAttribute("data-landing")).toBe(true);
+      expect(motionCalls.filter((call) => call.transition === springs.pop)).toHaveLength(1);
+      expect(motionCalls.filter((call) => call.transition === springs.settle).length).toBeGreaterThan(0);
+    } finally {
+      delete (HTMLElement.prototype as { setPointerCapture?: unknown }).setPointerCapture;
+    }
+  });
+
+  it("松手后新顺序还没落地（前一次写入还在路上）期间按下另一项、还没拖起来时按 Esc：Esc 照常放行，随后的点击照常进实例页", async () => {
     Object.defineProperty(HTMLElement.prototype, "setPointerCapture", { configurable: true, value: () => undefined });
     try {
       stubRowLayout();
       vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, right: 1000, bottom: 1000, width: 1000, height: 1000, x: 0, y: 0, toJSON: () => ({}) });
-      bootOverrides(ipc, { instances: [instanceDto("生存"), instanceDto("创造")], pins: ["生存"] });
-      ipc.overrides.set("install_version", () => new Promise(() => undefined));
-      // 写入停在路上：显示顺序不变的这次松手一直等着它落定
-      let landWrite: () => void = () => {
-        throw new Error("固定顺序还没写入");
-      };
-      ipc.overrides.set("set_sidebar_pins", (args) => new Promise((resolve) => (landWrite = () => resolve(args.pins))));
+      // 写入停在路上，按发出的先后逐个放行
+      const writes: (() => void)[] = [];
+      ipc.overrides.set("set_sidebar_pins", (args) => new Promise((resolve) => writes.push(() => resolve(args.pins))));
       await mount();
-      await act(async () => {
-        await launcher.createInstance({ name: "新世界", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "grass" });
-      });
+      // 第一次换位：乐观改顺序后当场落位，写入挂着
+      dragPin("pin:生存", 100, 100 + PIN_STEP);
       await flush();
-      const dragged = item("pin:新世界");
-      const pointer = (target: HTMLElement, type: string, pointerId: number, clientY: number) =>
+      expect(pinOrder()).toEqual(["pin:创造", "pin:生存", "pin:空岛"]);
+      // 第二次换位排在第一次写入之后，乐观更新也要等它：被拖项保持拿起
+      const dragged = dragPin("pin:空岛", 200, 200 - PIN_STEP);
+      await flush();
+      expect(dragged.hasAttribute("data-dragging")).toBe(true);
+
+      const other = item("pin:创造");
+      const pointer = (type: string) =>
         act(() => {
-          target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, button: 0, pointerId, clientX: 10, clientY }));
+          other.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, button: 0, pointerId: 8, clientX: 10, clientY: 50 }));
         });
-      pointer(dragged, "pointerdown", 7, 200);
-      pointer(dragged, "pointermove", 7, 200 - PIN_STEP);
-      pointer(dragged, "pointerup", 7, 200 - PIN_STEP);
-      await flush();
-      expect(dragged.closest("li")?.hasAttribute("data-dragging")).toBe(true);
-
-      const other = item("pin:生存");
-      pointer(other, "pointerdown", 8, 100);
+      pointer("pointerdown");
       expect(keydown(window, "Escape").defaultPrevented).toBe(false);
-      pointer(other, "pointerup", 8, 100);
+      pointer("pointerup");
       act(() => other.click());
-      expect(nav.route).toEqual({ page: "instance", id: "生存", tab: "overview" });
+      expect(nav.route).toEqual({ page: "instance", id: "创造", tab: "overview" });
 
-      landWrite();
+      writes[0]();
       await flush();
-      expect(dragged.closest("li")?.hasAttribute("data-dragging")).toBe(false);
+      expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["创造", "生存", "空岛"] }, { pins: ["创造", "空岛", "生存"] }]);
+      expect(pinOrder()).toEqual(["pin:创造", "pin:空岛", "pin:生存"]);
+      expect(dragged.hasAttribute("data-dragging")).toBe(false);
     } finally {
       delete (HTMLElement.prototype as { setPointerCapture?: unknown }).setPointerCapture;
     }
@@ -843,6 +892,184 @@ describe("侧栏", () => {
     expect(tracks[0].frames.at(-1)?.translate).toBe(`0px ${rowTop(1)}px`);
     expect(tracks[0].cancelled).toBe(false);
     expect(slider.style.translate).toBe(`0px ${rowTop(1)}px`);
+  });
+
+  describe("减少动画时的选中滑块", () => {
+    async function mountReduced() {
+      view = render(
+        <MotionConfig reducedMotion="always">
+          <LauncherProvider>
+            <ShellProvider>
+              <ChromeProvider value={chrome}>
+                <Probe />
+                <Sidebar />
+                <OverlayRoot />
+              </ChromeProvider>
+            </ShellProvider>
+          </LauncherProvider>
+        </MotionConfig>,
+      );
+      await flush();
+    }
+
+    interface PartFade {
+      part: string;
+      frames: Keyframe[];
+      ms: unknown;
+      easing: unknown;
+      cancelled: boolean;
+    }
+    let fades: PartFade[] = [];
+    /** 读行布局的那一刻滑块身上的属性：那一刻就是浏览器按当时的属性算样式、决定起不起过渡的时刻。 */
+    let atLayoutRead: { on: boolean; instant: boolean; kind: string | undefined }[] = [];
+    /** 按 fade.in 从透明淡到不透明。 */
+    const fadeOf = (part: string): PartFade => ({
+      part,
+      frames: [{ opacity: 0 }, { opacity: 1 }],
+      ms: fade.in.duration * 1000,
+      easing: expect.stringContaining(fade.in.ease.join(", ")),
+      cancelled: false,
+    });
+
+    beforeEach(() => {
+      fades = [];
+      atLayoutRead = [];
+      stubRowLayout(() => {
+        const slider = selection();
+        atLayoutRead.push({ on: slider.hasAttribute("data-on"), instant: slider.hasAttribute("data-instant"), kind: slider.dataset.kind });
+      });
+      // jsdom 没有 Web Animations：给 span 补上 animate，记下滑块里浅底与指示条的透明度动画（滑块自己是 div，位移不经这里）
+      Object.defineProperty(HTMLSpanElement.prototype, "animate", {
+        configurable: true,
+        value(this: HTMLSpanElement, frames: Keyframe[], options: KeyframeAnimationOptions) {
+          const part = this.className === styles.selBlock ? "block" : this.className === styles.selBar ? "bar" : this.className;
+          const entry: PartFade = { part, frames, ms: options.duration, easing: options.easing, cancelled: false };
+          if (this.closest("[data-sidebar-selection]") !== null) fades.push(entry);
+          return {
+            cancel: () => {
+              entry.cancelled = true;
+            },
+          };
+        },
+      });
+    });
+    afterEach(() => {
+      delete (HTMLSpanElement.prototype as { animate?: unknown }).animate;
+    });
+
+    it("换行时一步到位，浅底与指示条在新行上按 fade.in 从透明淡入；挂载那一次不淡，落到固定项上只淡指示条", async () => {
+      await mountReduced();
+      expect(selection().style.translate).toBe(`0px ${rowTop(0)}px`);
+      expect(fades).toEqual([]);
+
+      act(() => item("discover").click());
+      expect(selection().style.translate).toBe(`0px ${rowTop(2)}px`);
+      expect(selection().hasAttribute("data-on")).toBe(true);
+      expect(fades).toEqual([fadeOf("block"), fadeOf("bar")]);
+
+      // 换到固定项：关着过渡换好种类，浅底不在固定项上先显出再淡掉；上一次还没播完的淡入停掉，只淡指示条
+      const previous = fades;
+      fades = [];
+      atLayoutRead = [];
+      act(() => item("pin:创造").click());
+      expect(atLayoutRead[0]).toEqual({ on: true, instant: true, kind: "pin" });
+      expect(selection().hasAttribute("data-instant")).toBe(false);
+      expect(selection().style.translate).toBe(`0px ${rowTop(5)}px`);
+      expect(previous.map((entry) => entry.cancelled)).toEqual([true, true]);
+      expect(fades).toEqual([fadeOf("bar")]);
+
+      // 还在同一行（再点一次只滚回顶部）：不淡
+      fades = [];
+      act(() => item("pin:创造").click());
+      expect(fades).toEqual([]);
+    });
+
+    it("指针按下主导航就在那一行淡入，点成之后不再淡一次；在别处松开没点成，就在原来那一行淡回", async () => {
+      await mountReduced();
+      act(() => {
+        item("tasks").dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }));
+      });
+      expect(selection().style.translate).toBe(`0px ${rowTop(3)}px`);
+      expect(fades).toEqual([fadeOf("block"), fadeOf("bar")]);
+      fades = [];
+      // 点击是离散事件，浏览器里它引起的更新在事件结束时就提交了，排在松手时那个定时器之前
+      act(() => {
+        window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+        item("tasks").click();
+      });
+      act(() => {
+        vi.advanceTimersByTime(0);
+      });
+      expect(nav.route).toEqual({ page: "tasks" });
+      expect(selection().style.translate).toBe(`0px ${rowTop(3)}px`);
+      expect(fades).toEqual([]);
+
+      act(() => {
+        item("library").dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }));
+      });
+      fades = [];
+      act(() => {
+        window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+        vi.advanceTimersByTime(0);
+      });
+      expect(selection().style.translate).toBe(`0px ${rowTop(3)}px`);
+      expect(fades).toEqual([fadeOf("block"), fadeOf("bar")]);
+    });
+
+    it("收起的淡出没播完就在另一行显出：同样在新行上从透明淡入；回到原来那一行则从此刻的透明度淡回，不另做淡入", async () => {
+      class FakeTransition {
+        constructor(readonly transitionProperty: string) {}
+      }
+      vi.stubGlobal("CSSTransition", FakeTransition);
+      let running: object[] = [];
+      await mountReduced();
+      Object.defineProperty(selection(), "getAnimations", { configurable: true, value: () => running });
+
+      act(() => nav.go({ page: "accounts" }));
+      expect(selection().hasAttribute("data-on")).toBe(false);
+      running = [new FakeTransition("opacity")];
+      atLayoutRead = [];
+      act(() => item("pin:创造").click());
+      // 关着过渡显出：停住还在播的淡出，透明度全交给浅底与指示条自己的淡入
+      expect(atLayoutRead[0]).toEqual({ on: true, instant: true, kind: "pin" });
+      expect(selection().hasAttribute("data-instant")).toBe(false);
+      expect(selection().hasAttribute("data-on")).toBe(true);
+      expect(selection().style.translate).toBe(`0px ${rowTop(5)}px`);
+      expect(fades).toEqual([fadeOf("bar")]);
+
+      act(() => nav.go({ page: "accounts" }));
+      fades = [];
+      atLayoutRead = [];
+      act(() => nav.go({ page: "instance", id: "创造", tab: "overview" }));
+      expect(atLayoutRead[0]).toEqual({ on: false, instant: false, kind: "pin" });
+      expect(selection().hasAttribute("data-on")).toBe(true);
+      expect(fades).toEqual([]);
+    });
+
+    it("从收起到显出（淡出已经播完）照常由样式表的过渡淡入，不另做淡入；之前没播完的淡入停掉", async () => {
+      await mountReduced();
+      act(() => item("library").click());
+      const stale = fades;
+      expect(stale.map((entry) => entry.part)).toEqual(["block", "bar"]);
+      act(() => nav.go({ page: "accounts" }));
+      fades = [];
+      atLayoutRead = [];
+      act(() => item("pin:空岛").click());
+      expect(atLayoutRead[0]).toEqual({ on: false, instant: true, kind: "pin" });
+      expect(selection().hasAttribute("data-on")).toBe(true);
+      expect(selection().style.translate).toBe(`0px ${rowTop(6)}px`);
+      // 浅底的淡入还在播的话会在固定项上把它显出来
+      expect(stale.map((entry) => entry.cancelled)).toEqual([true, true]);
+      expect(fades).toEqual([]);
+    });
+
+    it("不减少动画时换行照常滑，浅底与指示条不另做淡入", async () => {
+      await mount();
+      act(() => item("discover").click());
+      act(() => item("pin:创造").click());
+      expect(selection().style.translate).toBe(`0px ${rowTop(5)}px`);
+      expect(fades).toEqual([]);
+    });
   });
 
   it("指针按下主导航条目：滑块先行出发；在别处松开没点成，就滑回当前选中项", async () => {
@@ -1063,29 +1290,110 @@ describe("侧栏", () => {
     });
   });
 
-  it("开着菜单的实例被删掉：菜单记成关上，别的固定项的名称提示照常出现", async () => {
+  describe("开着菜单的实例被删掉", () => {
+    const menuOf = (name: string) => [...document.querySelectorAll("[role='menu']")].find((el) => el.getAttribute("aria-label") === SIDEBAR_COPY.menuLabel(name));
+
+    /** 键盘聚焦 name 那一项并用菜单键打开它的菜单。 */
+    async function openMenu(name: string) {
+      act(() => item(`pin:${name}`).focus());
+      keydown(item(`pin:${name}`), "ContextMenu");
+      await flush();
+      const menu = menuOf(name);
+      if (menu === undefined) throw new Error(`没有 ${name} 的菜单`);
+      expect(menu.contains(document.activeElement)).toBe(true);
+    }
+
+    /** 实例列表重读回来，只剩 left 这几个实例。 */
+    async function deleteAllBut(left: string[]) {
+      ipc.overrides.set("list_instances", () => left.map((id) => instanceDto(id)));
+      await act(async () => {
+        await launcher.refreshInstances();
+      });
+      await flush();
+    }
+
+    it("菜单面板用删掉前的条目播退场，侧栏记成关上，别的固定项的名称提示照常出现", async () => {
+      await mount();
+      await openMenu("生存");
+      await deleteAllBut(["创造", "空岛"]);
+      // 面板还在、正在退场（jsdom 里退场不走帧，节点留着），名称与条目是删掉前的那一份
+      const menu = menuOf("生存");
+      if (menu === undefined) throw new Error("实例删掉后菜单一帧消失，没有播退场");
+      expect(menu.closest("[data-exiting]")).not.toBeNull();
+      expect([...menu.querySelectorAll("[role='menuitem']")].map((el) => el.textContent)).toContain(SIDEBAR_COPY.unpin);
+
+      act(() => {
+        item("pin:创造").dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+      });
+      act(() => {
+        vi.advanceTimersByTime(TOOLTIP_TIMING.sidebarDelay);
+      });
+      const tips = [...document.querySelectorAll("[role='tooltip']")].map((tip) => tip.textContent);
+      expect(tips.some((text) => text !== null && text.startsWith("创造"))).toBe(true);
+    });
+
+    it("菜单开着时实例的启动视图变了：条目跟着刷新", async () => {
+      await mount();
+      await openMenu("生存");
+      const first = () => menuOf("生存")?.querySelector("[role='menuitem']")?.textContent;
+      expect(first()).toBe(LAUNCH_COPY.launch);
+      ipc.overrides.set("list_instances", () => [instanceDto("生存", { status: "broken", broken_reason: "版本 JSON 缺失" }), instanceDto("创造"), instanceDto("空岛")]);
+      await act(async () => {
+        await launcher.refreshInstances();
+      });
+      await flush();
+      expect(first()).toBe(LAUNCH_COPY.repairAndLaunch);
+      expect(menuOf("生存")?.closest("[data-exiting]")).toBeNull();
+    });
+
+    it("焦点交给侧栏里原来的下一项", async () => {
+      await mount();
+      await openMenu("创造");
+      await deleteAllBut(["生存", "空岛"]);
+      expect(document.activeElement).toBe(item("pin:空岛"));
+    });
+
+    it("删掉的是末项：焦点交给上一项", async () => {
+      await mount();
+      await openMenu("空岛");
+      await deleteAllBut(["生存", "创造"]);
+      expect(document.activeElement).toBe(item("pin:创造"));
+    });
+
+    it("删掉的是唯一的固定项：焦点交给主页入口", async () => {
+      bootOverrides(ipc, { instances: [instanceDto("生存"), instanceDto("创造")], pins: ["生存"] });
+      await mount();
+      await openMenu("生存");
+      await deleteAllBut(["创造"]);
+      expect(document.activeElement).toBe(item("home"));
+    });
+
+    it("焦点已经被带去侧栏之外：留在那里，不抢回来", async () => {
+      await mount();
+      await openMenu("创造");
+      const elsewhere = document.createElement("button");
+      document.body.append(elsewhere);
+      try {
+        act(() => elsewhere.focus());
+        await deleteAllBut(["生存", "空岛"]);
+        expect(document.activeElement).toBe(elsewhere);
+      } finally {
+        elsewhere.remove();
+      }
+    });
+  });
+
+  it("键盘从菜单里取消固定：菜单把焦点还给这一项，它退场时焦点交给原来的下一项", async () => {
     await mount();
     act(() => item("pin:生存").focus());
     keydown(item("pin:生存"), "ContextMenu");
     await flush();
-    expect(document.querySelector("[role='menu']")).not.toBeNull();
-
-    ipc.overrides.set("list_instances", () => [instanceDto("创造"), instanceDto("空岛")]);
-    await act(async () => {
-      await launcher.refreshInstances();
-    });
+    const unpin = [...document.querySelectorAll<HTMLElement>("[role='menuitem']")].find((el) => el.textContent === SIDEBAR_COPY.unpin);
+    if (unpin === undefined) throw new Error("菜单里没有取消固定");
+    act(() => unpin.click());
     await flush();
-    // 固定项正在退场（jsdom 里退场不走帧，节点留着）；菜单随实例一起不画了
-    expect(document.querySelector("[role='menu']")).toBeNull();
-
-    act(() => {
-      item("pin:创造").dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
-    });
-    act(() => {
-      vi.advanceTimersByTime(TOOLTIP_TIMING.sidebarDelay);
-    });
-    const tips = [...document.querySelectorAll("[role='tooltip']")].map((tip) => tip.textContent);
-    expect(tips.some((text) => text !== null && text.startsWith("创造"))).toBe(true);
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["创造", "空岛"] }]);
+    expect(document.activeElement).toBe(item("pin:创造"));
   });
 
   it("菜单键打开固定实例的菜单，「下移」把它和下一项对调并写入", async () => {
@@ -1102,5 +1410,51 @@ describe("侧栏", () => {
     expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["创造", "生存", "空岛"] }]);
     const pins = [...document.querySelectorAll<HTMLElement>("[data-sidebar-item^='pin:']")].map((el) => el.dataset.sidebarItem);
     expect(pins).toEqual(["pin:创造", "pin:生存", "pin:空岛"]);
+  });
+
+  it("末尾有安装中的项：上移下移只在已落库的项之间算，紧挨在它前面的项不能下移，它自己不能移，点了也不写入", async () => {
+    await mountWithInstalling(["生存", "创造"]);
+    expect(pinOrder()).toEqual(["pin:生存", "pin:创造", "pin:新世界"]);
+    /** 键盘打开 name 那一项的菜单，返回其中「上移」「下移」两项。 */
+    async function moveItemsOf(name: string) {
+      act(() => item(`pin:${name}`).focus());
+      keydown(item(`pin:${name}`), "ContextMenu");
+      await flush();
+      const menu = [...document.querySelectorAll("[role='menu']")].find((el) => el.getAttribute("aria-label") === SIDEBAR_COPY.menuLabel(name) && el.closest("[data-exiting]") === null);
+      if (menu === undefined) throw new Error(`没有 ${name} 的菜单`);
+      const entry = (label: string) => {
+        const found = [...menu.querySelectorAll<HTMLElement>("[role='menuitem']")].find((el) => el.textContent === label);
+        if (found === undefined) throw new Error(`${name} 的菜单里没有 ${label}`);
+        return found;
+      };
+      return { up: entry(SIDEBAR_COPY.moveUp), down: entry(SIDEBAR_COPY.moveDown) };
+    }
+
+    const last = await moveItemsOf("创造");
+    expect(last.up.getAttribute("aria-disabled")).toBeNull();
+    expect(last.down.getAttribute("aria-disabled")).toBe("true");
+    act(() => last.down.click());
+    await flush();
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
+    keydown(window, "Escape");
+    await flush();
+
+    const installing = await moveItemsOf("新世界");
+    expect(installing.up.getAttribute("aria-disabled")).toBe("true");
+    expect(installing.down.getAttribute("aria-disabled")).toBe("true");
+    act(() => installing.up.click());
+    await flush();
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
+    keydown(window, "Escape");
+    await flush();
+
+    // 已落库的两项之间照常对调，写下去的不含安装中的项
+    const first = await moveItemsOf("生存");
+    expect(first.up.getAttribute("aria-disabled")).toBe("true");
+    expect(first.down.getAttribute("aria-disabled")).toBeNull();
+    act(() => first.down.click());
+    await flush();
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["创造", "生存"] }]);
+    expect(pinOrder()).toEqual(["pin:创造", "pin:生存", "pin:新世界"]);
   });
 });

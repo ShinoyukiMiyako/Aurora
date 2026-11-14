@@ -14,7 +14,7 @@ import { SPEED_REFRESH_MS } from "../lib/progress-display";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import type { DownloadSource, UpdaterPhase } from "../state/updater/machine";
-import { drainFrames, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
+import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, deferred, emit, resetRecorder, settle, type Deferred } from "../test/launcher";
 import modalStyles from "../ui/Modal.module.css";
@@ -227,22 +227,27 @@ describe("下载进度的文字", () => {
   const sizeText = () => dialog().querySelector(`.${styles.progressText}`)?.textContent;
   const barValue = () => dialog().querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow");
 
-  it("进度条随每条进度事件走，已下大小的字每 500 ms 才换一次", async () => {
+  it("进度条随每条进度事件走；已下大小从 0 开始传的第一条立即换上，不停在 0 B，之后的字每 500 ms 才换一次", async () => {
     const taskId = await startDownload();
     progress(taskId, 0);
     await flush();
     expect(sizeText()).toBe(UPDATE_COPY.progress(formatBytes(0), formatBytes(TOTAL)));
     const step = SPEED_REFRESH_MS / 5;
-    for (let i = 1; i <= 4; i++) {
+    await act(() => vi.advanceTimersByTimeAsync(step));
+    progress(taskId, TOTAL / 10);
+    await flush();
+    expect(barValue()).toBe("10");
+    expect(sizeText()).toBe(UPDATE_COPY.progress(formatBytes(TOTAL / 10), formatBytes(TOTAL)));
+    for (let i = 2; i <= 5; i++) {
       await act(() => vi.advanceTimersByTimeAsync(step));
       progress(taskId, (TOTAL * i) / 10);
       await flush();
       expect(barValue()).toBe(String(i * 10));
-      expect(sizeText()).toBe(UPDATE_COPY.progress(formatBytes(0), formatBytes(TOTAL)));
+      expect(sizeText()).toBe(UPDATE_COPY.progress(formatBytes(TOTAL / 10), formatBytes(TOTAL)));
     }
-    // 间隔满的那一刻换上最近报上来的那一条
+    // 换上第一条之后间隔满的那一刻换上最近报上来的那一条
     await act(() => vi.advanceTimersByTimeAsync(step));
-    expect(sizeText()).toBe(UPDATE_COPY.progress(formatBytes((TOTAL * 4) / 10), formatBytes(TOTAL)));
+    expect(sizeText()).toBe(UPDATE_COPY.progress(formatBytes((TOTAL * 5) / 10), formatBytes(TOTAL)));
   });
 
   it("换源后进度从 0 重来：字立即回到 0，不停在作废的旧值上", async () => {
@@ -255,6 +260,34 @@ describe("下载进度的文字", () => {
     await flush();
     // 换源时总量也回到未知，只写已下大小
     expect(sizeText()).toBe(formatBytes(0));
+  });
+
+  it("换源与新源的第一条进度落在同一次渲染里：进度条直接跳到新值，不沿弹簧从上一个源的位置倒退着滑回去", async () => {
+    const taskId = await startDownload();
+    progress(taskId, (TOTAL * 8) / 10);
+    await flush();
+    const fill = () => {
+      const el = dialog().querySelector<HTMLElement>('[role="progressbar"] > span');
+      if (el === null) throw new Error("下载进度条没有填充层");
+      return el;
+    };
+    /** 填充层此刻的 translateX 百分数：(进度 − 1) × 100。 */
+    const offset = () => {
+      const match = /^translateX\((-?[\d.]+)%\)$/.exec(fill().style.transform);
+      if (match === null) throw new Error(`填充层的位移读不出：${fill().style.transform}`);
+      return Number(match[1]);
+    };
+    const before = fill();
+    expect(offset()).toBeCloseTo(-20, 6);
+    // 两条事件同一次 act：中间那个总量未知的不定进度不提交，定进度的条不重挂
+    act(() => {
+      emit(CORE_EVENT, { kind: "source", task_id: taskId, index: 1, count: 3, name: "hk" });
+      emit(CORE_EVENT, { kind: "download", task_id: taskId, total: 1, finished: 0, bytes: TOTAL / 10, total_bytes: TOTAL, speed: 0 });
+    });
+    expect(fill()).toBe(before);
+    expect(barValue()).toBe("10");
+    await stepFrames(1);
+    expect(offset()).toBeCloseTo(-90, 6);
   });
 });
 

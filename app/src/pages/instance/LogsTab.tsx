@@ -170,7 +170,7 @@ function ConsoleCard({ inst, queryId, ops }: LogsTabProps) {
   return (
     <Card padding="none" className={styles.console}>
       {/* 占位里的卡头整层对读屏隐藏：加载期间在占位外面另给读屏一个同名标题，内容到了由内容自己的卡头接替 */}
-      {gate.view !== "content" && <h3 className={styles.consoleHeading}>{LOGS_COPY.consoleTitle}</h3>}
+      {gate.view !== "content" && <h3 className="sk-sr-only">{LOGS_COPY.consoleTitle}</h3>}
       <Loadable view={gate.view} skeleton={<ConsoleSkeleton />} className={styles.consoleFill} contentClassName={styles.consoleFill}>
         {content}
       </Loadable>

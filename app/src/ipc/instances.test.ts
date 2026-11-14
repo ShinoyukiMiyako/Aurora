@@ -35,7 +35,7 @@ import {
 } from "./instances";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners } from "./mock/events";
-import { acquireMockInstance, addMockInstance, loseMockCoverImage, loseMockLoaderLibrary, MOCK_INSTALL_STEPS, MOCK_STEP_MS } from "./mock/handlers/instances";
+import { acquireMockInstance, addMockInstance, loseMockCoverImage, loseMockLoaderLibrary, MOCK_INSTALL_STEPS, MOCK_STEP_MS, recordMockPack } from "./mock/handlers/instances";
 import { endMockGame, reset as resetLaunchMock, setMockPlayRecordsUnreadable } from "./mock/handlers/launch";
 import { launchGame, playStats } from "./launch";
 import { exportModpack } from "./modpack";
@@ -226,6 +226,7 @@ describe("mock：列表、内容与元数据", () => {
       java_major: 21,
       mod_count: 12,
       world_count: 2,
+      resource_pack_count: 2,
       isolated: true,
       description: "和朋友的周末服务器",
       cover: "cherry_planks",
@@ -237,7 +238,7 @@ describe("mock：列表、内容与元数据", () => {
       last_played_at: null,
     });
     // 原版正式版跟随全局时不隔离；整合包实例带上整合包自己的名字与版本。
-    expect(list.find((i) => i.id === "1.21.1")).toMatchObject({ isolated: false, world_count: 0, memory_mb: null });
+    expect(list.find((i) => i.id === "1.21.1")).toMatchObject({ isolated: false, world_count: 0, resource_pack_count: 0, memory_mb: null });
     expect(list.find((i) => i.id === "RLCraft")?.modpack).toEqual({
       platform: "curseforge",
       project_id: "285109",
@@ -246,7 +247,7 @@ describe("mock：列表、内容与元数据", () => {
       version: "2.9.3",
     });
     const broken = list.find((i) => i.id === "没装完");
-    expect(broken).toMatchObject({ status: "broken", mod_count: null, world_count: null, isolated: null, mc_version: null });
+    expect(broken).toMatchObject({ status: "broken", mod_count: null, world_count: null, resource_pack_count: null, isolated: null, mc_version: null });
     expect(broken?.incomplete).toMatchObject({ kind: "install", outcome: "failed", spec: { loader: "neoforge" } });
   });
 
@@ -265,6 +266,21 @@ describe("mock：列表、内容与元数据", () => {
     expect(error.code).toBe("instance_failed");
     expect(detail(error).id).toBe("没装完");
     expect((await rejection(listInstanceContent("ghost"))).code).toBe("version_not_installed");
+  });
+
+  it("列表的 resource_pack_count 与内容里列出的资源包是同一份：每个就绪实例都对得上，装上新包加一，同名覆盖与装光影不加", async () => {
+    const counts = async (): Promise<[string, number | null, number][]> => {
+      const ready = (await listInstances()).filter((i) => i.status === "ready");
+      return Promise.all(ready.map(async (i): Promise<[string, number | null, number]> => [i.id, i.resource_pack_count, (await listInstanceContent(i.id)).resource_packs.length]));
+    };
+    for (const [id, listed, packs] of await counts()) expect(listed, id).toBe(packs);
+
+    recordMockPack("樱花生存", "resource_pack", "Stay True.zip", 1024);
+    recordMockPack("樱花生存", "resource_pack", "Faithful 32x.zip", 2048);
+    recordMockPack("樱花生存", "shader", "BSL.zip", 1024);
+    const after = await counts();
+    for (const [id, listed, packs] of after) expect(listed, id).toBe(packs);
+    expect(after.find(([id]) => id === "樱花生存")?.[1]).toBe(3);
   });
 
   it("版本清单附带每个版本可装的加载器，加载器版本新的在前，所需 Java 按版本给出", async () => {
@@ -454,7 +470,7 @@ describe("mock：新建与补全", () => {
 
       expect(await done).toEqual({ reinstalled: true, libraries: 12, assets: 0, natives: 0 });
       const after = await find(FABRIC);
-      expect(after).toMatchObject({ status: "ready", incomplete: null, activity: null, mc_version: before.mc_version, loaders: before.loaders, mod_count: before.mod_count, world_count: before.world_count });
+      expect(after).toMatchObject({ status: "ready", incomplete: null, activity: null, mc_version: before.mc_version, loaders: before.loaders, mod_count: before.mod_count, world_count: before.world_count, resource_pack_count: before.resource_pack_count });
       expect((await listInstanceContent(FABRIC)).worlds).toEqual(worlds);
     });
 

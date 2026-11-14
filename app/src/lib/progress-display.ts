@@ -127,13 +127,15 @@ function reachedTotal(raw: number, total: number | null): boolean {
 
 /**
  * 报上来一个新的累计量。离上次换字满 SPEED_REFRESH_MS 才换上，不满的由调用方定时补上（publishCount）。
- * 不平滑：累计量本身就是单调走的，显示的永远是某一刻真实报上来的值。两种情况不等间隔、直接换上：
+ * 不平滑：累计量本身就是单调走的，显示的永远是某一刻真实报上来的值。三种情况不等间隔、直接换上：
  * - 变小了：换源后从 0 重来。停在比真实大的旧值上，等于把已经作废的进度多挂半拍；
+ * - 从 0 开始传（显示的还是 0）：与速度的「从 0 开始传」同一口径。挂载或换源时记下的 0 不是一个该停满间隔的读数，
+ *   那半拍里数据已经在流、旁边的百分数早已走起来，字还写「0 B」就和它对不上；
  * - 到了总量：传完的那一刻进度条正推到满格，字要同时到「y / y」，不能还差一截。
  */
 export function feedCount(s: CountDisplay, raw: number, total: number | null, now: number): CountDisplay {
   assertCount(raw);
-  if (raw < s.raw || reachedTotal(raw, total) || now - s.shownAt >= SPEED_REFRESH_MS) return { raw, shown: raw, shownAt: now };
+  if (raw < s.raw || (s.shown === 0 && raw > 0) || reachedTotal(raw, total) || now - s.shownAt >= SPEED_REFRESH_MS) return { raw, shown: raw, shownAt: now };
   return { raw, shown: s.shown, shownAt: s.shownAt };
 }
 

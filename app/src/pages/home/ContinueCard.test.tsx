@@ -13,6 +13,7 @@ import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
+import { DEFAULT_UI_SHAPE, UiShapeProvider } from "../../state/ui-shape";
 import { drainFrames, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, configDto, instanceDto, resetRecorder, settle } from "../../test/launcher";
@@ -63,15 +64,17 @@ function deferred<T>() {
 async function mount() {
   view = render(
     <AppearanceProvider initial={DEFAULT_APPEARANCE}>
-      <LauncherProvider>
-        <ShellProvider>
-          <RemoteImageProvider resolve={async (url) => url}>
-            <Probe />
-            <HomePage route={{ page: "home" }} />
-          </RemoteImageProvider>
-          <OverlayRoot />
-        </ShellProvider>
-      </LauncherProvider>
+      <UiShapeProvider initial={DEFAULT_UI_SHAPE}>
+        <LauncherProvider>
+          <ShellProvider>
+            <RemoteImageProvider resolve={async (url) => url}>
+              <Probe />
+              <HomePage route={{ page: "home" }} />
+            </RemoteImageProvider>
+            <OverlayRoot />
+          </ShellProvider>
+        </LauncherProvider>
+      </UiShapeProvider>
     </AppearanceProvider>,
   );
   await flush();

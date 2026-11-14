@@ -15,12 +15,15 @@ import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { prefetchGameDirectories } from "../../state/queries/catalog";
 import { invalidate } from "../../state/resource";
+import { DEFAULT_UI_SHAPE, UI_SHAPE_WRITE_DELAY_MS, UiShapeProvider, type UiShape } from "../../state/ui-shape";
 import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import { emulateFocusFixup } from "../../test/focus-fixup";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { CORE_EVENT } from "../../ipc/tasks";
 import { REFLOW_PAUSED_ATTR } from "../../lib/reflow";
 import { bootOverrides, callsOf, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import bannerStyles from "../../ui/Banner.module.css";
+import { LOCK_REASON } from "../instance/copy";
 import { LIBRARY_COPY } from "./copy";
 import LibraryPage from "./index";
 import styles from "./library.module.css";
@@ -60,16 +63,20 @@ function sample(): InstanceDto[] {
 }
 
 let instances: InstanceDto[];
+/** 启动时读到的界面形状：默认没记过。 */
+let shape: UiShape;
 
 const page = () => (
   <AppearanceProvider initial={DEFAULT_APPEARANCE}>
-    <LauncherProvider>
-      <ShellProvider>
-        <Probe />
-        <LibraryPage />
-        <OverlayRoot />
-      </ShellProvider>
-    </LauncherProvider>
+    <UiShapeProvider initial={shape}>
+      <LauncherProvider>
+        <ShellProvider>
+          <Probe />
+          <LibraryPage />
+          <OverlayRoot />
+        </ShellProvider>
+      </LauncherProvider>
+    </UiShapeProvider>
   </AppearanceProvider>
 );
 
@@ -140,6 +147,7 @@ beforeEach(() => {
   vi.useFakeTimers({ now: NOW });
   resetRecorder(ipc);
   resetLibraryView();
+  shape = DEFAULT_UI_SHAPE;
   stubMatchMedia(false);
   stubResizeObserver();
   stubCanvas();
@@ -192,6 +200,21 @@ describe("实例库：列表与页头", () => {
     expect(broken?.querySelector("ul")).toBeNull();
   });
 
+  it("损坏原因是统计行位置上的一行：警示图标加省略的文字，悬停看全文", async () => {
+    const reason = "缺少版本 JSON，也没有记下当初装的是什么加载器与版本";
+    instances = instances.map((i) => (i.id === "坏掉的" ? { ...i, broken_reason: reason } : i));
+    await mount();
+    const card = byText<HTMLButtonElement>("article button", "坏掉的").closest("article");
+    if (card === null) throw new Error("找不到卡片");
+    const line = card.querySelector<HTMLElement>(`.${styles.broken}`);
+    if (line === null) throw new Error("损坏的卡片上没有原因那一行");
+    expect(line.getAttribute("title")).toBe(reason);
+    expect(line.querySelector(`.${styles.ellipsis}`)?.textContent).toBe(reason);
+    expect(line.querySelectorAll("svg")).toHaveLength(1);
+    // 不再是带内边距与描边的提示框
+    expect(line.hasAttribute("data-tone")).toBe(false);
+  });
+
   it("游玩记录读不出：卡片统计写读不到，不写从未游玩与 0m；页头不写累计 0", async () => {
     instances = instances.map((i) => ({ ...i, playtime_min: null, last_played_at: null, play_error: "解析 游玩记录 失败" }));
     await mount();
@@ -241,6 +264,100 @@ describe("实例库：列表与页头", () => {
     expect(shell.createInstance).toEqual({ open: true, preset: null });
     click(byText("header button", LIBRARY_COPY.importModpack));
     expect(nav.route).toEqual({ page: "discover", kind: "modpack" });
+  });
+});
+
+describe("实例库：修复横幅按记下的形状占位", () => {
+  /** 页面上的横幅外框，退场中的（包在带 inert 的层里）也算。 */
+  const banners = () => [...document.querySelectorAll<HTMLElement>(`.${bannerStyles.banner}`)];
+  const liveBanners = () => banners().filter((el) => el.closest("[inert]") === null);
+  const repairButtons = () => [...document.querySelectorAll("button")].filter((b) => b.textContent === LIBRARY_COPY.repairOne);
+  /** 横幅里各处加载层的骨架层（整层 aria-hidden、里面是骨架条）。 */
+  const skeletonLayers = (banner: HTMLElement) => [...banner.querySelectorAll('[aria-busy="true"] > [aria-hidden="true"]')];
+  const advance = (ms: number) =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+
+  it("记下有横幅、列表还在读：首帧就有同一外框的横幅，文字与按钮的位置是骨架，隐身期里看不见", async () => {
+    shape = { recentCards: 0, repairBanner: true };
+    ipc.overrides.set("list_instances", () => deferred<InstanceDto[]>().promise);
+    await mount();
+    const [held] = liveBanners();
+    expect(liveBanners()).toHaveLength(1);
+    expect(held.getAttribute("data-tone")).toBe("warn");
+    expect(held.textContent).toBe("");
+    expect(repairButtons()).toEqual([]);
+    // 标题、说明、按钮三处骨架，等待期都只占位
+    expect(held.querySelectorAll("[data-pending]")).toHaveLength(3);
+    // 过了隐身期与网格的骨架同时显出来
+    await advance(300);
+    expect(held.querySelectorAll("[data-pending]")).toHaveLength(0);
+    expect(skeletonLayers(held)).toHaveLength(3);
+  });
+
+  it("列表到了、有损坏实例：在同一个外框里换上标题、说明与按钮；记下的没变，不写", async () => {
+    shape = { recentCards: 0, repairBanner: true };
+    const list = deferred<InstanceDto[]>();
+    ipc.overrides.set("list_instances", () => list.promise);
+    await mount();
+    const [held] = liveBanners();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+      list.resolve(instances);
+      await settle();
+    });
+    expect(liveBanners()).toEqual([held]);
+    expect(held.textContent).toBe("1 个实例需要修复「坏掉的」缺少游戏文件，补全后就能启动。立即修复");
+    expect(repairButtons()).toHaveLength(1);
+    await advance(5 * UI_SHAPE_WRITE_DELAY_MS);
+    expect(callsOf(ipc, "set_ui_shape")).toEqual([]);
+  });
+
+  it("列表到了、没有损坏实例：占位的横幅淡出让出位置，记下这次没有横幅", async () => {
+    shape = { recentCards: 0, repairBanner: true };
+    instances = instances.filter((i) => i.status !== "broken");
+    const list = deferred<InstanceDto[]>();
+    ipc.overrides.set("list_instances", () => list.promise);
+    await mount();
+    const [held] = liveBanners();
+    await act(async () => {
+      list.resolve(instances);
+      await settle();
+    });
+    expect(liveBanners()).toEqual([]);
+    expect(held.closest("[inert]")).not.toBeNull();
+    await advance(UI_SHAPE_WRITE_DELAY_MS);
+    expect(held.isConnected).toBe(false);
+    expect(callsOf(ipc, "set_ui_shape")).toEqual([{ patch: { repair_banner: false } }]);
+  });
+
+  it("没记过横幅：列表还在读时不占位，读完有损坏实例时横幅随内容出现，记下这次有横幅", async () => {
+    const list = deferred<InstanceDto[]>();
+    ipc.overrides.set("list_instances", () => list.promise);
+    await mount();
+    expect(banners()).toEqual([]);
+    await act(async () => {
+      list.resolve(instances);
+      await settle();
+    });
+    expect(repairButtons()).toHaveLength(1);
+    await advance(UI_SHAPE_WRITE_DELAY_MS - 1);
+    expect(callsOf(ipc, "set_ui_shape")).toEqual([]);
+    await advance(1);
+    expect(callsOf(ipc, "set_ui_shape")).toEqual([{ patch: { repair_banner: true } }]);
+  });
+
+  it("实例列表读取失败：占位的横幅撤下，不把失败记成没有横幅", async () => {
+    shape = { recentCards: 0, repairBanner: true };
+    ipc.overrides.set("list_instances", () => {
+      throw new IpcError("io_failed", "versions 目录读不出来");
+    });
+    await mount();
+    expect(launcher.state.status.instances.kind).toBe("error");
+    expect(liveBanners()).toEqual([]);
+    await advance(5 * UI_SHAPE_WRITE_DELAY_MS);
+    expect(callsOf(ipc, "set_ui_shape")).toEqual([]);
   });
 });
 
@@ -304,9 +421,10 @@ describe("实例库：筛选、搜索与空状态", () => {
   /** 骨架在等待期：照常占着位置，但不可见。 */
   const skeletonHidden = () => skeletonGrid()?.closest("[data-pending]") !== null;
   const repairBanner = () => [...document.querySelectorAll("button")].some((b) => b.textContent === LIBRARY_COPY.repairOne);
+  /** 网格那一层加载门的播报区：Loadable 的 busyLabel 挂在它根元素前面，根元素里是骨架网格或真实网格。 */
   const loadingStatus = () => {
-    const el = document.querySelector<HTMLElement>(`.${styles.srOnly}[role="status"]`);
-    if (el === null) throw new Error("没有加载说明的状态区");
+    const el = [...document.querySelectorAll<HTMLElement>('[role="status"]')].find((s) => s.nextElementSibling?.querySelector(`.${styles.grid}`) != null);
+    if (el === undefined) throw new Error("没有加载说明的状态区");
     return el;
   };
 
@@ -1166,6 +1284,51 @@ describe("实例库：动作", () => {
     expect(await reasonOf(item)).toBe(LIBRARY_COPY.menu.pinFull);
   });
 
+  it("导入中的整合包占位项：图钉与菜单项禁用、悬停说明要等导入完成，点了不写固定列表；新建的占位项照常能改固定", async () => {
+    ipc.overrides.set("install_modpack", () => new Promise(() => undefined));
+    ipc.overrides.set("install_version", () => new Promise(() => undefined));
+    await mount();
+    await act(async () => {
+      await launcher.actions.installModpack({
+        source: { kind: "file", path: "D:/整合包/周末联机.mrpack" },
+        name: "周末联机",
+        cover: "grass",
+        packName: "周末联机",
+        packVersion: "1.0.0",
+        modCount: 12,
+        mcVersion: "1.21.1",
+        loader: "fabric",
+        loaderVersion: "0.16.10",
+        excludedOptional: [],
+      });
+      await launcher.actions.createInstance({ name: "周末生存", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "cherry_planks" });
+      await settle();
+    });
+    expect(launcher.state.tasks.filter((t) => t.kind === "modpack").map((t) => t.status)).toEqual(["running"]);
+    const before = callsOf(ipc, "set_sidebar_pins").length;
+
+    const pin = byLabel("把「周末联机」固定到侧栏");
+    expect(pin.getAttribute("aria-disabled")).toBe("true");
+    // 提示照常以名称开头，原因写在第二行
+    expect(await reasonOf(pin)).toBe(LIBRARY_COPY.pin("周末联机") + LOCK_REASON.pinImporting);
+    click(pin);
+    await flush();
+    expect(callsOf(ipc, "set_sidebar_pins")).toHaveLength(before);
+    expect(toastTitles()).toEqual([]);
+
+    click(byLabel("「周末联机」的更多操作"));
+    const item = menuItem(LIBRARY_COPY.menu.pin);
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(item)).toBe(LOCK_REASON.pinImporting);
+    click(item);
+    await flush();
+    expect(callsOf(ipc, "set_sidebar_pins")).toHaveLength(before);
+    expect(toastTitles()).toEqual([]);
+
+    // 新建的占位项由状态层记下装好后要不要固定，图钉不受影响
+    expect(byLabel("从侧栏取消固定「周末生存」").getAttribute("aria-disabled")).toBeNull();
+  });
+
   it("设为当前实例：写配置并通知；之后卡片标出「当前」、菜单项禁用", async () => {
     await mount();
     click(byLabel("「原版」的更多操作"));
@@ -1224,6 +1387,130 @@ describe("实例库：动作", () => {
     await flush();
     expect(callsOf(ipc, "delete_instance")).toEqual([{ id: "原版" }]);
     expect(toastTitles()).toContain("info:已删除「原版」");
+  });
+
+  describe("删除：框先开、清点结果晚到", () => {
+    const world = (dir: string, name: string | null, size: number): WorldDto => ({
+      dir_name: dir,
+      level_status: "ok",
+      level_error: null,
+      name,
+      mode: "survival",
+      last_played: null,
+      size_bytes: size,
+      modified_at: null,
+    });
+    const preview = (over: { worlds?: WorldDto[]; dependents?: string[] } = {}) => ({
+      id: "原版",
+      worlds: over.worlds ?? [],
+      size_bytes: 0,
+      file_count: 0,
+      dependents: over.dependents ?? [],
+      activity: null,
+      used_by: null,
+      backups_dir: "D:/Games/.minecraft/.petalfall/backups/instances/原版",
+      backup_count: 0,
+    });
+    const openDelete = async () => {
+      click(byLabel("「原版」的更多操作"));
+      click(menuItem(LIBRARY_COPY.menu.remove));
+      await flush();
+    };
+    const liveLayers = () => document.querySelectorAll("[data-sk-modal-layer]:not([data-exiting])");
+
+    // 清点是一次扫盘，大实例要等一会儿：点了删除到弹框之间不能什么反应都没有，等的时候也不能按得到确认键
+    it("点了马上开框：清点完之前正文占位、确认键不可按，点了不删；清点到了在同一个框里换成存档清单再确认", async () => {
+      const pending = deferred<ReturnType<typeof preview>>();
+      ipc.overrides.set("preview_instance_deletion", () => pending.promise);
+      ipc.overrides.set("delete_instance", () => ({ existed: true }));
+      await mount();
+      await openDelete();
+      const dialog = document.querySelector<HTMLElement>('[role="dialog"]');
+      if (dialog === null) throw new Error("点了删除没有马上开框");
+      expect(dialog.querySelector("h2")?.textContent).toBe("删除「原版」？");
+      expect(callsOf(ipc, "preview_instance_deletion")).toEqual([{ id: "原版" }]);
+      const early = dialogButton("删除实例");
+      expect(early.getAttribute("aria-disabled")).toBe("true");
+      // 正文是加载占位：还没有任何清点结果
+      expect(dialog.querySelector("[aria-busy='true']")).not.toBeNull();
+      expect(dialog.textContent).not.toContain(DELETE_INSTANCE_COPY.noWorlds);
+      click(early);
+      await flush();
+      expect(callsOf(ipc, "delete_instance")).toEqual([]);
+      expect(liveLayers()).toHaveLength(1);
+
+      await act(async () => {
+        pending.resolve(preview({ worlds: [world("w1", "新的世界", 512 * 1024), world("生存", null, 512 * 1024)] }));
+        await settle();
+      });
+      await afterMotion();
+      expect(document.querySelector('[role="dialog"]')).toBe(dialog);
+      expect(dialog.querySelector("[aria-busy='true']")).toBeNull();
+      expect(dialog.textContent).toContain("实例文件夹会移入回收站，其中的 2 个存档（共 1.0 MB）也会一起删除：");
+      expect([...dialog.querySelectorAll("li:not([inert] li)")].map((li) => li.textContent)).toEqual(["新的世界", "生存"]);
+      const ready = dialogButton("删除实例和 2 个存档");
+      expect(ready.getAttribute("aria-disabled")).toBeNull();
+      click(ready);
+      await flush();
+      expect(callsOf(ipc, "delete_instance")).toEqual([{ id: "原版" }]);
+    });
+
+    it("清点失败：框里写明原因，确认键一直不可按，取消键改叫「关闭」；关掉之后不删", async () => {
+      ipc.overrides.set("preview_instance_deletion", () => {
+        throw new IpcError("io_failed", "拒绝访问：saves");
+      });
+      await mount();
+      await openDelete();
+      await afterMotion();
+      const dialog = document.querySelector<HTMLElement>('[role="dialog"]');
+      expect(dialog?.textContent).toContain(DELETE_INSTANCE_COPY.previewFailed("拒绝访问：saves"));
+      const confirm = dialogButton("删除实例");
+      expect(confirm.getAttribute("aria-disabled")).toBe("true");
+      click(confirm);
+      await flush();
+      expect(callsOf(ipc, "delete_instance")).toEqual([]);
+      // 外层统一错误处理照常记一笔
+      expect(toastTitles()).toContain("error:没能删除「原版」");
+      click(dialogButton(DELETE_INSTANCE_COPY.close));
+      await flush();
+      expect(liveLayers()).toHaveLength(0);
+      expect(callsOf(ipc, "delete_instance")).toEqual([]);
+    });
+
+    it("清点看出有实例依赖它：框里说明是谁依赖它，确认键一直不可按，不另弹提示、不删", async () => {
+      ipc.overrides.set("preview_instance_deletion", () => preview({ dependents: ["机械动力"] }));
+      await mount();
+      await openDelete();
+      await afterMotion();
+      const dialog = document.querySelector<HTMLElement>('[role="dialog"]');
+      expect(dialog?.textContent).toContain("不能删除「原版」：实例「机械动力」依赖它，要先删除依赖它的实例。");
+      expect(dialog?.textContent).not.toContain(DELETE_INSTANCE_COPY.noWorlds);
+      expect(dialogButton("删除实例").getAttribute("aria-disabled")).toBe("true");
+      click(dialogButton("删除实例"));
+      await flush();
+      expect(toastTitles().filter((t) => t.startsWith("warning:"))).toEqual([]);
+      click(dialogButton(DELETE_INSTANCE_COPY.close));
+      await flush();
+      expect(liveLayers()).toHaveLength(0);
+      expect(callsOf(ipc, "delete_instance")).toEqual([]);
+    });
+
+    it("清点期间点了取消：框关上，清点回来之后不再弹框、不删", async () => {
+      const pending = deferred<ReturnType<typeof preview>>();
+      ipc.overrides.set("preview_instance_deletion", () => pending.promise);
+      await mount();
+      await openDelete();
+      click(dialogButton(CONFIRM_COPY.cancel));
+      await flush();
+      expect(liveLayers()).toHaveLength(0);
+      await act(async () => {
+        pending.resolve(preview({ worlds: [world("w1", "新的世界", 1024)] }));
+        await settle();
+      });
+      await afterMotion();
+      expect(liveLayers()).toHaveLength(0);
+      expect(callsOf(ipc, "delete_instance")).toEqual([]);
+    });
   });
 
   it("删除排队中的新建实例：磁盘上还没有目录，不问后端预览，确认框说明会先取消任务", async () => {

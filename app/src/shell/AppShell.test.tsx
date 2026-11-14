@@ -613,9 +613,9 @@ describe("按片订阅", () => {
     expect(pageRenders.home).toBe(before);
   });
 
-  // 外壳根整份读 useShell：命令面板开合、窗口失焦聚焦都让它重渲染。主界面里的 motion 元素都读外壳根那一层的在场上下文，
+  // 外壳根整份读 useShell：命令面板开合让它重渲染。主界面里的 motion 元素都读外壳根那一层的在场上下文，
   // 上下文每次换新对象的话，它们全跟着重渲染，带布局动画的还要再量一次布局
-  it("外壳根因无关状态重渲染（窗口失焦聚焦、命令面板开合）：主界面里只读在场上下文的组件一次都不重渲染", async () => {
+  it("外壳根因无关状态重渲染（命令面板开合）：主界面里只读在场上下文的组件一次都不重渲染", async () => {
     let presenceRenders = 0;
     /** 页面本身不重渲染时，它再渲染只可能是外壳根那一层的在场上下文换了值。 */
     function PresenceProbe() {
@@ -632,35 +632,21 @@ describe("按片订阅", () => {
     }
     registry = createPageRegistry({ ...pageTable(loads, broken), home: async () => ({ default: ProbePage }) });
     await registry.load("home");
-    const focusHandlers: ((focused: boolean) => void)[] = [];
-    port = {
-      ...port,
-      isFocused: async () => true,
-      onFocusChanged: async (handler) => {
-        focusHandlers.push(handler);
-        return () => undefined;
-      },
-    };
     await mount();
     expect(pageShown()).toBe("home");
-    expect(shell.petalsPaused).toBe(false);
     const before = presenceRenders;
     expect(before).toBeGreaterThan(0);
 
     const toggles = 3 + Math.floor(Math.random() * 5);
     for (let i = 0; i < toggles; i++) {
-      // 花瓣暂停跟着焦点翻转：外壳上下文换了值，读它的外壳根这一次必然重渲染
-      act(() => focusHandlers.forEach((handler) => handler(false)));
-      expect(shell.petalsPaused).toBe(true);
-      act(() => focusHandlers.forEach((handler) => handler(true)));
-      expect(shell.petalsPaused).toBe(false);
+      // 面板开合换了外壳上下文的值，读它的外壳根这一次必然重渲染
+      act(() => shell.openPalette());
+      await flush();
+      expect(shell.palette.open).toBe(true);
+      act(() => shell.closePalette());
+      await flush();
+      expect(shell.palette.open).toBe(false);
     }
-    act(() => shell.openPalette());
-    await flush();
-    expect(shell.palette.open).toBe(true);
-    act(() => shell.closePalette());
-    await flush();
-    expect(shell.palette.open).toBe(false);
     expect(presenceRenders).toBe(before);
   });
 });

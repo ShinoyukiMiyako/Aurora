@@ -74,6 +74,10 @@
     ],
     "skip_accessibility_onboarding": false,
     "skipped_update_version": "1.0.0-beta.3",
+    "ui_shape": {
+      "recent_cards": 4,
+      "repair_banner": true
+    },
     "update_channel": "beta",
     "version_list_source": "official_first",
     "world_backup": {
@@ -157,6 +161,10 @@
     ],
     "skip_accessibility_onboarding": false,
     "skipped_update_version": "1.0.0-beta.3",
+    "ui_shape": {
+      "recent_cards": 4,
+      "repair_banner": true
+    },
     "update_channel": "beta",
     "version_list_source": "mirror_first",
     "world_backup": {
@@ -240,6 +248,10 @@
     ],
     "skip_accessibility_onboarding": false,
     "skipped_update_version": "1.0.0-beta.3",
+    "ui_shape": {
+      "recent_cards": 4,
+      "repair_banner": true
+    },
     "update_channel": "beta",
     "version_list_source": "auto",
     "world_backup": {
@@ -323,6 +335,10 @@
     ],
     "skip_accessibility_onboarding": false,
     "skipped_update_version": "1.0.0-beta.3",
+    "ui_shape": {
+      "recent_cards": 4,
+      "repair_banner": true
+    },
     "update_channel": "beta",
     "version_list_source": "official_first",
     "world_backup": {
@@ -406,6 +422,10 @@
     ],
     "skip_accessibility_onboarding": false,
     "skipped_update_version": "1.0.0-beta.3",
+    "ui_shape": {
+      "recent_cards": 4,
+      "repair_banner": true
+    },
     "update_channel": "beta",
     "version_list_source": "mirror_first",
     "world_backup": {

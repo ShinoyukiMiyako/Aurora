@@ -78,7 +78,11 @@ export function Tabs<T extends string>({ id, value, onChange, items, variant = "
   );
   // 挂载时就在的徽标跟着页面入场，不单独弹入。减少动画时缩放是一步到位的，只留淡入淡出
   const mounted = useMounted();
-  const mark = useReducedMotionConfig() === true ? popMark.reduced : popMark.glyph;
+  const reduced = useReducedMotionConfig() === true;
+  const mark = reduced ? popMark.reduced : popMark.glyph;
+  // 指示块同理：减少动画时布局动画一步到位，指示块会从旧标签瞬移到新标签，改为在新标签上从透明淡入，旧的那一块直接卸载、不留退场。
+  // 挂载时就在的那一块跟着页面入场，自己不淡
+  const indicatorFade = reduced ? { initial: mounted.current ? { opacity: 0 } : false, animate: { opacity: 1, transition: fade.in } } : undefined;
   const placed = useRef(false);
   const disabled = items.map((item) => item.disabled === true);
   const selected = items.findIndex((item) => item.value === value);
@@ -182,6 +186,7 @@ export function Tabs<T extends string>({ id, value, onChange, items, variant = "
                 className={styles.indicator}
                 style={{ borderRadius: indicatorRadius }}
                 transition={springs.settle}
+                {...indicatorFade}
               />
             )}
             <span className={styles.content}>

@@ -20,9 +20,23 @@ import { assemblyExitMs } from "../art/iso/AssemblingBlock";
 import { assembly, capsuleSwap, fade } from "../lib/motion";
 import { feedSpeed, publishSpeed, SPEED_REFRESH_MS, startSpeed } from "../lib/progress-display";
 import { faceSwap, LaunchCapsule, TEXT_SLOTS } from "./LaunchCapsule";
+import { sessionPhaseLabel } from "./launchView";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
+
+// 面上的按钮图标没有自己的状态，按图标名计数，数的就是面（连同胶囊）的渲染次数；方块自己的组装节拍不算在里面。计数外壳直接调用原组件函数
+const iconRenders = vi.hoisted(() => new Map<string, number>());
+vi.mock("../art/Icon", async (orig) => {
+  const mod = await orig<typeof import("../art/Icon")>();
+  return {
+    ...mod,
+    Icon: (props: Parameters<typeof mod.Icon>[0]) => {
+      iconRenders.set(props.name, (iconRenders.get(props.name) ?? 0) + 1);
+      return mod.Icon(props);
+    },
+  };
+});
 
 let view: Rendered | undefined;
 let launcher: LauncherApi;
@@ -434,6 +448,17 @@ describe("换面与文字", () => {
     };
   };
 
+  it("阶段播报区挂在胶囊里、用全局视觉隐藏类，写的是会话阶段", async () => {
+    act(() => {
+      void launcher.actions.launch("生存");
+    });
+    await flush();
+    const session = launcher.state.session;
+    if (session === null) throw new Error("没有会话");
+    const live = [...document.querySelectorAll<HTMLElement>("[aria-live='polite']")].filter((el) => el.closest('[role="group"]') !== null);
+    expect(live.map((el) => [el.className, el.textContent])).toEqual([["sk-sr-only", sessionPhaseLabel(session)]]);
+  });
+
   it("加载面的标题、副行与百分比都按候选里最宽的一条占位，进度怎么走胶囊都不变宽", async () => {
     act(() => {
       void launcher.actions.launch("生存");
@@ -504,6 +529,38 @@ describe("换面与文字", () => {
     expect(sub()).toEqual([SESSION_COPY.downloadProgress(2, 10, averaged)]);
     // 平均后的值不是这一刻的瞬时速度
     expect(SESSION_COPY.downloadProgress(2, 10, averaged)).not.toBe(SESSION_COPY.downloadProgress(2, 10, 5 * MB));
+  });
+
+  it("下载阶段速度到点补字只重画副行那一段：胶囊与加载面（取消键等）不跟着重渲染", async () => {
+    act(() => {
+      void launcher.actions.launch("生存");
+    });
+    await flush();
+    const session = launcher.state.session;
+    if (session === null) throw new Error("没有会话");
+    const MB = 1024 * 1024;
+    const report = (finished: number, speed: number) =>
+      act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 4, download: { finished, total: 10, bytes: 0, total_bytes: null, speed } }));
+    const sub = () => {
+      const line = document.querySelectorAll('[data-face="loading"] [data-slot]')[1];
+      if (line === undefined) throw new Error("加载面没有副行");
+      return slotOf(line).shown;
+    };
+    const t0 = Date.now();
+    // 第一次报上来的速度直接写；同一刻再报一个快得多的，字先停在上一拍
+    report(1, MB);
+    report(2, 5 * MB);
+    expect(sub()).toEqual([SESSION_COPY.downloadProgress(2, 10, MB)]);
+    const before = iconRenders.get("x");
+    if (before === undefined) throw new Error("加载面的取消键没有画过");
+
+    act(() => void vi.advanceTimersByTime(SPEED_REFRESH_MS));
+    const averaged = publishSpeed(feedSpeed(startSpeed(MB, t0), 5 * MB, t0), t0 + SPEED_REFRESH_MS).shown;
+    expect(sub()).toEqual([SESSION_COPY.downloadProgress(2, 10, averaged)]);
+    expect(iconRenders.get("x")).toBe(before);
+    // 对照：进度上报让整枚胶囊重渲染，取消键的图标跟着画一次，计数确实看得见面的重渲染
+    report(3, 5 * MB);
+    expect(iconRenders.get("x")).toBeGreaterThan(before);
   });
 
   it("崩溃线索读出来之前副行就在（空着），读出来后只在这一行里换上字", async () => {

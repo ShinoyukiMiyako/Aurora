@@ -177,6 +177,9 @@ pub fn run() {
             // -- appearance --
             commands::appearance::get_appearance,
             commands::appearance::set_appearance,
+            // -- ui_shape --
+            commands::ui_shape::get_ui_shape,
+            commands::ui_shape::set_ui_shape,
             // -- tasks --
             commands::tasks::cancel_task,
             commands::tasks::save_task_journal,

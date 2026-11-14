@@ -79,11 +79,16 @@
   display: block;
   width: 100%;
   height: 100%;
+  transform-origin: center;
+  transition: transform var(--sk-spring-tap-dur) var(--sk-spring-tap);
+}
+
+/* 圆钮的外观只写这一处：减少动画时开态位置上的那一枚（圆钮层的 ::after）与它共用 */
+.knob,
+:global([data-sk-reduced]) .thumb::after {
   border-radius: var(--sk-r-pill);
   background: #FFFFFF;
   box-shadow: 0 1px 3px rgba(60, 20, 40, 0.25);
-  transform-origin: center;
-  transition: transform var(--sk-spring-tap-dur) var(--sk-spring-tap);
 }
 
 .root[aria-checked="true"] .knob {
@@ -94,9 +99,41 @@
   transform: translateX(var(--knob-pull)) scaleX(calc(22 / 18));
 }
 
-:global([data-sk-reduced]) .thumb,
-:global([data-sk-reduced]) .knob {
+/*
+ * 减少动画：圆钮层不平移，关、开两个位置各放一枚圆钮，切换时一枚淡出、一枚淡入，不再一帧跳过去。
+ * 关态那枚是 .knob，开态那枚是圆钮层的 ::after（偏移量与上面的 translateX 相同，只在减少动画时生成）。
+ * 过渡写在目标态上：出现走 dur-in / ease-out，消失走 dur-out / ease-in。只改透明度，挂载时不播
+ */
+:global([data-sk-reduced]) .thumb {
   transition: none;
+}
+
+:global([data-sk-reduced]) .root[aria-checked="true"] .thumb {
+  transform: none;
+}
+
+:global([data-sk-reduced]) .knob {
+  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
+}
+
+:global([data-sk-reduced]) .root[aria-checked="true"] .knob {
+  opacity: 0;
+  transition: opacity var(--sk-dur-out) var(--sk-ease-in);
+}
+
+:global([data-sk-reduced]) .thumb::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(16px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--sk-dur-out) var(--sk-ease-in);
+}
+
+:global([data-sk-reduced]) .root[aria-checked="true"] .thumb::after {
+  opacity: 1;
+  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
 }
 
 :global([data-sk-reduced]) .root:active .knob {

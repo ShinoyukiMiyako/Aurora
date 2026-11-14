@@ -29,6 +29,7 @@ export function summary(id: string, overrides: Partial<InstanceSummary> = {}): I
     dirError: null,
     modCount: 0,
     worldCount: 0,
+    resourcePackCount: 0,
     isolated: false,
     memoryMb: null,
     modpack: null,

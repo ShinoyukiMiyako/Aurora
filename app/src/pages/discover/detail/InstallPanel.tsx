@@ -31,6 +31,7 @@ import { Button } from "../../../ui/Button";
 import { Callout } from "../../../ui/Callout";
 import { Checkbox } from "../../../ui/Checkbox";
 import { Inset } from "../../../ui/Inset";
+import { LabelSlot } from "../../../ui/LabelSlot";
 import { List, ListRow } from "../../../ui/ListRow";
 import { Loadable } from "../../../ui/Loadable";
 import { SearchInput } from "../../../ui/SearchInput";
@@ -93,15 +94,11 @@ const AUTO = "auto";
 
 /**
  * 主按钮的文案：按最长的「安装到 n 个实例」（n 取实例总数）占宽，勾选数变化、换成「更新」时按钮不变宽，不挤动左边的「取消」。
- * 详情还没到时底栏的占位用同一份，到达时按钮宽度不变。占宽的那一份是伪元素：不进文字内容，读屏也只读当前文案。
+ * 详情还没到时底栏的占位用同一份，到达时按钮宽度不变。勾选数与总数位数相同时（勾 10 个、共 11 个）同宽，靠文案槽的等宽数字。
  */
 export function InstallLabel({ current, instanceCount }: { current: string; instanceCount: number }) {
   const widest = instanceCount > 1 ? INSTALL_COPY.installMany(instanceCount) : INSTALL_COPY.install;
-  return (
-    <span className={styles.installLabel} data-widest={widest}>
-      <span>{current}</span>
-    </span>
-  );
+  return <LabelSlot current={current} options={[current, widest]} />;
 }
 
 interface IrisReport {

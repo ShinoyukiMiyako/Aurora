@@ -108,8 +108,14 @@ function typeInto(input: HTMLInputElement, value: string) {
   });
 }
 
+/** 按钮上显示的文案：文案槽（LabelSlot）里叠着全部候选，看得见的只有标着 data-current 的那条。 */
+function labelOf(button: HTMLButtonElement): string | null {
+  const current = button.querySelector("[data-current]");
+  return current === null ? button.textContent : current.textContent;
+}
+
 function buttonByText(text: string, root: ParentNode = document): HTMLButtonElement {
-  const el = [...root.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === text);
+  const el = [...root.querySelectorAll<HTMLButtonElement>("button")].find((b) => labelOf(b) === text);
   if (el === undefined) throw new Error(`找不到按钮 ${text}`);
   return el;
 }
@@ -359,6 +365,27 @@ describe("发现页：搜索", () => {
     expect(nav.route).toEqual({ page: "discover", kind: "shader" });
   });
 
+  it("换类型时新面板从所选标签在标签条上的那一侧横移淡入：往右换从右边来，往左换从左边来", async () => {
+    await mount();
+    const kindTab = (label: string) => {
+      const el = [...document.querySelectorAll<HTMLElement>('[role="tab"]')].find((t) => t.textContent === label);
+      if (el === undefined) throw new Error(`找不到 ${label} 标签`);
+      return el;
+    };
+    const panel = () => {
+      const found = [...document.querySelectorAll<HTMLElement>('[role="tabpanel"]')];
+      if (found.length !== 1) throw new Error(`应只有一个类型面板，实际有 ${found.length} 个`);
+      return found[0];
+    };
+    // 光影排在全部右边隔了三格，Mod 排在光影左边：方向只看先后，不看隔了几格
+    act(() => kindTab("光影").click());
+    await flush();
+    expect([panel().id.endsWith("-panel-shader"), panel().style.opacity, panel().style.transform]).toEqual([true, "0", "translateX(8px)"]);
+    act(() => kindTab("Mod").click());
+    await flush();
+    expect([panel().id.endsWith("-panel-mod"), panel().style.opacity, panel().style.transform]).toEqual([true, "0", "translateX(-8px)"]);
+  });
+
   it("热门分类每枚都留着对勾位：选中与取消只换对勾的显隐与按钮底色，胶囊不变宽", async () => {
     await mount();
     const chips = () => [...document.querySelectorAll<HTMLButtonElement>('[role="group"][aria-label="热门分类"] button')];
@@ -379,15 +406,16 @@ describe("发现页：搜索", () => {
     expect(badge?.textContent).toBe("2");
   });
 
-  it("适配实例与排序两个下拉按最长的选项预留宽度，换选中项时不挤动同排；筛选浮层里撑满的版本下拉不预留", async () => {
+  /** 触发器里叠着撑宽的候选文案（不进文字内容）。 */
+  const reserved = (label: string) => {
+    const trigger = document.querySelector(`button[role="combobox"][aria-label="${label}"]`);
+    if (trigger === null) throw new Error(`找不到下拉 ${label}`);
+    return [...trigger.querySelectorAll("[data-label]")].map((el) => el.getAttribute("data-label")).sort();
+  };
+
+  it("排序下拉按最长的选项预留宽度，换选中项时不挤动同排；适配实例下拉由样式定宽、不放候选；筛选浮层里撑满的版本下拉不预留", async () => {
     await mount({ page: "discover", kind: "mod", forInstance: "生存" });
-    /** 触发器里叠着撑宽的候选文案（不进文字内容）。 */
-    const reserved = (label: string) => {
-      const trigger = document.querySelector(`button[role="combobox"][aria-label="${label}"]`);
-      if (trigger === null) throw new Error(`找不到下拉 ${label}`);
-      return [...trigger.querySelectorAll("[data-label]")].map((el) => el.getAttribute("data-label")).sort();
-    };
-    expect(reserved("适配实例")).toEqual(["选择", "适配：不限", "适配：创造", "适配：生存"].sort());
+    expect(reserved("适配实例")).toEqual([]);
     expect(reserved("排序")).toEqual(["选择", "相关度", "下载量", "关注数", "最新发布", "最近更新"].sort());
 
     const filter = document.querySelector<HTMLButtonElement>('button[aria-label="筛选，2 个条件生效"]');
@@ -395,6 +423,32 @@ describe("发现页：搜索", () => {
     act(() => filter.click());
     await flush();
     expect(reserved("游戏版本")).toEqual([]);
+  });
+
+  it("实例列表晚到、带着很长的实例名：适配实例触发器不按实例名撑宽，选项照常列出", async () => {
+    const list = deferred<unknown>();
+    ipc.overrides.set("list_instances", () => list.promise);
+    await mount();
+    const trigger = document.querySelector<HTMLButtonElement>('button[role="combobox"][aria-label="适配实例"]');
+    if (trigger === null) throw new Error("找不到适配实例下拉");
+    const before = { className: trigger.className, text: trigger.textContent, reserved: reserved("适配实例") };
+    expect(before.className).toContain("fitSelect");
+    expect(before.text).toBe("适配：不限");
+
+    const long = "一个名字相当长的大型科技整合包实例";
+    await act(async () => {
+      list.resolve([instanceDto(long, { loaders: [{ kind: "fabric", version: "0.16.5" }] }), instanceDto("生存")]);
+      await settle();
+    });
+    // 同一个触发器、同样的类名与文字、没有多出撑宽的候选：宽度只由 .fitSelect 定
+    expect(document.querySelector('button[role="combobox"][aria-label="适配实例"]')).toBe(trigger);
+    expect({ className: trigger.className, text: trigger.textContent, reserved: reserved("适配实例") }).toEqual(before);
+    expect(before.reserved).toEqual([]);
+
+    act(() => trigger.click());
+    await flush();
+    const options = [...document.querySelectorAll('[role="option"]')].map((o) => o.querySelector("span span")?.textContent);
+    expect(options).toEqual(["适配：不限", `适配：${long}`, "适配：生存"]);
   });
 
   it("「已装入」一条 installed_sources 取齐全部实例的已装来源，不逐个读 Mod 列表", async () => {
@@ -2311,29 +2365,31 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect(buttonByText("我已下载，重新检查", blockedDialog()).getAttribute("aria-busy")).toBeNull();
   });
 
-  it("主按钮在「我已下载，重新检查」「正在检查…」「继续导入」之间换字时按最宽那条留宽：没在显示的两条只在留宽的取值里，按钮的文字只有当前这条，也不重挂", async () => {
+  it("主按钮在「我已下载，重新检查」「正在检查…」「继续导入」之间换字时按最宽那条留宽：三条始终叠在同一格，看得见的只有当前这条，也不重挂", async () => {
     seedMockDownloads(["blocked-a.jar", "blocked-b.jar"]);
     const gate = deferred<void>();
     ipc.overrides.set("claim_blocked_files", (args) => gate.promise.then(() => mockInvoke("claim_blocked_files", args)));
     await mount({ page: "discover", importFile: BLOCKED_PACK });
     await clickIn(dialog(), "查看这些文件");
     const primary = buttonByText("我已下载，重新检查", blockedDialog());
+    const ALL = ["我已下载，重新检查", "正在检查…", "继续导入"];
+    /** 文案槽：当前显示的那条，与叠在同一格里撑宽的全部候选。 */
     const slot = () => {
-      const el = primary.querySelector<HTMLElement>("[data-reserve-a]");
-      if (el === null) throw new Error("主按钮的文案没有留宽");
-      return [el.textContent, el.dataset.reserveA, el.dataset.reserveB];
+      const shown = primary.querySelector<HTMLElement>("[data-current]");
+      if (shown === null || shown.parentElement === null) throw new Error("主按钮的文案没有留宽");
+      return [shown.textContent, [...shown.parentElement.children].map((el) => el.textContent)];
     };
-    expect(slot()).toEqual(["我已下载，重新检查", "正在检查…", "继续导入"]);
+    expect(slot()).toEqual(["我已下载，重新检查", ALL]);
 
     await clickIn(blockedDialog(), "我已下载，重新检查");
-    expect(slot()).toEqual(["正在检查…", "我已下载，重新检查", "继续导入"]);
+    expect(slot()).toEqual(["正在检查…", ALL]);
 
     await act(async () => {
       gate.resolve();
       await settle();
     });
     expect(buttonByText("继续导入", blockedDialog())).toBe(primary);
-    expect(slot()).toEqual(["继续导入", "我已下载，重新检查", "正在检查…"]);
+    expect(slot()).toEqual(["继续导入", ALL]);
   });
 
   it("文件夹读不了时错误顶替上一次的检查结果：说明块只有一处，旧结果原地淡出、不可交互", async () => {

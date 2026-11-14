@@ -559,8 +559,12 @@ export function dropSuperseded(tasks: readonly Task[], instanceId: string): Task
   return tasks.filter((t) => !(t.status === "failed" && t.instanceId !== null && t.instanceId.toLowerCase() === key && (t.spec.command === "install_version" || t.spec.command === "repair_instance")));
 }
 
-export function clearFinished(tasks: readonly Task[]): Task[] {
-  return tasks.filter(isActiveTask);
+/**
+ * 清除已结束。landing 里的（结束后还在等落地重扫的，见状态容器的 RawState.landing）留着：这一段里实例按它派生安装中，
+ * 入口也按它画满格，剪掉的话实例会在重扫回来之前退回任务开始前扫的那份。落定之后再清就和别的已结束一样清掉。
+ */
+export function clearFinished(tasks: readonly Task[], landing: readonly string[]): Task[] {
+  return tasks.filter((t) => isActiveTask(t) || landing.includes(t.id));
 }
 
 /** 写到玩家选的目录里的导出任务的落点；别的任务、或记录里读不出落点时为 null。 */

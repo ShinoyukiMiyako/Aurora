@@ -22,8 +22,8 @@ import { useNav } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { busyInstanceId, canPinMore, findInstance } from "../../state/selectors";
+import { isActiveTask } from "../../state/tasks";
 import { Appear } from "../../ui/Appear";
-import { Callout } from "../../ui/Callout";
 import { Card, CardTitleButton } from "../../ui/Card";
 import { Cover } from "../../ui/Cover";
 import { IconButton } from "../../ui/IconButton";
@@ -60,6 +60,9 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
   const currentTag = useReducedMotionConfig() === true ? popMark.reduced : popMark.tag;
   const busy = useLauncherSelector((s) => busyInstanceId(s) === id);
   const canPin = useLauncherSelector(canPinMore);
+  // 导入中的整合包占位项：实例目录建好之前后端不认这个名字，固定只会报找不到。新建的占位项不在此列，
+  // 状态层替它记着装好后要不要固定。只在占位项上才去翻任务表
+  const importing = useLauncherSelector((s) => inst.placeholder && s.tasks.some((t) => t.kind === "modpack" && t.instanceId === id && isActiveTask(t)));
   // 崩溃报告不会被之后的正常启动清空：菜单项按「崩溃过」出现，提示只在之后没再正常玩过时给出；
   // 刚崩溃、列表还没重扫到崩溃时刻时，以会话的崩溃态为准
   const viewKind = useLauncherSelector((s) => (findInstance(s, id) === undefined ? null : launchView(s, inst).kind));
@@ -108,8 +111,8 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
     {
       label: inst.pinned ? LIBRARY_COPY.menu.unpin : LIBRARY_COPY.menu.pin,
       icon: inst.pinned ? "pin-off" : "pin",
-      disabled: !pinAllowed,
-      disabledReason: pinAllowed ? undefined : LIBRARY_COPY.menu.pinFull,
+      disabled: importing || !pinAllowed,
+      disabledReason: importing ? LOCK_REASON.pinImporting : pinAllowed ? undefined : LIBRARY_COPY.menu.pinFull,
       onSelect: () => void togglePin(),
     },
     {
@@ -147,13 +150,16 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
   ];
 
   const pinLabel = inst.pinned ? LIBRARY_COPY.unpin(name) : LIBRARY_COPY.pin(name);
+  // 导入中：按带原因的禁用画，点击无效，悬停提示在名称下面写原因。侧栏满了不同：点了由状态层弹上限提示，
+  // 所以只标 aria-disabled、提示换成上限那一句
   const pinButton = (
     <IconButton
       icon="pin"
       label={pinLabel}
       size="sm"
       pressed={inst.pinned}
-      tooltip={pinAllowed}
+      disabledReason={importing ? LOCK_REASON.pinImporting : undefined}
+      tooltip={importing || pinAllowed}
       aria-disabled={pinAllowed ? undefined : true}
       className={styles.pin}
       onClick={() => void togglePin()}
@@ -186,7 +192,7 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
               )}
             </AnimatePresence>
             <span className={styles.grow} />
-            <Tooltip content={TOAST_COPY.pinLimit} disabled={pinAllowed}>
+            <Tooltip content={TOAST_COPY.pinLimit} disabled={importing || pinAllowed}>
               {pinButton}
             </Tooltip>
           </div>
@@ -200,12 +206,10 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
           {name}
         </CardTitleButton>
         <p className={styles.meta}>{description}</p>
-        {/* 损坏原因与统计行互换（开始修复、修好、修复失败）时交叉淡化；卡片随之变高变矮，同网格的其余卡片由网格的让位滑开 */}
+        {/* 损坏原因与统计行互换（开始修复、修好、修复失败）时交叉淡化；两者同高，卡片不变高变矮 */}
         <Appear>
           {inst.status === "broken" ? (
-            <Callout key="broken" tone="warn" className={styles.broken}>
-              {inst.brokenReason}
-            </Callout>
+            <BrokenReason key="broken" reason={inst.brokenReason} />
           ) : (
             <ul key="stats" className={styles.stats} aria-label={LIBRARY_COPY.statsLabel}>
               <Stat icon="history" label={LIBRARY_COPY.lastPlayed} value={inst.playError === null ? formatRelative(inst.lastPlayedAt, now) : LIBRARY_COPY.playUnknown} />
@@ -236,6 +240,17 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
         )}
       </AnimatePresence>
     </Card>
+  );
+}
+
+/** 损坏原因：统计行位置上的一行，后端原文可能很长，省略后悬停看全文。 */
+function BrokenReason({ reason }: { reason: string | null }) {
+  if (reason === null) throw new Error("损坏的实例没有原因");
+  return (
+    <div className={styles.broken} title={reason}>
+      <Icon name="alert" size={16} className={styles.brokenIcon} />
+      <span className={styles.ellipsis}>{reason}</span>
+    </div>
   );
 }
 

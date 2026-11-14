@@ -178,9 +178,15 @@ function AppearanceBody({ inst, editor }: { inst: InstanceSummary; editor: Setti
     else void editor.save({ background: next });
   };
 
-  // 渐变花瓣与我的图片没有说明：说明槽按跟随与平铺两条里高的那条占位，四种背景之间切换时这一行不变高
+  // 四种背景各有一条说明，说明槽却只能另占两条：跟随与平铺两条常驻占位，渐变花瓣与我的图片的说明不比它们宽（copy.test 守着），
+  // 槽高始终是常驻两条里高的那条，四种背景之间切换时这一行不变高
   const followNote = SETTINGS_COPY.backgroundFollowNote(COVER_STYLE_LABEL[appearance.coverBackground]);
-  const backgroundNote = value.background === "follow" ? followNote : value.background === "texture" ? SETTINGS_COPY.backgroundTextureNote : null;
+  const backgroundNote = {
+    follow: followNote,
+    art: SETTINGS_COPY.backgroundArtNote,
+    texture: SETTINGS_COPY.backgroundTextureNote,
+    image: SETTINGS_COPY.backgroundImageOptionNote,
+  }[value.background];
 
   return (
     <div className={styles.layout}>
@@ -192,7 +198,7 @@ function AppearanceBody({ inst, editor }: { inst: InstanceSummary; editor: Setti
         </Cover>
       </div>
       <div ref={rows}>
-        <SettingRow title={SETTINGS_COPY.background} description={<NoteSlot current={backgroundNote} options={[followNote, SETTINGS_COPY.backgroundTextureNote]} />}>
+        <SettingRow title={SETTINGS_COPY.background} description={<NoteSlot current={backgroundNote} options={[backgroundNote, followNote, SETTINGS_COPY.backgroundTextureNote]} />}>
           <SegmentedControl
             size="sm"
             value={value.background}

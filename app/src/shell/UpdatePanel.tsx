@@ -54,10 +54,13 @@ function DownloadProgress({ phase }: { phase: Extract<UpdaterPhase, { kind: "dow
   // 换源后进度从 0 重来，说一句才不像是进度倒退了。读屏也要听到这句：status 节点在下载阶段一直挂着、只换文字，
   // 读屏对已有 live 区域换文字念得可靠，对新插进来的节点常常不念
   const switched = sourceSwitchedCopy(phase.source);
+  // 平滑按任务与源分段（与关于页同一口径，还没报过源就是第一个源）：同一源里只进不退；换了源直接跳到新值。
+  // 换源与新源的第一条进度落在同一次渲染里时，中间那段不定进度不提交、条不重挂，不分段就会沿弹簧从旧源的位置倒退着滑回去
+  const track = `${phase.taskId}:${phase.source === null ? 0 : phase.source.index}`;
   return (
     <div>
       <div className={s.progressRow}>
-        <ProgressBar value={fraction} size="md" label={UPDATE_COPY.downloading(phase.update.version)} className={s.progressBar} />
+        <ProgressBar value={fraction} size="md" track={track} label={UPDATE_COPY.downloading(phase.update.version)} className={s.progressBar} />
         <span className={s.progressText}>{label}</span>
       </div>
       <p className={cx(s.muted, s.sourceNote)} role="status">

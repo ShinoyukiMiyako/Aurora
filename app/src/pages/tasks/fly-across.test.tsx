@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
-// 换组的行从旧位置飞到新位置：旧组里那一行脱离布局、在原处淡出，新组里同一个任务的新行沿 morph 弹簧从它的位置飞到自己的位置。
+// 换组的行从旧位置飞到新位置：旧组里那一行脱离布局、在原处淡出，新组里同一个任务的新行从它的位置飞到自己的位置。
 // jsdom 既不做布局也没有 Web Animations：这里桩上尺寸观察、元素的 animate 与任务行的位置，失败的任务点重试换到进行中，
-// 核对新行收到的轨迹从「旧行中心减新行中心」起步；减少动画时不飞。
+// 核对新行收到的轨迹从「旧行中心减新行中心」起步、与分组之间的让位走同一条弹簧；减少动画时不飞。
 // animate 桩在 HTMLElement 上而不是 Element 上：framer 只认 Element 自己的 animate 来决定走不走 Web Animations，桩在这里不改变它的行为。
 import { MotionConfig } from "framer-motion";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TaskRecordDto } from "../../ipc/tasks";
+import type { SpringName } from "../../lib/motion";
 import { springTrack } from "../../lib/slide";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
@@ -21,6 +22,18 @@ import { TASK_ROW_ATTR } from "./TaskRow";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
+// 直接调 observeReflow 挂让位的容器各走哪条弹簧：jsdom 不做布局，让位本身起不来，只记下它挂的弹簧；挂载照常交给真实现
+const reflowSprings = vi.hoisted(() => new Map<Element, SpringName>());
+vi.mock("../../lib/reflow", async (orig) => {
+  const real = await orig<typeof import("../../lib/reflow")>();
+  return {
+    ...real,
+    observeReflow: (container: HTMLElement, spring: SpringName = "settle") => {
+      reflowSprings.set(container, spring);
+      return real.observeReflow(container, spring);
+    },
+  };
+});
 
 const T0 = 1_730_000_000_000;
 
@@ -77,6 +90,7 @@ beforeEach(() => {
   ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
   ipc.overrides.set("install_java", () => new Promise(() => undefined));
   played = [];
+  reflowSprings.clear();
   Object.defineProperty(HTMLElement.prototype, "animate", {
     configurable: true,
     writable: true,
@@ -128,10 +142,16 @@ function rowsOf(id: string): { arriving: HTMLLIElement[]; leaving: HTMLLIElement
   return { arriving: all.filter((li) => li.closest("[inert]") === null), leaving: all.filter((li) => li.closest("[inert]") !== null) };
 }
 
-/** 失败的任务点重试：从已结束组换到进行中组；随后推一次分组容器的尺寸观察（换组后的那一轮布局）。 */
-async function retryAndLayout(): Promise<HTMLLIElement> {
+/** 各分组的容器：分组之间互相让位挂在它上面。 */
+function groupsEl(): HTMLElement {
   const groups = container().querySelector<HTMLElement>(`.${styles.groups}`);
   if (groups === null) throw new Error("页面没有分组容器");
+  return groups;
+}
+
+/** 失败的任务点重试：从已结束组换到进行中组；随后推一次分组容器的尺寸观察（换组后的那一轮布局）。 */
+async function retryAndLayout(): Promise<HTMLLIElement> {
+  const groups = groupsEl();
   act(() => launcher.actions.retryTask(FAILED.id));
   await flush();
   const { arriving, leaving } = rowsOf(FAILED.id);
@@ -144,7 +164,7 @@ async function retryAndLayout(): Promise<HTMLLIElement> {
 }
 
 describe("换组的行从旧位置飞到新位置", () => {
-  it("新行沿 morph 弹簧从旧行的位置起飞：起点是旧行中心减新行中心，落点是自己的位置", async () => {
+  it("新行从旧行的位置起飞：起点是旧行中心减新行中心，落点是自己的位置", async () => {
     await mount(false);
     const arriving = await retryAndLayout();
     const flights = played.filter((p) => p.el === arriving);
@@ -152,8 +172,19 @@ describe("换组的行从旧位置飞到新位置", () => {
     const dx = LEAVING_AT.left - ARRIVING_AT.left;
     const dy = LEAVING_AT.top - ARRIVING_AT.top;
     expect(flights[0].frames[0]).toEqual({ translate: `${dx}px ${dy}px` });
-    expect(flights[0].frames).toEqual(springTrack("morph", dx, 0, dy, 0).frames);
     expect(flights[0].frames.at(-1)).toEqual({ translate: "0px 0px" });
+  });
+
+  it("飞行与分组之间的让位走同一条弹簧：分组被挤开的位移与行的飞行同步衰减，叠起来不先绕出去再折回", async () => {
+    await mount(false);
+    const arriving = await retryAndLayout();
+    const spring = reflowSprings.get(groupsEl());
+    if (spring === undefined) throw new Error("分组容器没有挂让位");
+    const flights = played.filter((p) => p.el === arriving);
+    expect(flights).toHaveLength(1);
+    const dx = LEAVING_AT.left - ARRIVING_AT.left;
+    const dy = LEAVING_AT.top - ARRIVING_AT.top;
+    expect(flights[0].frames).toEqual(springTrack(spring, dx, 0, dy, 0).frames);
   });
 
   it("减少动画时不飞：新行直接在自己的位置", async () => {

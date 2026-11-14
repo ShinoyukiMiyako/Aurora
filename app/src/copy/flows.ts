@@ -1548,7 +1548,18 @@ export const DELETE_INSTANCE_COPY = {
   /** 实例上还挂着没完成的任务（新建、导入、补全、装 Mod）时追加：确认后先取消任务再删除。 */
   pendingTask: "正在进行的安装任务会先取消。",
   confirmLabel: (worlds: number) => (worlds > 0 ? `删除实例和 ${worlds} 个存档` : "删除实例"),
-  /** 删除预览看出有实例经继承依赖它：这时删不了，不进确认框。Toast 正文放不下更多名字，只点两个。 */
+  /** 点了删除先开框、后问后端：清点期间正文占位，骨架出现时读屏听到这句。 */
+  previewLoading: "正在清点会一起删除的存档…",
+  /** 删除预览没读出来：框里写明原因，确认键一直不可按。 */
+  previewFailed: (reason: string) => `没能清点会随实例一起删除的存档，这次删不了：${reason}`,
+  /** 删除预览看出有实例依赖它时确认框的正文：删不了，确认键一直不可按。 */
+  blocked: (name: string, dependents: readonly string[]): string => {
+    const { title, body } = DELETE_INSTANCE_COPY.hasDependents(name, dependents);
+    return `${title}：${body}。`;
+  },
+  /** 删不了（预览失败、有实例依赖它）时取消键的文案：没有要取消的动作，只剩关掉。 */
+  close: "关闭",
+  /** 删除预览看出有实例经继承依赖它：这时删不了，确认框里经 blocked 说明。只点两个名字，其余写总数。 */
   hasDependents: (name: string, dependents: readonly string[]) => {
     if (dependents.length === 0) throw new Error(`没有实例依赖「${name}」，不该走到这句`);
     const named = dependents

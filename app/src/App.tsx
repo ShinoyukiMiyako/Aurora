@@ -1,4 +1,4 @@
-// 应用装配：AppearanceProvider -> LauncherProvider -> ShellProvider -> AppShell，最外层的错误边界接住
+// 应用装配：AppearanceProvider -> UiShapeProvider -> LauncherProvider -> ShellProvider -> AppShell，最外层的错误边界接住
 // 外壳本身（Provider 与外壳布局）的渲染错误，整屏显示错误原文；页面级的错误由外壳内容区自己的边界接住。
 //
 // 页面与流程模块按目录约定在这里收集，外壳不直接引用 pages/ 与 flows/：
@@ -28,6 +28,7 @@ import { RevealWindow } from "./shell/window";
 import { AppearanceProvider } from "./state/appearance";
 import type { FlowName, FlowProps } from "./state/flows";
 import { LauncherProvider } from "./state/launcher";
+import { UiShapeProvider, type UiShape } from "./state/ui-shape";
 
 const Gallery = import.meta.env.DEV ? lazy(() => import("./dev/Gallery")) : null;
 
@@ -86,15 +87,17 @@ function reportShellCrash(error: unknown): void {
   logDiagnostic("error", "外壳渲染出错", { error: describeError(error) }).catch((logError: unknown) => console.error("外壳错误没有写入诊断日志", logError));
 }
 
-export default function App({ appearance }: { appearance: Appearance }) {
+export default function App({ appearance, uiShape }: { appearance: Appearance; uiShape: UiShape }) {
   if (Gallery !== null && isGalleryMode()) {
     return (
       <AppearanceProvider initial={appearance}>
-        <RevealWindow>
-          <Suspense fallback={null}>
-            <Gallery />
-          </Suspense>
-        </RevealWindow>
+        <UiShapeProvider initial={uiShape}>
+          <RevealWindow>
+            <Suspense fallback={null}>
+              <Gallery />
+            </Suspense>
+          </RevealWindow>
+        </UiShapeProvider>
       </AppearanceProvider>
     );
   }
@@ -108,13 +111,15 @@ export default function App({ appearance }: { appearance: Appearance }) {
       )}
     >
       <AppearanceProvider initial={appearance}>
-        <LauncherProvider>
-          <ShellProvider>
-            <HostProviders>
-              <AppShell pages={pageRegistry()} flows={FLOWS} startupNotices={loadStartupNotices} />
-            </HostProviders>
-          </ShellProvider>
-        </LauncherProvider>
+        <UiShapeProvider initial={uiShape}>
+          <LauncherProvider>
+            <ShellProvider>
+              <HostProviders>
+                <AppShell pages={pageRegistry()} flows={FLOWS} startupNotices={loadStartupNotices} />
+              </HostProviders>
+            </ShellProvider>
+          </LauncherProvider>
+        </UiShapeProvider>
       </AppearanceProvider>
     </ErrorBoundary>
   );

@@ -3,7 +3,7 @@
 // 保存是乐观的：控件先显示新值，失败时统一错误处理报错、控件回到磁盘上的值。
 
 import { AnimatePresence, motion, useReducedMotionConfig } from "framer-motion";
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { ACTION_ERROR, lockReason, MODPACK_REIMPORT_COPY, REINSTALL_LOADER_LABEL, TOAST_COPY } from "../../copy/flows";
 import { MEMORY_BASIS_COPY } from "../../copy/memory";
 import { JAVA_SOURCE_LABEL } from "../../copy/settings";
@@ -99,6 +99,12 @@ function useSettingsEditor(id: string, settings: ResourceResult<InstanceSettings
   };
 }
 
+/**
+ * 按住参数框之后哪些窗口事件算松手。松手在哪儿都算，所以在窗口上收；按着时窗口失焦（切到别的窗口、系统弹窗抢走焦点），
+ * 抬起事件不会再送到这里，失焦也算松手，免得网格的让位一直停到下一次在别处抬起指针。
+ */
+const PRESS_RELEASE_EVENTS = ["pointerup", "pointercancel", "blur"] as const;
+
 export function SettingsTab({ inst, queryId, ops }: SettingsTabProps) {
   const settings = useInstanceSettings(queryId);
   const editor = useSettingsEditor(inst.id, settings, ops.settingsReason);
@@ -109,20 +115,47 @@ export function SettingsTab({ inst, queryId, ops }: SettingsTabProps) {
   const gate = useLoadingGate(editor === null || java.status === "loading" || memory.status === "loading");
   // 横幅出入、某张卡变高变矮（数据到达、切换模式、提示出没）时，下面的内容从旧位置滑过去
   const stack = useReflow<HTMLDivElement>();
-  const grid = useReflow<HTMLDivElement>();
+  const reflowGrid = useReflow<HTMLDivElement>();
+  // 网格节点另记一份：按住参数框时直接在它上面开关暂停属性
+  const gridEl = useRef<HTMLDivElement | null>(null);
+  const grid = useCallback(
+    (el: HTMLDivElement | null) => {
+      if (el === null) return;
+      gridEl.current = el;
+      const stop = reflowGrid(el);
+      if (typeof stop !== "function") throw new Error("让位挂上节点时必定交回清理函数");
+      return () => {
+        gridEl.current = null;
+        stop();
+      };
+    },
+    [reflowGrid],
+  );
   // 按住 JVM 参数框（拖它的尺寸手柄）期间网格的让位暂停：下面的卡片要跟着指针走，不能沿弹簧在后面追。
-  // 松手在哪儿都算，所以在窗口上收；按着的期间框内点选文字不改尺寸，暂停也无妨
-  const [pressing, setPressing] = useState(false);
-  useEffect(() => {
-    if (!pressing) return;
-    const release = () => setPressing(false);
-    window.addEventListener("pointerup", release);
-    window.addEventListener("pointercancel", release);
-    return () => {
-      window.removeEventListener("pointerup", release);
-      window.removeEventListener("pointercancel", release);
+  // 暂停属性直接打在网格节点上、不经 React 状态：按下、松手不必让整页连同六张卡各重渲染一次，让位的观察者照样认得属性的增删。
+  // 按着的期间框内点选文字不改尺寸，暂停也无妨
+  const release = useRef<(() => void) | null>(null);
+  const press = useCallback(() => {
+    const el = gridEl.current;
+    if (el === null) throw new Error("设置网格尚未挂载");
+    // 上一次按下还没等到松手（多指按下）：先收掉，窗口上的监听不叠加
+    if (release.current !== null) release.current();
+    const done = () => {
+      el.removeAttribute(REFLOW_PAUSED_ATTR);
+      for (const type of PRESS_RELEASE_EVENTS) window.removeEventListener(type, done);
+      release.current = null;
     };
-  }, [pressing]);
+    el.setAttribute(REFLOW_PAUSED_ATTR, "");
+    for (const type of PRESS_RELEASE_EVENTS) window.addEventListener(type, done);
+    release.current = done;
+  }, []);
+  // 按着时离开设置页：摘掉窗口上的监听
+  useEffect(
+    () => () => {
+      if (release.current !== null) release.current();
+    },
+    [],
+  );
 
   if (settings.status === "error") {
     return (
@@ -138,11 +171,11 @@ export function SettingsTab({ inst, queryId, ops }: SettingsTabProps) {
         {ops.busy && <Banner key="running" tone="info" title={SETTINGS_COPY.runningNote} />}
         {ops.settingsReason !== undefined && <Banner key="locked" tone="info" title={ops.settingsReason} />}
       </BannerSlot>
-      <div ref={grid} className={styles.settingsGrid} {...{ [REFLOW_PAUSED_ATTR]: pressing ? "" : undefined }}>
+      <div ref={grid} className={styles.settingsGrid}>
         <AppearanceCard inst={inst} editor={editor} view={gate.view} slow={gate.slow} />
         <MemoryCard inst={inst} editor={editor} memory={memory} view={gate.view} />
         <JavaCard inst={inst} editor={editor} java={java} view={gate.view} />
-        <JvmCard editor={editor} java={java} view={gate.view} slow={gate.slow} onPress={() => setPressing(true)} />
+        <JvmCard editor={editor} java={java} view={gate.view} slow={gate.slow} onPress={press} />
         <WindowCard inst={inst} editor={editor} view={gate.view} />
         <ManageCard inst={inst} ops={ops} />
       </div>
@@ -947,15 +980,17 @@ function TemplateRow({ id, locked }: { id: string; locked: string | undefined })
       description={
         <span className={styles.resolutionNote}>
           <span>{SETTINGS_COPY.templateNote}</span>
-          {/* 第二行常驻一行高：读取中、没存过默认设置、存过三种情况同高，读完不塌掉一行，存下、清除时也不跳 */}
+          {/* 第二行常驻一行高：读取中、没存过默认设置、存过、沿用已关闭都同高，读完不塌掉一行，存下、清除时也不跳。
+              配置里关了沿用排在最前，与后端套用时先看开关、再看有没有文件的顺序一致 */}
           <Loadable view={gate.view} skeleton={<Skeleton shape="text" width={TEMPLATE_SKELETON_WIDTH} />} className={styles.templateLine}>
-            {() =>
-              template.status === "error" ? (
-                <span className={styles.soft}>{SETTINGS_COPY.templateError(describeError(template.error))}</span>
-              ) : info !== null && info.present ? (
-                <span className={styles.soft}>{SETTINGS_COPY.templateCurrent(info.source_instance, info.saved_at, now)}</span>
-              ) : null
-            }
+            {() => {
+              if (template.status === "error") return <span className={styles.soft}>{SETTINGS_COPY.templateError(describeError(template.error))}</span>;
+              if (info === null) throw new Error("默认设置一行：加载门放行且没报错时默认设置必定已读到");
+              if (!info.enabled) return <span className={styles.soft}>{SETTINGS_COPY.templateDisabled}</span>;
+              if (!info.present) return <span className={styles.soft}>{SETTINGS_COPY.templateAbsent}</span>;
+              if (info.source_instance === null) return <span className={styles.soft}>{SETTINGS_COPY.templateUnknownSource}</span>;
+              return <TemplateSource source={info.source_instance} savedAt={info.saved_at} now={now} />;
+            }}
           </Loadable>
         </span>
       }
@@ -974,11 +1009,28 @@ function TemplateRow({ id, locked }: { id: string; locked: string | undefined })
   );
 }
 
+/** 默认设置取自哪个实例的那一句：整句一行排开，窄列里只截实例名，悬停看全名。 */
+function TemplateSource({ source, savedAt, now }: { source: string; savedAt: number | null; now: number }) {
+  const { before, after } = SETTINGS_COPY.templateSource(savedAt, now);
+  return (
+    <span className={cx(styles.soft, styles.templateSource)}>
+      <span>{before}</span>
+      <span className={styles.ellipsis} title={source}>
+        {source}
+      </span>
+      <span>{after}</span>
+    </span>
+  );
+}
+
 function DeleteNote({ inst, busy }: { inst: InstanceSummary; busy: boolean }) {
   const worlds = deletableWorldCount(inst);
   const base = worlds === null ? null : worlds > 0 ? SETTINGS_COPY.deleteWorlds(worlds) : SETTINGS_COPY.deleteNoWorlds;
   // 游戏运行中在后面追加一句：说明槽按追加之后的那条占位，游戏启动、退出时危险区不因多出一行而变高
   const running = base === null ? SETTINGS_COPY.deleteRunning : `${base}${SETTINGS_COPY.deleteRunning}`;
+  // 存档数读不出（实例损坏、设置或工作目录读不出，都是要等用户处理的持久状态，不是加载中）时没运行就没有说明，
+  // 仍按运行中那条占位：危险区标题下常驻一行空白，换来游戏启动、退出时危险区不变高。按 null 不占位会在启动的那一刻撑高一行。
+  // 目录恢复、存档数从读不出变成读得出的那一下，候选从一条换成两条，行数可能变一次；这种恢复很少见，不另做处理
   return (
     <span className={styles.soft}>
       <NoteSlot current={busy ? running : base} options={base === null ? [running] : [base, running]} />

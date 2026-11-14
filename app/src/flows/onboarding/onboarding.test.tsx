@@ -7,14 +7,16 @@ import type { ConfigDto, GameDirectoryDto } from "../../ipc/config";
 import { IpcError } from "../../ipc/errors";
 import { APP_NAME } from "../../lib/app-info";
 import { mockInvoke, resetMocks } from "../../ipc/mock";
+import { clearArtCache } from "../../mc/useArt";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
 import type { Appearance } from "../../domain/types";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
+import { resources } from "../../state/resource";
 import { render, stubMatchMedia, stubResizeObserver, stubSpanAnimations, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { callsOf, resetRecorder, settle } from "../../test/launcher";
+import { accountDto, callsOf, resetRecorder, settle } from "../../test/launcher";
 import OnboardingFlow from "./index";
 import { PickDirectoryProvider, type PickDirectory } from "./platform";
 
@@ -117,6 +119,9 @@ afterEach(() => {
   document.documentElement.removeAttribute("data-sk-mode");
   document.documentElement.removeAttribute("data-sk-accent");
   document.documentElement.removeAttribute("data-sk-reduced");
+  // 桩过的取图与已取到的皮肤位图不带到下一条用例
+  clearArtCache();
+  vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
@@ -364,6 +369,38 @@ describe("首次启动向导：推进与收尾", () => {
     expect(addMore.isConnected).toBe(true);
     expect(addMore.closest("[data-spent]")?.hasAttribute("inert")).toBe(true);
     expect(all("button[data-kind]").some((b) => b.closest("[inert]") === null)).toBe(true);
+  });
+
+  it("第三步已添加的账户刷新后皮肤信息重取失败：头像沿用上次读到的皮肤，不退回剪影", async () => {
+    const account = accountDto();
+    ipc.overrides.set("list_accounts", () => [account]);
+    ipc.overrides.set("current_account", () => account);
+    ipc.overrides.set("refresh_account", () => account);
+    ipc.overrides.set("skin_info", () => ({ kind: "remote", sha1: "ab".repeat(20), model: "wide", hat: true }));
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob(["skin"]) })));
+    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ width: 64, height: 64 })));
+    await mount();
+    await click(button("下一步"));
+    await click(button("下一步"));
+    const avatar = () => {
+      const added = all("section").find((section) => section.textContent?.startsWith("已添加"));
+      if (added === undefined) throw new Error("没有「已添加」区");
+      return added.querySelector<HTMLElement>('[data-sk-art="skin"]')?.dataset.art;
+    };
+    expect(avatar()).toBe("skin");
+    const skinCalls = callsOf(ipc, "skin_info").length;
+
+    ipc.overrides.set("skin_info", () => {
+      throw new IpcError("io", "账户文件读不出来");
+    });
+    await act(async () => {
+      await launcher.actions.refreshAccount(account.uuid);
+    });
+    await flush();
+    // 重取确实发出且以失败落定：资源停在 error，而不是重取中还带着旧数据的 ready
+    expect(callsOf(ipc, "skin_info").slice(skinCalls)).toEqual([{ accountUuid: account.uuid }]);
+    expect(resources.snapshot(`skin:${account.uuid}`).status).toBe("error");
+    expect(avatar()).toBe("skin");
   });
 
   it("第三步的选项打开同一个登录弹窗（由状态驱动）", async () => {

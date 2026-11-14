@@ -313,6 +313,8 @@ describe("日志控制台：加载占位", () => {
     await open();
     const headings = () => [...consoleCard().querySelectorAll("h3")].filter((h) => h.closest('[aria-hidden="true"]') === null && h.closest("[inert]") === null).map(textOf);
     expect(headings()).toEqual(["启动日志"]);
+    // 占位外面的那个只给读屏：套全局的视觉隐藏类，不占卡头的位置
+    expect([...consoleCard().querySelectorAll("h3")].filter((h) => h.closest('[aria-hidden="true"]') === null).map((h) => h.className)).toEqual(["sk-sr-only"]);
     await pass(300);
     expect(headings()).toEqual(["启动日志"]);
 

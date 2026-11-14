@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { HERO_TAG_LIMIT, SWITCH_MENU_LIMIT, continueTarget, heroTags, latestWorld, recencyOf, recentInstances, sortByRecency, switchOptions, worldName } from "./instances";
+import { RECENT_CARDS_MAX } from "../../state/ui-shape";
+import { HERO_TAG_LIMIT, RECENT_COUNT, SWITCH_MENU_LIMIT, continueTarget, heroTags, latestWorld, recencyOf, recentCardCount, recentInstances, sortByRecency, switchOptions, worldName } from "./instances";
 import { summary, world } from "./test-data";
 
 describe("新近度与排序", () => {
@@ -78,6 +79,19 @@ describe("最近游玩", () => {
     expect(recentInstances(list, "当前", 4).map((i) => i.id)).toEqual(["b", "d", "c", "e"]);
     expect(recentInstances(list, null, 6).map((i) => i.id)).toEqual(["当前", "b", "d", "c", "e", "a"]);
     expect(recentInstances([summary("没玩过")], null, 4)).toEqual([]);
+  });
+
+  it("记进界面形状的张数按最宽一档算，不随当前档位变；玩过的不够时就是玩过的个数", () => {
+    const played = Array.from({ length: 9 }, (_, i) => summary(`玩过${i}`, { lastPlayedAt: 100 - i }));
+    expect(recentCardCount(played, "玩过0")).toBe(6);
+    expect(recentCardCount([...played.slice(0, 3), summary("没玩过")], "玩过0")).toBe(2);
+    expect(recentCardCount([summary("没玩过")], null)).toBe(0);
+  });
+
+  // 记下的张数要写进配置，后端按 RECENT_CARDS_MAX 校验：最宽一档的张数超过它，每次写入都会被拒
+  it("最宽一档的张数就是后端认的上限", () => {
+    expect(RECENT_COUNT.wide).toBe(RECENT_CARDS_MAX);
+    expect(Math.max(...Object.values(RECENT_COUNT))).toBe(RECENT_COUNT.wide);
   });
 });
 

@@ -3,14 +3,14 @@
 //
 // 胶囊只有一块，常驻在导航里，换分区时沿 settle 弹簧滑到新选中项，位移交给合成线程（lib/slide）。
 // 不用 layoutId 在各项之间传递：旧项里那一块卸载时 framer-motion 当场量一次布局，而那一刻旧分区面板已经拿掉、
-// 新面板还没插上，页面变矮，滚动位置被夹回顶部；导航每次重渲染（更新下载的进度事件）也都要量一次。
+// 新面板还没插上，页面变矮，滚动位置被夹回顶部。
 
 import { AnimatePresence, motion, useReducedMotionConfig } from "framer-motion";
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Icon } from "../../art/Icon";
 import { SETTINGS_SECTION_LABEL } from "../../copy/flows";
 import { fade } from "../../lib/motion";
-import { Slide } from "../../lib/slide";
+import { playTween, Slide } from "../../lib/slide";
 import { useLauncherSelector } from "../../state/launcher";
 import { SETTINGS_SECTIONS, type SettingsSection } from "../../state/route";
 import { Badge } from "../../ui/Badge";
@@ -126,6 +126,9 @@ export function SettingsNav({ section, onSelect }: { section: SettingsSection; o
   const navRef = useRef<HTMLElement>(null);
   const pillRef = useRef<HTMLSpanElement>(null);
   const slide = useRef<Slide | null>(null);
+  // 胶囊上一次摆在哪个分区：停在同一分区上切换减少动画也会重跑摆放，那时胶囊没换位置
+  const placedAt = useRef<SettingsSection | null>(null);
+  const fadeIn = useRef<Animation | null>(null);
   const reduced = useReducedMotionConfig() === true;
 
   useLayoutEffect(() => {
@@ -139,9 +142,17 @@ export function SettingsNav({ section, onSelect }: { section: SettingsSection; o
     pill.style.height = `${height}px`;
     // 第一次是摆放：直接出现在选中项上，跟着页面入场
     const placing = slide.current === null;
+    const moved = placedAt.current !== section;
+    placedAt.current = section;
     if (slide.current === null) slide.current = new Slide(pill, "settle");
     if (placing || reduced) slide.current.jump(0, top);
     else slide.current.to(0, top);
+    // 减少动画时不滑：一步换到新选中项上，在那里从透明淡入，与分段控件、标签条、侧栏的减少动画一样。
+    // 上一段淡入还没播完就换了分区时先停掉它，新的一段从透明起。运行环境没有 Web Animations（组件测试的 jsdom）时直接出现
+    if (reduced && !placing && moved && typeof pill.animate === "function") {
+      fadeIn.current?.cancel();
+      fadeIn.current = playTween(pill, [{ opacity: 0 }, { opacity: 1 }], fade.in);
+    }
   }, [section, reduced]);
 
   return (

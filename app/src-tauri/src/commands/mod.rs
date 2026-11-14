@@ -23,6 +23,7 @@ pub mod news;
 pub mod servers;
 pub mod system;
 pub mod tasks;
+pub mod ui_shape;
 pub(crate) mod update_channels;
 pub(crate) mod update_head;
 pub(crate) mod update_package;

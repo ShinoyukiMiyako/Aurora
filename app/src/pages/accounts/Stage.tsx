@@ -1,12 +1,12 @@
 // 账户舞台：浅底 + 半透明花枝插画，角色立绘站在椭圆投影上。聚光卡与账户卡共用，尺寸按所在位置给。
-// 皮肤取不到时立绘自己回落成按账户色相上色的剪影，这里不另做回落。
+// 皮肤取不到时立绘自己回落成按账户色相上色的剪影，这里不另做回落；皮肤信息重取失败时沿用上一次读到的皮肤。
 
 import { useEffect, type ReactNode } from "react";
 import { BlossomBranch } from "../../art/illustrations/BlossomBranch";
 import { AccountFigure } from "../../art/skin/AccountFigure";
 import type { Account } from "../../domain/adapt";
 import { useShell } from "../../shell/shell";
-import { useSkinInfo } from "../../state/queries/home";
+import { skinSource, useSkinInfo } from "../../state/queries/home";
 import styles from "./accounts.module.css";
 
 export type StageVariant = "spot" | "card";
@@ -30,13 +30,15 @@ export interface StageProps {
 export function Stage({ account, variant, children }: StageProps) {
   const { tier } = useShell();
   const skin = useSkinInfo(account.uuid);
+  const figure = skinSource(skin);
+  const silhouette = figure === null;
   const branch = variant === "spot" ? BRANCH_SIZE.spot[tier] : BRANCH_SIZE.card;
   const pedestal = PEDESTAL[variant];
 
   useEffect(() => {
-    // 皮肤读不出来时照样显示剪影，但原因要留在控制台里，便于排查材质源与网络问题
-    if (skin.status === "error") console.warn(`[accounts] ${account.name} 的皮肤信息读不出来，显示剪影`, skin.error);
-  }, [account.name, skin.status, skin.error]);
+    // 皮肤读不出来时照样画立绘，但原因要留在控制台里，便于排查材质源与网络问题；写明画的是剪影还是上一次的皮肤，免得对着皮肤找剪影
+    if (skin.status === "error") console.warn(`[accounts] ${account.name} 的皮肤信息读不出来，${silhouette ? "显示剪影" : "沿用上次读到的皮肤"}`, skin.error);
+  }, [account.name, skin.status, skin.error, silhouette]);
 
   return (
     <div className={styles.stage} data-variant={variant}>
@@ -49,7 +51,7 @@ export function Stage({ account, variant, children }: StageProps) {
       {/* 皮肤信息还在读时说「读取中」而不是「没有」：聚光卡换到皮肤信息没缓存的账户时，舞台上留着上一位的立绘直到读到，再交叉换上 */}
       <AccountFigure
         uuid={account.uuid}
-        skin={skin.status === "loading" ? "loading" : skin.status === "ready" ? skin.data : null}
+        skin={figure}
         scale={variant === "spot" ? 6 : 4}
         interactive={variant === "spot"}
         className={styles.figure}

@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 // 整个文件走真实时间：百分数随平滑逐帧走，framer-motion 的帧循环不受假定时器驱动（见 test/dom 的 waitForFrames）。
-import { MotionConfig } from "framer-motion";
-import type { ReactNode } from "react";
+import { MotionConfig, motionValue } from "framer-motion";
+import { act, type ReactNode } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import { render, waitForFrames, type Rendered } from "../test/dom";
-import { SmoothPercent } from "./SmoothPercent";
+import { PercentOf, SmoothPercent } from "./SmoothPercent";
 
 let view: Rendered | undefined;
 afterEach(() => {
@@ -58,5 +58,29 @@ describe("进度旁的百分数", () => {
     await waitForFrames(() => expect(text()).toBe("90%"));
     texts.stop();
     expect(texts.seen.filter((t) => t !== "20%" && t !== "90%")).toEqual([]);
+  });
+});
+
+describe("读现成平滑的百分数", () => {
+  it("挂载时写平滑值此刻的数；平滑值每变一次当场换字，不另起弹簧、不落后", () => {
+    const smooth = motionValue(0.3);
+    view = render(<PercentOf value={smooth} />);
+    expect(text()).toBe("30%");
+    act(() => smooth.set(0.42));
+    expect(text()).toBe("42%");
+    act(() => smooth.set(0.427));
+    expect(text()).toBe("43%");
+  });
+
+  it("冻结后停在冻结那一刻的数，不跟着平滑值走；解冻时先对齐到此刻的值，再接着跟", () => {
+    const smooth = motionValue(0.2);
+    view = render(<PercentOf value={smooth} />);
+    view.rerender(<PercentOf value={smooth} frozen />);
+    act(() => smooth.set(0.6));
+    expect(text()).toBe("20%");
+    view.rerender(<PercentOf value={smooth} />);
+    expect(text()).toBe("60%");
+    act(() => smooth.set(0.7));
+    expect(text()).toBe("70%");
   });
 });

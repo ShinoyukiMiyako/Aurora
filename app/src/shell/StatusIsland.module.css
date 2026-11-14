@@ -218,15 +218,6 @@
   background: var(--sk-accent-grad);
 }
 
-.srOnly {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
-
 /*
  * ---- 详情浮层 ----
  * 浮层分主体与底部两层（随内容形变）：宽度定在面板上。主体是面板的滚动区，常驻 10px 滚动条槽位，

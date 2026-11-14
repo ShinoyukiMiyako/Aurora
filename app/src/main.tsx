@@ -3,8 +3,8 @@
 // 本程序代码按 AGPL-3.0-only 授权，另附 AGPL 第 7 条的附加条款；两者见源代码根目录的 LICENSE 与 LICENSE-ADDITIONAL-TERMS.md。
 // Licensed under AGPL-3.0-only with additional terms under section 7 of the AGPL; see LICENSE and LICENSE-ADDITIONAL-TERMS.md at the root of the source code.
 
-// 入口与首帧流程。窗口以不可见状态创建：先检查 WebView2 能力、加载字体、读外观偏好并把明暗与强调色
-// 写到 <html>、预载主页模块，再渲染；首帧布局完成后的下一帧才显示窗口（由外壳在知道要不要进首次启动向导之后显示），
+// 入口与首帧流程。窗口以不可见状态创建：先检查 WebView2 能力、加载字体、并行读外观偏好与界面形状（首帧占位用）、
+// 把明暗与强调色写到 <html>、预载主页模块，再渲染；首帧布局完成后的下一帧才显示窗口（由外壳在知道要不要进首次启动向导之后显示），
 // 用户看不到任何中间态（夜樱下没有白帧）。
 // 任何一步失败都渲染错误页并照常显示窗口；后端另有 3 秒兜底显示，保证前端异常时窗口不会永远不可见。
 // 开发构建在纯浏览器里看界面时，模拟后端的状态存进 localStorage，刷新不回到首次启动向导；必须在第一条命令之前启用。
@@ -20,6 +20,7 @@ import { ErrorScreen } from "./shell/ErrorScreen";
 import { applyTier, tierOf } from "./shell/tier";
 import { RevealWindow } from "./shell/window";
 import { DEFAULT_APPEARANCE, applyAppearance, loadAppearance, systemPrefersReducedMotion } from "./state/appearance";
+import { loadUiShape } from "./state/ui-shape";
 import { loadFonts } from "./styles/fonts";
 
 /** WebView2 过旧（Chromium 111 以前）时缺少 color-mix 与容器查询，令牌与页面排版都会失效。 */
@@ -51,12 +52,13 @@ async function boot(container: HTMLElement): Promise<void> {
     assertWebViewSupport();
     if (import.meta.env.DEV && !inTauri()) await enableBrowserMockPersistence();
     await loadFonts();
-    const appearance = await loadAppearance();
+    // 两样都只读后端内存，并行读不多等一个往返；任一样读不出都进错误页
+    const [appearance, uiShape] = await Promise.all([loadAppearance(), loadUiShape()]);
     applyAppearance(appearance, systemReduced);
     await prepareApp();
     root.render(
       <StrictMode>
-        <App appearance={appearance} />
+        <App appearance={appearance} uiShape={uiShape} />
       </StrictMode>,
     );
   } catch (error) {

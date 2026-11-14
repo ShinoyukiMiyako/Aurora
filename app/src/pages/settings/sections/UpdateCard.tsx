@@ -18,6 +18,7 @@ import { Loadable } from "../../../ui/Loadable";
 import { RadioTile, type RadioTileOption } from "../../../ui/RadioTile";
 import { SettingRow } from "../../../ui/SettingRow";
 import { Skeleton } from "../../../ui/Skeleton";
+import { SmoothPercent } from "../../../ui/SmoothPercent";
 import { Tag } from "../../../ui/Tag";
 import { Toggle } from "../../../ui/Toggle";
 import { UPDATE_COPY, updateChannelLabel } from "../../../copy/updater";
@@ -58,7 +59,15 @@ export function StatusLine({ view, onAction }: { view: CardView; onAction: () =>
     <div className={s.updateRow}>
       <span className={s.updateText}>
         <span className={s.updateTitle} data-tone={view.accent ? "accent" : undefined}>
-          {view.title}
+          {view.progress !== null && view.progress.percent !== null ? (
+            <>
+              {view.progress.percent.before}
+              <SmoothPercent value={view.progress.percent.value} track={view.progress.percent.track} />
+              {view.progress.percent.after}
+            </>
+          ) : (
+            view.title
+          )}
         </span>
         {view.sub !== null && (
           <span className={view.subIsError ? s.errorText : s.mutedText} data-selectable={view.subIsError || undefined}>

@@ -68,9 +68,13 @@
   grid-area: 1 / 1;
 }
 
+/*
+ * 隐形按钮整层透明（带 inert，点不到也聚焦不到），不用 visibility: hidden：按钮里的定宽文案槽把当前那条显式设成
+ * visible，祖先的 hidden 继承不到它，「创建并开始安装」会压在「下一步」上露出来
+ */
 .primaryGhost {
   display: flex;
-  visibility: hidden;
+  opacity: 0;
 }
 
 /* ---------------------------------------------------------------- 左栏 */
@@ -237,12 +241,22 @@
   transition: opacity var(--sk-dur-hover) var(--sk-ease);
 }
 
-/* 序号与勾号压在叠层之上 */
+/*
+ * 序号与勾号压在叠层之上。格子定死成勾号图标的尺寸、内容居中：序号的行高比图标高，
+ * 不定死的话换成勾号（或退回序号）时格子一帧变高变矮
+ */
 .stepGlyph {
+  --cr-step-glyph: 12px;
   position: relative;
+  width: var(--cr-step-glyph);
+  height: var(--cr-step-glyph);
+  place-items: center;
+  line-height: var(--cr-step-glyph);
 }
 
+/* 定位基准：值行退场时抽出布局，跟着正在让位滑动的文字列一起走 */
 .stepText {
+  position: relative;
   display: flex;
   flex: 1;
   flex-direction: column;
@@ -355,6 +369,14 @@
   line-height: var(--sk-lh-heading);
 }
 
+/*
+ * 换步后没有可落焦点的选项时，焦点兜底落在标题上（tabIndex=-1，Tab 走不到），只为让读屏从新的一步读起。
+ * 按 Enter 换步之后的程序聚焦照样匹配 :focus-visible，全局兜底会沿整行标题画一圈强调色框，像是标题能操作
+ */
+.stepTitle:focus-visible {
+  outline: none;
+}
+
 .stepBody {
   margin: 0;
   color: var(--sk-text-2);
@@ -465,7 +487,31 @@
   flex: none;
 }
 
-/* 列表区下方的说明行（加载慢、离线缓存）：出现时只缩短列表区 */
+/*
+ * 骨架层里「比平时慢」的说明：排在骨架行之后，靠 sticky 贴住列表区（overflow: hidden 的滚动框）的下沿，
+ * 盖住最后一行骨架的下半截；列表区的高度不因它变。不用绝对定位：骨架层退场时被抽出布局、自己成了定位基准，
+ * 按下沿摆的说明会跟着跳到骨架层的底边（列表区之外）。底色挡住下面的骨架，文字与列表的行左对齐。
+ * 常驻、到点前透明，到点淡入；内容到达时随骨架层整层淡出
+ */
+.skeletonNote {
+  position: sticky;
+  bottom: 0;
+  margin: 0;
+  padding: var(--sk-space-8) var(--sk-space-4) var(--sk-space-4);
+  background: var(--sk-surface);
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  opacity: 0;
+  transition: opacity var(--sk-dur-out) var(--sk-ease-in);
+}
+
+.skeletonNote[data-shown] {
+  opacity: 1;
+  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
+}
+
+/* 列表区下方的说明行（离线缓存）：随内容一起出现，出现时只缩短列表区 */
 .listNoteItem {
   flex: none;
 }
@@ -475,16 +521,6 @@
   color: var(--sk-text-2);
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-}
-
-/* 只给读屏的加载说明：绝对定位脱离步骤的弹性布局，不占间距 */
-.srOnly {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
 }
 
 /*
@@ -774,11 +810,28 @@
   box-shadow: var(--sk-focus);
 }
 
+/* 画面格：高度由组件给定，卡面晚一拍补上时色样不变高 */
 .swatchArt {
+  position: relative;
+  display: block;
   flex: none;
 }
 
+/* 换步画完第一帧才补上的卡面：铺满画面格、垫在方块下面淡入（只动透明度，减少动画下照样淡入） */
+.swatchCover {
+  position: absolute;
+  inset: 0;
+  animation: swatchReveal var(--sk-dur-in) var(--sk-ease-out);
+}
+
+@keyframes swatchReveal {
+  from {
+    opacity: 0;
+  }
+}
+
 .swatchBlock {
+  position: relative;
   display: grid;
   place-items: center;
   height: 100%;

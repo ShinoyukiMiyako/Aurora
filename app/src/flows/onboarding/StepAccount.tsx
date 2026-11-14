@@ -13,7 +13,7 @@ import { useReflow } from "../../lib/reflow";
 import { useMounted } from "../../lib/useMounted";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
-import { useSkinInfo } from "../../state/queries/home";
+import { skinSource, useSkinInfo } from "../../state/queries/home";
 import { Appear } from "../../ui/Appear";
 import { Button } from "../../ui/Button";
 import { ACCOUNT_STEP_COPY, LOGIN_OPTIONS } from "./copy";
@@ -43,7 +43,7 @@ function AccountChip({ account, enter }: { account: Account; enter: boolean }) {
   const item = useInsertItem();
   return (
     <motion.li className={s.accountChip} initial={enter ? item.initial : false} animate={item.animate}>
-      <AccountAvatar uuid={account.uuid} skin={skin.status === "ready" ? skin.data : null} size={32} />
+      <AccountAvatar uuid={account.uuid} skin={skinSource(skin)} size={32} />
       <span className={s.accountText}>
         <span className={s.accountName}>{account.name}</span>
         <span className={s.caption}>{accountKindLabel(account.kind, account.authServer)}</span>

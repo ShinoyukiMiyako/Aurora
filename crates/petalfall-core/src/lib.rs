@@ -78,6 +78,7 @@ pub mod session;
 mod sources;
 pub mod starter;
 pub mod template;
+pub mod ui_shape;
 pub mod update_prefs;
 pub mod updates;
 pub mod versions;
@@ -143,6 +144,7 @@ pub use starter::{
     starter_table,
 };
 pub use template::{TEMPLATE_FILES, TemplateFile, TemplateInfo, TemplateOutcome, TemplateSkip};
+pub use ui_shape::{MAX_RECENT_CARDS, UiShape, UiShapePatch};
 pub use updates::{ModChangelog, UpdateCandidate};
 pub use world_backup::{
     AutoBackupOutcome, BackupOutcome, ExportOutcome, RestoreOutcome, WorldBackup, WorldBackupList,

@@ -273,7 +273,8 @@
  * （靠折行裁掉的话，游玩时长涨一位就可能让某一项一下子出现或消失）。最宽写法：「11 个月前」占满预留的 4.4em，
  * 「读不到」3em，四位 Mod 数、三位存档数（每位按 0.6em 算），加上每项 16px 图标与 4px 间距、三处 12px 列距，约 255px；
  * 三项约 202px，常规档刚过分档线时最窄的卡也排得下。容器查询的条件里不能用自定义属性，阈值只能写字面值。
- * 收起只是视觉上的（与 .srOnly 同法，绝对定位不占行内位置）：读屏照旧读到第四项，不用 display: none 把它移出无障碍树。
+ * 收起只是视觉上的（与全局的 sk-sr-only 同一套声明，绝对定位不占行内位置）：读屏照旧读到第四项，不用 display: none 把它移出无障碍树。
+ * 条件规则作用在既有的列表项上，套不了类名，所以照抄一份。
  */
 @container (width < 256px) {
   .stats > li:nth-child(n + 4) {
@@ -286,8 +287,29 @@
   }
 }
 
+/*
+ * 损坏原因占统计行的位置、与它同高同上边距：一行字，放不下时省略。卡片按所在行的高度拉伸，损坏卡要是高出一截，
+ * 它跨行、出现或消失时同一行的卡片和贴底的底栏会一帧变高变矮（让位只补位置，不补尺寸）。
+ * 浮在标题按钮的整卡覆盖层之上，悬停才看得到被省略的全文；只占文字的宽度，旁边的空白处照样点开详情。
+ */
 .broken {
-  margin-top: var(--sk-space-8);
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-4);
+  width: fit-content;
+  max-width: 100%;
+  height: var(--sk-lh-caption);
+  margin: var(--sk-space-8) 0 0;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+}
+
+.brokenIcon {
+  flex: none;
+  color: var(--sk-warn);
 }
 
 /* ---------------------------------------------------------------- 底栏 */
@@ -495,14 +517,4 @@
   color: var(--sk-text-2);
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-}
-
-/* 只给读屏的加载说明：骨架层整层 aria-hidden，说明放在它外面 */
-.srOnly {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
 }

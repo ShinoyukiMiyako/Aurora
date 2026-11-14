@@ -1,6 +1,6 @@
 // 新建实例流程的文案。加载器名、名称校验错误、通知标题这类跨处共用的从 copy/flows 引用。
 
-import { joinMixed, LOADER_NAME } from "../../copy/flows";
+import { joinMixed, LOADER_NAME, SLOW_LOADING_HINT } from "../../copy/flows";
 import type { ReleaseType } from "../../domain/adapt";
 import { formatBytes, formatRelative } from "../../domain/format";
 import type { LoaderKind } from "../../domain/types";
@@ -77,6 +77,7 @@ export const CREATE_COPY = {
     noMatch: (query: string) => `没有叫「${query}」的版本`,
     loadError: "拉不到版本列表",
     loadingLabel: "正在读取版本列表",
+    slowLoadingLabel: `正在读取版本列表，${SLOW_LOADING_HINT}`,
   },
 
   loader: {

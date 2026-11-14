@@ -24,6 +24,7 @@ import { Loadable } from "../../ui/Loadable";
 import { EntranceBlock, numberEntrance, Page, useEntranceIndex } from "../../ui/Page";
 import { TabPanel } from "../../ui/Tabs";
 import { Spinner } from "../../art/Spinner";
+import { tabStep } from "../instance/model";
 import { PLATFORM_LABEL, SEARCH_COPY } from "./copy";
 import { ResourceDetail, type DetailTarget } from "./detail/ResourceDetail";
 import styles from "./discover.module.css";
@@ -161,7 +162,7 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
   const [panelFrom, setPanelFrom] = useState<PanelFrom | undefined>(undefined);
   if (filters.kind !== shownKind) {
     setShownKind(filters.kind);
-    setPanelFrom({ axis: "x", dir: DISCOVER_KINDS.indexOf(filters.kind) > DISCOVER_KINDS.indexOf(shownKind) ? 1 : -1 });
+    setPanelFrom({ axis: "x", dir: tabStep(DISCOVER_KINDS, shownKind, filters.kind) });
   }
 
   const setKind = (next: DiscoverKind) => {

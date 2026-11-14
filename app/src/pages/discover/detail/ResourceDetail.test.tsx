@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
+import { MotionConfig } from "framer-motion";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../../art/illustrations/test-canvas";
@@ -12,7 +13,7 @@ import { OverlayRoot } from "../../../shell/overlay";
 import { ShellProvider } from "../../../shell/shell";
 import { LauncherProvider } from "../../../state/launcher";
 import type { InstanceMatch, ModVersionList, ProjectDetail } from "../../../state/queries/discover";
-import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
+import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../../test/fake-bridge";
 import { bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle, type Deferred } from "../../../test/launcher";
 import { DETAIL_COPY } from "../copy";
@@ -22,6 +23,30 @@ import { ResourceDetail, type DetailTarget } from "./ResourceDetail";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../../ipc/bridge", async (orig) => (await import("../../../test/fake-bridge")).fakeBridge(await orig(), ipc));
+// 此刻挂着让位的容器：jsdom 不做布局，让位本身在这里测不了，只核对挂在了哪里、摘下时有没有停；挂载照常交给真实现
+const reflowing = vi.hoisted(() => new Set<Element>());
+vi.mock("../../../lib/reflow", async (orig) => {
+  const real = await orig<typeof import("../../../lib/reflow")>();
+  const { useCallback } = await import("react");
+  return {
+    ...real,
+    useReflow: <T extends HTMLElement>(spring?: Parameters<typeof real.useReflow>[0]) => {
+      const ref = real.useReflow<T>(spring);
+      return useCallback(
+        (el: T | null) => {
+          if (el === null) return;
+          reflowing.add(el);
+          const stop = ref(el);
+          return () => {
+            reflowing.delete(el);
+            if (typeof stop === "function") stop();
+          };
+        },
+        [ref],
+      );
+    },
+  };
+});
 
 const CF_ID = "394468";
 
@@ -70,14 +95,16 @@ const flush = () =>
     await settle();
   });
 
-async function mount(detailTarget: DetailTarget = TARGET) {
+async function mount(detailTarget: DetailTarget = TARGET, reducedMotion: "always" | "never" = "never") {
   view = render(
-    <LauncherProvider>
-      <ShellProvider>
-        <ResourceDetail target={detailTarget} onClose={() => undefined} fitInstance={null} online />
-        <OverlayRoot />
-      </ShellProvider>
-    </LauncherProvider>,
+    <MotionConfig reducedMotion={reducedMotion}>
+      <LauncherProvider>
+        <ShellProvider>
+          <ResourceDetail target={detailTarget} onClose={() => undefined} fitInstance={null} online />
+          <OverlayRoot />
+        </ShellProvider>
+      </LauncherProvider>
+    </MotionConfig>,
   );
   await flush();
 }
@@ -113,11 +140,27 @@ function liveText(): string {
 }
 
 /**
- * 文字恰为 text 的按钮（主按钮的文案槽只把当前文案写进文字内容）。骨架里的（aria-hidden）不算：
+ * 按钮上显示的文案。主按钮的文案槽（LabelSlot）把全部候选叠在同一格，文字内容是几条拼起来的，
+ * 看得见的只有标着 data-current 的那条。
+ */
+function labelOf(button: HTMLButtonElement): string | null {
+  const current = button.querySelector("[data-current]");
+  return current === null ? button.textContent : current.textContent;
+}
+
+/** 主按钮文案槽里叠着的全部候选，按 DOM 先后；宽度取其中最宽的那条。 */
+function slotOptions(button: HTMLButtonElement): (string | null)[] {
+  const current = button.querySelector("[data-current]");
+  if (current === null || current.parentElement === null) throw new Error("按钮里没有文案槽");
+  return [...current.parentElement.children].map((option) => option.textContent);
+}
+
+/**
+ * 显示的文案恰为 text 的按钮。骨架里的（aria-hidden）不算：
  * 骨架换成内容时叠在上面淡出，jsdom 不出帧，它会一直留着。
  */
 function buttonsByText(text: string): HTMLButtonElement[] {
-  return [...dialog().querySelectorAll<HTMLButtonElement>("button")].filter((b) => b.textContent === text && b.closest('[aria-hidden="true"]') === null);
+  return [...dialog().querySelectorAll<HTMLButtonElement>("button")].filter((b) => labelOf(b) === text && b.closest('[aria-hidden="true"]') === null);
 }
 
 const heroTitle = () => {
@@ -158,9 +201,11 @@ beforeEach(() => {
   ipc.overrides.set("plan_install", () => ({ items: [], skipped: [] }));
 });
 
-afterEach(() => {
+// 有用例在假时钟下逐帧走：先卸载、再排空帧循环、再换回真实计时器，旧时钟上排着的那一帧不落进下一个用例
+afterEach(async () => {
   view?.unmount();
   view = undefined;
+  await drainFrames();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -557,7 +602,7 @@ describe("资源详情：加载占位", () => {
 
   /** 底栏里的按钮（页脚挂载点里的）：文字与是否禁用。 */
   const footerButtons = () =>
-    [...dialog().querySelectorAll<HTMLButtonElement>("button")].filter((b) => b.closest(`.${styles.footerHost}`) !== null).map((b) => [b.textContent, b.disabled] as const);
+    [...dialog().querySelectorAll<HTMLButtonElement>("button")].filter((b) => b.closest(`.${styles.footerHost}`) !== null).map((b) => [labelOf(b), b.disabled] as const);
 
   it("详情没到时：骨架照正文的结构占位（头图、5 格统计条、标签行），300 ms 内只占位不现身；底栏照安装面板占好取消与主按钮", async () => {
     await mount(SINGLE);
@@ -570,7 +615,7 @@ describe("资源详情：加载占位", () => {
       ["安装", true],
     ]);
     // 主按钮按最长的「安装到 n 个实例」占宽（两个实例）：详情到达后面板的主按钮也是这个宽度
-    expect(dialog().querySelector(`.${styles.installLabel}`)?.getAttribute("data-widest")).toBe("安装到 2 个实例");
+    expect(buttonsByText("安装").map(slotOptions)).toEqual([["安装", "安装到 2 个实例"]]);
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(LOADING_DELAY_MS);
@@ -589,9 +634,8 @@ describe("资源详情：加载占位", () => {
     });
     expect(heroTitle()).toBe("Sodium");
     // 占位的底栏撤下，换成面板自己的：同样是取消与主按钮，只此一份
-    expect(buttonsByText("安装")).toHaveLength(1);
+    expect(buttonsByText("安装").map(slotOptions)).toEqual([["安装", "安装到 2 个实例"]]);
     expect(buttonsByText("取消")).toHaveLength(1);
-    expect(dialog().querySelector(`.${styles.installLabel}`)?.getAttribute("data-widest")).toBe("安装到 2 个实例");
   });
 
   it("头图上的关闭不在对读屏隐藏的骨架层里，等待期就能用；详情到达后还是同一个按钮，焦点不丢", async () => {
@@ -627,19 +671,24 @@ describe("资源详情：加载占位", () => {
 describe("资源详情：安装面板", () => {
   const SINGLE: DetailTarget = { platform: "modrinth", projectId: "AANobbMI", sources: [], listedType: "mod" };
 
+  /** 底栏里带文案槽的那颗按钮就是安装主按钮。 */
   function primary(): HTMLButtonElement {
-    const label = dialog().querySelector(`.${styles.footerHost} .${styles.installLabel}`);
-    const button = label === null ? null : label.closest("button");
-    if (button === null) throw new Error("底栏没有安装主按钮");
-    return button;
+    const found = [...dialog().querySelectorAll<HTMLButtonElement>(`.${styles.footerHost} button`)].filter((b) => b.querySelector("[data-current]") !== null);
+    if (found.length !== 1) throw new Error(`底栏应只有一颗安装主按钮，实际有 ${found.length} 颗`);
+    return found[0];
   }
 
   it("主按钮的文案随勾选数换，占宽始终是最长的一条", async () => {
     await mount(SINGLE);
-    expect(primary().textContent).toBe("安装");
+    const button = primary();
+    // 文案槽里始终叠着最长的「安装到 2 个实例」：只勾一个时它在槽里占宽，勾满两个时它就是当前文案
+    expect([labelOf(button), slotOptions(button)]).toEqual(["安装", ["安装", "安装到 2 个实例"]]);
     act(() => target("创造").click());
-    expect(primary().textContent).toBe("安装到 2 个实例");
-    expect(primary().querySelector(`.${styles.installLabel}`)?.getAttribute("data-widest")).toBe("安装到 2 个实例");
+    expect([labelOf(button), slotOptions(button)]).toEqual(["安装到 2 个实例", ["安装到 2 个实例"]]);
+    // 同一颗按钮换字，不重挂
+    expect(primary()).toBe(button);
+    act(() => target("创造").click());
+    expect([labelOf(button), slotOptions(button)]).toEqual(["安装", ["安装", "安装到 2 个实例"]]);
   });
 
   it("换版本后新矩阵到达前沿用上一份判定：勾选与判定不先变回「正在判断」，这段时间不能安装，等得久了淡下去", async () => {
@@ -1040,26 +1089,171 @@ describe("资源详情：前置层", () => {
   });
 });
 
-describe("资源详情：标签面板", () => {
-  it("弹窗打开时面板不另播入场，跟着弹窗与加载层一起出现；换标签后新面板照常从下方上移淡入", async () => {
+describe("资源详情：合并卡点进前置再返回", () => {
+  const DEP_ID = "P7lTUWxE";
+  const dependency = { platform: "modrinth" as const, project_id: DEP_ID, title: "Fabric API", icon_url: null, author: "作者", latest_version: "0.92.2" };
+
+  beforeEach(() => {
+    ipc.overrides.set("project_detail", (args: IpcArgs) => {
+      if (args.projectId === DEP_ID) return detail("modrinth", DEP_ID, "Fabric API");
+      if (args.platform === "curseforge") return curseforge.promise;
+      return { ...detail("modrinth", "AANobbMI", "Sodium"), dependencies: [dependency] };
+    });
+  });
+
+  const checkedSources = () => [radio("Modrinth").getAttribute("aria-checked"), radio("CurseForge").getAttribute("aria-checked")];
+
+  async function intoDependencyAndBack(backLabel: string) {
+    const dep = dialog().querySelector<HTMLButtonElement>('button[aria-label="查看前置 Fabric API"]');
+    if (dep === null) throw new Error("介绍里没有前置");
+    act(() => dep.click());
+    await flush();
+    expect(heroTitle()).toBe("Fabric API");
+    const back = buttonsByText(backLabel);
+    expect(back).toHaveLength(1);
+    act(() => back[0].click());
+    await flush();
+  }
+
+  it("切到 CurseForge 后点进前置再返回，仍看 CurseForge 那份；再切回 Modrinth 进出一次，回来的是 Modrinth", async () => {
+    await mount();
+    act(() => radio("CurseForge").click());
+    await act(async () => {
+      curseforge.resolve({ ...detail("curseforge", CF_ID, "Sodium（CurseForge）"), dependencies: [dependency] });
+      await settle();
+    });
+    expect(heroTitle()).toBe("Sodium（CurseForge）");
+
+    await intoDependencyAndBack("返回 Sodium（CurseForge）");
+    expect(heroTitle()).toBe("Sodium（CurseForge）");
+    expect(checkedSources()).toEqual(["false", "true"]);
+    // CurseForge 那份还在缓存里：返回时直接换上，不再请求，也不去取 Modrinth 那份
+    expect(callsOf(ipc, "project_detail")).toEqual([
+      { platform: "modrinth", projectId: "AANobbMI" },
+      { platform: "curseforge", projectId: CF_ID },
+      { platform: "modrinth", projectId: DEP_ID },
+    ]);
+
+    act(() => radio("Modrinth").click());
+    await flush();
+    expect(heroTitle()).toBe("Sodium");
+    await intoDependencyAndBack("返回 Sodium");
+    expect(heroTitle()).toBe("Sodium");
+    expect(checkedSources()).toEqual(["true", "false"]);
+  });
+
+  it("没切换过来源时点进前置再返回，照旧是默认的 Modrinth", async () => {
+    await mount();
+    await intoDependencyAndBack("返回 Sodium");
+    expect(heroTitle()).toBe("Sodium");
+    expect(checkedSources()).toEqual(["true", "false"]);
+  });
+});
+
+describe("资源详情：滚动条槽位", () => {
+  it("弹窗主体常驻滚动条槽位：介绍与版本高矮不一，换标签时主体在溢出与不溢出之间来回，主体还是同一个、槽位一直留着", async () => {
     await mount({ platform: "modrinth", projectId: "AANobbMI", sources: [], listedType: "mod" });
-    const panel = () => {
-      const found = [...dialog().querySelectorAll<HTMLElement>('[role="tabpanel"]')];
-      if (found.length !== 1) throw new Error(`应只有一个标签面板，实际有 ${found.length} 个`);
-      return found[0];
+    const body = () => {
+      const layer = dialog().querySelector<HTMLElement>("[data-layer-dir]");
+      const el = layer === null ? null : layer.parentElement;
+      if (el === null) throw new Error("详情层不在弹窗主体里");
+      return el;
     };
+    const intro = body();
+    expect(intro.hasAttribute("data-gutter")).toBe(true);
+
+    const versionsTab = [...dialog().querySelectorAll<HTMLElement>('[role="tab"]')].find((t) => t.textContent === "版本");
+    if (versionsTab === undefined) throw new Error("没有版本标签");
+    act(() => versionsTab.click());
+    await flush();
+    expect(body()).toBe(intro);
+    expect(body().hasAttribute("data-gutter")).toBe(true);
+  });
+});
+
+describe("资源详情：标签面板", () => {
+  const SINGLE: DetailTarget = { platform: "modrinth", projectId: "AANobbMI", sources: [], listedType: "mod" };
+  const panel = () => {
+    const found = [...dialog().querySelectorAll<HTMLElement>('[role="tabpanel"]')];
+    if (found.length !== 1) throw new Error(`应只有一个标签面板，实际有 ${found.length} 个`);
+    return found[0];
+  };
+  const tab = (label: string) => {
+    const found = [...dialog().querySelectorAll<HTMLElement>('[role="tab"]')].find((t) => t.textContent === label);
+    if (found === undefined) throw new Error(`没有「${label}」标签`);
+    return found;
+  };
+
+  it("弹窗打开时面板不另播入场，跟着弹窗与加载层一起出现；换标签后新面板从它在标签条上的那一侧横移淡入", async () => {
+    await mount(SINGLE);
     const intro = panel();
     expect(intro.id).toMatch(/-panel-intro$/);
     expect(intro.style.opacity).toBe("1");
     expect(intro.style.transform).toBe("none");
 
-    const versionsTab = [...dialog().querySelectorAll<HTMLElement>('[role="tab"]')].find((t) => t.textContent === "版本");
-    if (versionsTab === undefined) throw new Error("没有版本标签");
-    act(() => versionsTab.click());
+    // 版本排在介绍右边：从右边来
+    act(() => tab("版本").click());
     const versions = panel();
     expect(versions.id).toMatch(/-panel-versions$/);
     expect(versions.style.opacity).toBe("0");
-    expect(versions.style.transform).toBe("translateY(6px)");
+    expect(versions.style.transform).toBe("translateX(8px)");
+
+    // 回到左边的介绍：从左边来
+    act(() => tab("介绍").click());
+    const back = panel();
+    expect(back.id).toMatch(/-panel-intro$/);
+    expect(back).not.toBe(intro);
+    expect(back.style.opacity).toBe("0");
+    expect(back.style.transform).toBe("translateX(-8px)");
+  });
+
+  /** 换到版本标签后走几帧：横移这时还在半路（不减少动画时），透明度也还没到 1。 */
+  async function switchedMidway(reducedMotion: "always" | "never") {
+    await mount(SINGLE, reducedMotion);
+    act(() => tab("版本").click());
+    await stepFrames(3);
+    const versions = panel();
+    const opacity = Number(versions.style.opacity);
+    expect(opacity).toBeGreaterThan(0);
+    expect(opacity).toBeLessThan(1);
+    return versions.style.transform;
+  }
+
+  it("不减少动画时，换标签几帧后新面板还在从右侧横移过来的半路上", async () => {
+    const shift = /^translateX\((.+)px\)$/.exec(await switchedMidway("never"));
+    if (shift === null) throw new Error("新面板没有横移");
+    expect(Number(shift[1])).toBeGreaterThan(0);
+    expect(Number(shift[1])).toBeLessThan(8);
+  });
+
+  it("减少动画时换标签只淡入：同一时刻横移已一步到位，透明度照常过渡", async () => {
+    expect(await switchedMidway("always")).toBe("none");
+  });
+});
+
+describe("资源详情：正文两栏的让位", () => {
+  const SINGLE: DetailTarget = { platform: "modrinth", projectId: "AANobbMI", sources: [], listedType: "mod" };
+  const column = (className: string) => {
+    const el = dialog().querySelector<HTMLElement>(`.${className}`);
+    if (el === null) throw new Error(`弹窗里没有 .${className}`);
+    return el;
+  };
+
+  it("紧凑档两栏叠成一列：右栏排在左栏下面，左栏换标签变高变矮时右栏从原位置滑过去，两栏本身是让位项", async () => {
+    // jsdom 的窗口宽 1024，按外壳的分档是紧凑档
+    await mount(SINGLE);
+    const grid = column(styles.bodyGrid);
+    expect(reflowing.has(grid)).toBe(true);
+    expect([...grid.children]).toEqual([column(styles.mainColumn), column(styles.sideColumn)]);
+    // 左栏里的子项照旧各自让位
+    expect(reflowing.has(column(styles.mainColumn))).toBe(true);
+  });
+
+  it("常规档两栏并排、右栏吸顶：正文网格不挂让位，吸住的右栏随滚动换位置，挂上会被当成位移从滚动前的位置滑回来", async () => {
+    vi.stubGlobal("innerWidth", 1440);
+    await mount(SINGLE);
+    expect(reflowing.has(column(styles.bodyGrid))).toBe(false);
+    expect(reflowing.has(column(styles.mainColumn))).toBe(true);
   });
 });
 

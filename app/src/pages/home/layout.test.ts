@@ -93,6 +93,26 @@ describe("样式表里的动效约定", () => {
     expect(declaration(reduced, "opacity")).toBe("0.85");
   });
 
+  it("近 7 天柱的选中环画在柱槽里常驻的 ::after 叠层上、只过渡透明度：柱槽自己裁切，环内收 2px，选中切换不碰阴影与描边", () => {
+    // 不落在伪元素上的选中规则一条都不碰 box-shadow、outline、border
+    const picked = [...home.matchAll(/([^{}]+)\{([^}]*)\}/g)].filter((m) => m[1].split(",").some((sel) => sel.includes("[data-picked]") && !sel.includes("::")));
+    expect(picked.length).toBeGreaterThan(0);
+    for (const [, , body] of picked) expect(body).not.toMatch(/box-shadow|outline|border/);
+
+    const ring = block(home, ".barTrack::after");
+    expect(declaration(ring, "position")).toBe("absolute");
+    expect(declaration(ring, "inset")).toBe("0");
+    expect(declaration(ring, "border-radius")).toBe("inherit");
+    expect(declaration(ring, "box-shadow")).toBe("var(--home-picked-ring)");
+    expect(declaration(ring, "opacity")).toBe("0");
+    expect(declaration(ring, "pointer-events")).toBe("none");
+    expect(declaration(ring, "transition")).toBe("opacity var(--sk-dur-hover) var(--sk-ease)");
+    expect(declaration(block(home, ".bar[data-picked] .barTrack::after"), "opacity")).toBe("1");
+    // 外 1px 强调色、内 1px 表面色：填充是强调色渐变时也分得出边
+    expect(declaration(block(home, ".home"), "--home-picked-ring")).toBe("inset 0 0 0 1px var(--sk-accent-strong), inset 0 0 0 2px var(--sk-surface)");
+    expect(declaration(block(home, ".barTrack"), "overflow")).toBe("hidden");
+  });
+
   it("柱子数值还没到时透明，到了按淡入时长过渡", () => {
     expect(declaration(block(home, ".barValue[data-empty]"), "opacity")).toBe("0");
     expect(declaration(block(home, ".barValue"), "transition")).toMatch(/opacity var\(--sk-dur-in\) var\(--sk-ease-out\)/);
@@ -111,6 +131,18 @@ describe("样式表里的动效约定", () => {
       expect(declaration(body, "flex")).toBe("1");
       expect(declaration(body, "flex-direction")).toBe("column");
     }
+  });
+
+  it("大卡慢提示绝对定位在骨架顶行标签与按钮之间那一格：不占流内高度，出现时标题区与胶囊不被往上顶", () => {
+    const hint = block(home, ".heroSlowHint");
+    expect(declaration(hint, "position")).toBe("absolute");
+    // 上沿与左右的内边距取大卡内容区自己的，标签、按钮两侧的间距取顶行的 gap
+    const [padTop, padSide] = declaration(block(home, ".heroInner"), "padding").split(" ");
+    const gap = declaration(block(home, ".heroTop"), "gap");
+    expect(declaration(hint, "top")).toBe(padTop);
+    expect(declaration(hint, "left")).toBe(`calc(${padSide} + var(--hero-hint-start) + ${gap})`);
+    expect(declaration(hint, "right")).toBe(`calc(${padSide} + var(--hero-hint-end) + ${gap})`);
+    expect(declaration(hint, "height")).toBe("var(--hero-hint-height)");
   });
 
   it("问候卡名字一行与上下的间距是内边距：外边距会穿过加载区与出没动画的层折叠，退场层抽成绝对定位时错开", () => {

@@ -32,6 +32,7 @@ use crate::data_format::{DATA_FORMAT, check_data_root};
 use crate::error::Result;
 use crate::event::{CoreEvent, EventSink};
 use crate::gpu::{GpuPreferenceStore, RegistryGpuPreferences};
+use crate::ui_shape::{UiShape, UiShapePatch};
 
 /// 下载进度事件的最小间隔。采样器每 100 ms 推一次快照，逐文件完成时还会额外推一次；
 /// 上千个小文件的资源批次若逐条转发，事件通道与前端 IPC 都会被灌满，按此间隔只留最新快照。
@@ -264,6 +265,16 @@ impl Petalfall {
     pub fn set_appearance(&mut self, patch: AppearancePatch) -> Appearance {
         self.config.appearance.apply(patch);
         self.config.appearance
+    }
+
+    /// 前端上次记下的界面形状。
+    pub fn ui_shape(&self) -> UiShape {
+        self.config.ui_shape
+    }
+
+    /// 合并一次界面形状写回，返回形状有没有变；落盘仍需调用 [`Petalfall::save_config`]，没变时不必落盘。
+    pub fn set_ui_shape(&mut self, patch: UiShapePatch) -> bool {
+        self.config.ui_shape.apply(patch)
     }
 
     /// 只读访问当前配置。
@@ -876,6 +887,29 @@ mod tests {
         assert!(merged.petals);
         assert_eq!(petalfall.config().appearance, merged);
         assert_eq!(petalfall.appearance(), merged);
+    }
+
+    #[test]
+    fn set_ui_shape_merges_patch_into_config_and_reports_change() {
+        let mut petalfall = test_petalfall();
+        assert!(!petalfall.set_ui_shape(UiShapePatch {
+            recent_cards: Some(0),
+            repair_banner: Some(false),
+        }));
+        assert!(petalfall.set_ui_shape(UiShapePatch {
+            recent_cards: Some(5),
+            ..UiShapePatch::default()
+        }));
+        let expected = UiShape {
+            recent_cards: 5,
+            repair_banner: false,
+        };
+        assert_eq!(petalfall.ui_shape(), expected);
+        assert_eq!(petalfall.config().ui_shape, expected, "写进了配置本身");
+        assert!(!petalfall.set_ui_shape(UiShapePatch {
+            recent_cards: Some(5),
+            ..UiShapePatch::default()
+        }));
     }
 
     /// 快照挂令牌后装配的下载池会响应取消；常驻门面不受影响。

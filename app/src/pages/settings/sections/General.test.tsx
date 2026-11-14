@@ -20,6 +20,31 @@ import SettingsPage from "../index";
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../../ipc/bridge", async (orig) => (await import("../../../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
+// 此刻挂着让位的容器：jsdom 不做布局，让位本身在这里测不了，只核对挂在了哪一行；挂载照常交给真实现
+const reflowing = vi.hoisted(() => new Set<Element>());
+vi.mock("../../../lib/reflow", async (orig) => {
+  const real = await orig<typeof import("../../../lib/reflow")>();
+  const { useCallback } = await import("react");
+  return {
+    ...real,
+    useReflow: <T extends HTMLElement>(spring?: Parameters<typeof real.useReflow>[0]) => {
+      const ref = real.useReflow<T>(spring);
+      return useCallback(
+        (el: T | null) => {
+          if (el === null) return;
+          reflowing.add(el);
+          const stop = ref(el);
+          return () => {
+            reflowing.delete(el);
+            if (typeof stop === "function") stop();
+          };
+        },
+        [ref],
+      );
+    },
+  };
+});
+
 const renders = vi.hoisted(() => ({ SettingRow: 0 }));
 
 // 设置行换成计数外壳：分区里的每个设置行组件只要重渲染，都会带着新的 props 重渲染它的 SettingRow。
@@ -249,6 +274,25 @@ describe("设置页常规分区：游戏启动后关闭与自动备份", () => {
     config = configDto({ after_launch: "close", world_backup: { auto: false, keep_per_world: 5, max_total_gb: 20 } });
     await mountGeneral();
     expect(page()).not.toContain(NOTE);
+  });
+
+  it("「游戏启动后」的说明随选项变高变矮：这一行开着让位，刚点的分段控件从旧位置滑到新位置，不随竖向居中一帧挪开；说明不变的下一行不开", async () => {
+    await mountGeneral();
+    /** 标题为 title 的设置行：行 > 标题说明列 > 标题。 */
+    const row = (title: string) => {
+      const heading = [...document.querySelectorAll<HTMLElement>('[id$="-title"]')].find((el) => el.textContent === title);
+      const found = heading?.parentElement?.parentElement;
+      if (found === undefined || found === null) throw new Error(`找不到设置行「${title}」`);
+      return found;
+    };
+    const afterLaunch = row("游戏启动后");
+    expect(afterLaunch.querySelector('[role="radiogroup"]')?.getAttribute("aria-label")).toBe("游戏启动后");
+    expect(reflowing.has(afterLaunch)).toBe(true);
+    expect(reflowing.has(row("跳过首次无障碍引导"))).toBe(false);
+    // 换到会多出提醒行的选项后让位仍挂在同一行上
+    await choose(`关闭${APP_NAME}`);
+    expect(page()).toContain(NOTE);
+    expect(reflowing.has(row("游戏启动后"))).toBe(true);
   });
 });
 

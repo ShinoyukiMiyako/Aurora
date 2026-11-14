@@ -111,10 +111,14 @@ export interface FakeAnimation {
   readonly options: KeyframeAnimationOptions;
   /** 用例可以直接改它，模拟动画播到一半：组件被打断时按它算出此刻的值。 */
   currentTime: number | null;
+  playState: AnimationPlayState;
   cancelled: boolean;
   finished: boolean;
   onfinish: (() => void) | null;
   cancel(): void;
+  /** 暂停不挪时间（让位从静止起步时先停在起点、隔几帧再播）。 */
+  pause(): void;
+  play(): void;
 }
 
 export interface SpanAnimationsStub {
@@ -149,12 +153,20 @@ export function stubSpanAnimations(): SpanAnimationsStub {
         frames,
         options,
         currentTime: 0,
+        playState: "running",
         cancelled: false,
         finished: false,
         onfinish: null,
         cancel() {
           this.cancelled = true;
+          this.playState = "idle";
           this.currentTime = null;
+        },
+        pause() {
+          this.playState = "paused";
+        },
+        play() {
+          this.playState = "running";
         },
       };
       played.push(animation);
@@ -172,6 +184,7 @@ export function stubSpanAnimations(): SpanAnimationsStub {
   const finish = (animation: FakeAnimation) =>
     act(() => {
       animation.currentTime = Number(animation.options.duration);
+      animation.playState = "finished";
       animation.finished = true;
       animation.onfinish?.();
     });

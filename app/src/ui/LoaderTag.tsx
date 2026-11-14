@@ -36,12 +36,14 @@ export interface LoaderTagProps {
   version?: string | null;
   size?: TagSize;
   className?: string;
+  /** 包在外面的 Tooltip 经 cloneElement 写进来，原样交给 Tag；不往下传的话，气泡在无障碍树里与标签没有关联。 */
+  "aria-describedby"?: string;
 }
 
-export function LoaderTag({ loader, version, size = "md", className }: LoaderTagProps) {
+export function LoaderTag({ loader, version, size = "md", className, "aria-describedby": describedBy }: LoaderTagProps) {
   if (version === "") throw new Error("LoaderTag 的版本号不能是空字符串；没有版本时不传");
   return (
-    <Tag tone="outline" size={size} className={className}>
+    <Tag tone="outline" size={size} className={className} aria-describedby={describedBy}>
       <LoaderDot loader={loader} />
       <span className={styles.name}>{LOADER_LABEL[loader]}</span>
       {version !== undefined && version !== null && <span className={styles.version}>{version}</span>}

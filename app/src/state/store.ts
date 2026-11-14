@@ -320,8 +320,9 @@ interface RawState {
   tasks: Task[];
   taskMeta: Readonly<Record<string, TaskMeta>>;
   /**
-   * 已结束、但这次结束触发的那次重扫还没落定的新建与导入任务。它们的占位项留到重扫落定：否则实例先从列表里
-   * 消失，外壳随即把指向它的实例页路由剪掉，等重扫回来用户已经被送回了上一页。
+   * 已结束、但这次结束触发的那次重扫还没落定的任务：新建与导入（成功或失败），以及成功的补全。新建与导入的占位项留到
+   * 重扫落定：否则实例先从列表里消失，外壳随即把指向它的实例页路由剪掉，等重扫回来用户已经被送回了上一页。成功的
+   * 新建、导入与补全，实例在这一段里照旧按安装中派生：手里的列表是任务结束前扫的，原先损坏的会被说成损坏。
    */
   landing: readonly string[];
   /** 本次运行里失败、用户还没看过的尝试（attemptTaskId）。重试后再失败是新的一次尝试，重新算未看。 */
@@ -345,9 +346,19 @@ export interface LauncherState {
   selectedInstanceId: string | null;
   /** 侧栏固定的实例，按顺序；末尾含安装中、入队时侧栏还有空位而自动固定的新实例。 */
   sidebarPins: string[];
+  /**
+   * sidebarPins 里只在派生状态里固定、还没写进固定列表的那几项：末尾安装中自动固定的新实例，后端要等实例目录装好
+   * 才认它们，落地时才写进去。拖动排序只越过它们时，写下去的内容与现状一样。内容没变时沿用同一份数组。
+   */
+  readonly unsavedPins: readonly string[];
   firstRun: boolean | null;
   session: SessionState | null;
   tasks: Task[];
+  /**
+   * 已结束、但结束触发的那次重扫还没落定的任务 id（RawState.landing）：新建与导入不论成败，以及成功的补全。
+   * 「清除已结束」留着它们（tasks 的 clearFinished）。只在有任务进出这一段时换数组，别的变化沿用同一份。
+   */
+  readonly landingTaskIds: readonly string[];
   /**
    * 用户还没看过的失败任务个数：本次运行里失败、此刻仍是失败状态、还没打开过下载快览或进过下载任务页的。
    * 上次关闭时中断的不算，那是用户确认过的。
@@ -1059,6 +1070,7 @@ function applyTaskEffect(base: InstanceSummary, pinned: boolean, effect: TaskEff
 interface InstancesView {
   instances: InstanceSummary[];
   sidebarPins: string[];
+  unsavedPins: string[];
 }
 
 function placeholderOf(meta: Extract<TaskMeta, { type: "create" | "modpack" }>, createdAt: number, pinned: boolean): InstanceSummary {
@@ -1087,6 +1099,7 @@ function placeholderOf(meta: Extract<TaskMeta, { type: "create" | "modpack" }>, 
     dirError: null,
     modCount: null,
     worldCount: null,
+    resourcePackCount: null,
     isolated: null,
     memoryMb: null,
     modpack: null,
@@ -1116,7 +1129,7 @@ class StateDeriver {
   private placeholderCache = new Map<string, { meta: TaskMeta; createdAt: number; pinned: boolean; value: InstanceSummary }>();
 
   derive(raw: RawState): LauncherState {
-    const { instances, sidebarPins } = this.instancesView(raw);
+    const { instances, sidebarPins, unsavedPins } = this.instancesView(raw);
     const selected = raw.settings === null ? null : raw.settings.selectedVersion;
     return {
       status: raw.status,
@@ -1126,9 +1139,11 @@ class StateDeriver {
       instances,
       selectedInstanceId: selected !== null && instances.some((i) => i.id === selected) ? selected : null,
       sidebarPins,
+      unsavedPins,
       firstRun: raw.firstRun,
       session: raw.session,
       tasks: raw.tasks,
+      landingTaskIds: raw.landing,
       unseenFailures: countUnseen(raw.tasks, raw.unseenFailures),
       toasts: raw.toasts.items,
       login: raw.login,
@@ -1158,11 +1173,12 @@ class StateDeriver {
     // 内容没变就连数组一起复用：例如一个下载任务结束、另一个开始，但它们挂的实例不变
     const prev = this.lastView;
     this.lastView =
-      prev !== null && sameItems(prev.instances, view.instances) && sameItems(prev.sidebarPins, view.sidebarPins)
+      prev !== null && sameItems(prev.instances, view.instances) && sameItems(prev.sidebarPins, view.sidebarPins) && sameItems(prev.unsavedPins, view.unsavedPins)
         ? prev
         : {
             instances: prev !== null && sameItems(prev.instances, view.instances) ? prev.instances : view.instances,
             sidebarPins: prev !== null && sameItems(prev.sidebarPins, view.sidebarPins) ? prev.sidebarPins : view.sidebarPins,
+            unsavedPins: prev !== null && sameItems(prev.unsavedPins, view.unsavedPins) ? prev.unsavedPins : view.unsavedPins,
           };
     return this.lastView;
   }
@@ -1177,6 +1193,14 @@ class StateDeriver {
       if (t.instanceId === null) continue;
       const command = t.spec.command;
       (INSTANCE_TASK_COMMANDS.has(command) ? installing : command === MOVE_TASK_COMMAND ? moving : WORLD_TASK_COMMANDS.has(command) ? backingUp : modifying).add(t.instanceId.toLowerCase());
+      const meta = raw.taskMeta[t.id];
+      if (meta !== undefined && (meta.type === "create" || meta.type === "modpack")) creating.set(meta.name.toLowerCase(), meta);
+    }
+    // 成功的新建、导入与补全在落地重扫落定之前照旧算安装中（见 RawState.landing）；失败的不算：没装成就不再说在装
+    for (const id of raw.landing) {
+      const t = raw.tasks.find((task) => task.id === id);
+      if (t === undefined || t.status !== "done" || t.instanceId === null || !INSTANCE_TASK_COMMANDS.has(t.spec.command)) continue;
+      installing.add(t.instanceId.toLowerCase());
       const meta = raw.taskMeta[t.id];
       if (meta !== undefined && (meta.type === "create" || meta.type === "modpack")) creating.set(meta.name.toLowerCase(), meta);
     }
@@ -1199,6 +1223,7 @@ class StateDeriver {
 
     const known = new Set(instances.map((i) => i.id.toLowerCase()));
     const sidebarPins = [...raw.pins];
+    const unsavedPins: string[] = [];
     const placeholderCache = new Map<string, { meta: TaskMeta; createdAt: number; pinned: boolean; value: InstanceSummary }>();
     const landing = new Set(raw.landing);
     for (const task of raw.tasks) {
@@ -1207,7 +1232,10 @@ class StateDeriver {
       if (meta === undefined || (meta.type !== "create" && meta.type !== "modpack")) continue;
       if (known.has(meta.name.toLowerCase())) continue;
       known.add(meta.name.toLowerCase());
-      if (meta.type === "create" && meta.autoPin && sidebarPins.length < SIDEBAR_PIN_LIMIT && !sidebarPins.includes(meta.name)) sidebarPins.push(meta.name);
+      if (meta.type === "create" && meta.autoPin && sidebarPins.length < SIDEBAR_PIN_LIMIT && !sidebarPins.includes(meta.name)) {
+        sidebarPins.push(meta.name);
+        unsavedPins.push(meta.name);
+      }
       const pinned = sidebarPins.includes(meta.name);
       const cached = this.placeholderCache.get(task.id);
       const value =
@@ -1218,7 +1246,7 @@ class StateDeriver {
       instances.push(value);
     }
     this.placeholderCache = placeholderCache;
-    return { instances, sidebarPins };
+    return { instances, sidebarPins, unsavedPins };
   }
 }
 
@@ -2160,8 +2188,9 @@ export class LauncherStore {
   private onTaskDone(id: string, attempt: number, result: unknown): void {
     const before = this.findTask(id);
     if (before.status !== "running" || before.attempt !== attempt) return;
-    const keep = this.keepsPlaceholder(before);
     const repaired = before.spec.command === "repair_instance" ? before.instanceId : null;
+    // 补全成功没有占位项，也一样记进 landing：落地重扫回来之前实例照旧按安装中派生
+    const keep = this.keepsPlaceholder(before) || (repaired !== null && !this.discardLanding.has(id));
     this.set((raw) => {
       const done = trimHistory(markDone(raw.tasks, id, attempt, Date.now()));
       return { tasks: repaired === null ? done : dropSuperseded(done, repaired), ...(keep ? { landing: [...raw.landing, id] } : {}) };
@@ -2446,7 +2475,8 @@ export class LauncherStore {
       }
       case "repair": {
         const mark = this.renames.length;
-        await this.fetchInstances();
+        // 撤下 landing 与新的列表在同一次更新里：分两次的话中间那一拍实例又按补全前扫的那份画成损坏
+        await this.fetchInstances((raw) => this.withoutLanding(raw, task.id));
         const id = this.renamedSince(strArg(task.spec.args, "id", command), mark);
         // 排在接着启动之前：启动可能停在登录弹窗上不换会话，失败卡留着的话入口只剩再修一次，和修好了对不上
         this.dismissRepairedFailure(id);
@@ -3634,7 +3664,7 @@ export class LauncherStore {
         return retried;
       },
       clearFinishedTasks() {
-        store.set((raw) => ({ tasks: clearFinished(raw.tasks), unseenFailures: [] }));
+        store.set((raw) => ({ tasks: clearFinished(raw.tasks, raw.landing), unseenFailures: [] }));
         store.scheduleJournal();
       },
       markFailuresSeen() {

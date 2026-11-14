@@ -4,7 +4,7 @@
 import { useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type MouseEvent, type MouseEventHandler, type ReactNode, type Ref } from "react";
 import { Icon, type IconName, type IconSize } from "../art/Icon";
 import { Spinner, type SpinnerTone } from "../art/Spinner";
-import { fade, tweenAt, type SpringName } from "../lib/motion";
+import { fade, faceSwap, tweenAt, type SpringName } from "../lib/motion";
 import { elapsedSeconds, playTrack, playTween, scaleTrack } from "../lib/slide";
 import { cx } from "../lib/util";
 import styles from "./Button.module.css";
@@ -25,9 +25,10 @@ const SPINNER_GLYPH = "spinner";
 /** 换上来的内容怎么入场：pop 从 0.6 弹出（换了个图标），tap 从 0.8 收拢（换成加载指示，动作已经开始，不该再抢眼）。 */
 export type GlyphEnter = "pop" | "tap";
 
+// 起点与同一格里换小控件（faceSwap）同一份，两边不各写一遍；弹簧按名字交给 scaleTrack，与 faceSwap 里展开的是同一条
 const GLYPH_ENTER: Readonly<Record<GlyphEnter, { spring: SpringName; from: number }>> = {
-  pop: { spring: "pop", from: 0.6 },
-  tap: { spring: "tap", from: 0.8 },
+  pop: { spring: "pop", from: faceSwap.pop.initial.scale },
+  tap: { spring: "tap", from: faceSwap.tap.initial.scale },
 };
 
 export interface GlyphSlotProps {

@@ -86,6 +86,7 @@ export const HOME_COPY = {
   streakKeep: "继续保持",
   topLoader: "常玩加载器",
   topLoaderShare: (percent: number) => `近 30 天占 ${percent}%`,
+  topLoaderUnknown: "读不到",
   none: "暂无",
   total: "累计时长",
   totalUnknown: "读不到",
